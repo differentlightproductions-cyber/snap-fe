@@ -1,0 +1,72 @@
+Snap FE - Alpha Build 1.1.0
+for the Anbernic RG34XX-SP / RG34XX running Knulli
+
+
+What this is
+------------
+A different menu for your handheld. Knulli still runs everything under the
+hood - emulators, controllers, sound, all of it. Snap FE just replaces the
+EmulationStation menu with a nicer one.
+
+It's a separate program that runs instead of the ES menu - not a fork of
+EmulationStation or Knulli, and it doesn't modify either. It only adds two
+things: a folder (system/snapos) and a boot file (system/custom.sh). It never
+formats or repartitions the card and never touches your ROMs, saves or BIOS.
+
+Nothing gets overwritten. Your games, saves and settings are left alone, and
+you can go back to EmulationStation any time by deleting system/custom.sh.
+
+Still an alpha: it launches RetroArch / libretro games only for now, not every
+system Knulli supports, and the artwork is still being filled in.
+
+
+Installing
+----------
+1. Turn the handheld off and put the Knulli SD card in your computer.
+
+2. Open the drive called SHARE.
+
+3. Copy the "system" and "roms" folders from this zip onto SHARE. If it asks,
+   choose Merge - it only adds files.
+
+4. Eject, put the card back, turn the handheld on.
+
+5. It boots into EmulationStation this one time. Go to PORTS and you'll see:
+
+      Snap FE                        - try it. Quit to come back to ES.
+      Snap FE (Set As Default)       - boot straight into Snap FE from now on
+      Snap FE (Restore EmulationStation) - undo that
+
+6. Run "Snap FE (Set As Default)" and reboot. Done.
+
+
+First run
+---------
+It asks you a few things - which handheld you have, time zone, your city (for
+weather and radio), and where your games are. All of it can be changed later
+in Settings.
+
+First boot can take a minute. That's normal for this chip. It's quick after.
+
+
+Going back to EmulationStation
+------------------------------
+Any one of these:
+  - In Snap FE: Settings > Device > "Switch Back to EmulationStation"
+  - In Knulli's PORTS menu: "Snap FE (Restore EmulationStation)"
+  - On a computer: delete system/custom.sh from SHARE
+
+To remove Snap FE completely, also delete the system/snapos folder and the
+three "Snap FE" files in roms/ports.
+
+
+A few notes
+-----------
+  - No sound? Reboot once more.
+  - Box art: Settings > Account. A free screenscraper.fr login works well.
+    Or drop your own art in system/snapos/boxart.
+  - Music: put mp3/flac/wav/ogg files in a "music" folder on SHARE.
+  - Low battery: Settings > Device has Auto Power Save and Night Mode.
+
+It's an alpha, so expect rough edges. If something breaks, note your Knulli
+version, which handheld, and what you were doing.

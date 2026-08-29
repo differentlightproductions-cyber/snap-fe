@@ -1,0 +1,34 @@
+# build output
+snapos_ui
+snapos_ui.aarch64
+*.o
+*.aarch64
+
+# release zips
+dist/
+
+# local dev state (created at runtime under the repo dir on desktop builds)
+settings.cfg
+activity.dat
+sessions.log
+scrape_status.txt
+ra_check.json*
+*.log
+__pycache__/
+
+# secrets / personal
+*.key
+thegamesdb.key
+_thegamesdb.key
+
+# local test roms / scraped art / music — never commit
+roms/
+boxart/
+music/
+promo/
+
+# editor / OS cruft
+*.swp
+*~
+.DS_Store
+*:Zone.Identifier
