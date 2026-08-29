@@ -1,7 +1,7 @@
 # Snap FE
 
 A frontend (menu / game launcher) for **Knulli** CFW on Anbernic handhelds,
-developed on the RG34XX-SP (Allwinner H700). It runs *instead of* the
+developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
 
