@@ -11,6 +11,25 @@
 
 SNAPOS=/userdata/system/snapos/snapos_ui
 LOADER=/lib/ld-linux-aarch64.so.1
+SNAPOS_CORES=/userdata/system/snapos/cores
+SYSTEM_CORES=/usr/lib/libretro
+CORE_BACKUP=/userdata/system/snapos/core-backup
+
+# Link Play needs newer gpSP/Gambatte serial transports than the stock cores on
+# some Knulli images. Keep the shipped copies on /userdata (persistent), back
+# up the original system cores once, then refresh the writable root overlay on
+# every boot before Snap FE probes or launches them.
+install_link_cores() {
+  [ -d "$SNAPOS_CORES" ] || return 0
+  mkdir -p "$CORE_BACKUP"
+  for core in gpsp_libretro.so gambatte_libretro.so; do
+    [ -s "$SNAPOS_CORES/$core" ] || continue
+    if [ -e "$SYSTEM_CORES/$core" ] && [ ! -e "$CORE_BACKUP/$core" ]; then
+      cp -p "$SYSTEM_CORES/$core" "$CORE_BACKUP/$core"
+    fi
+    install -m 0755 "$SNAPOS_CORES/$core" "$SYSTEM_CORES/$core"
+  done
+}
 
 kill_es() {
   /etc/init.d/S31emulationstation stop >/dev/null 2>&1
@@ -103,12 +122,29 @@ snapfe_hotkeys() {
   # "value 2" autorepeat), so a held Fn + tapped Volume keeps stepping.
   local fn=0
   in_game() { pgrep -x retroarch >/dev/null 2>&1 || pgrep -x retroarch32 >/dev/null 2>&1 || pgrep -x mgba >/dev/null 2>&1; }
+  game_brightness_step() {
+    local delta="$1" desired=/userdata/system/snapos/.brightness-desired cfg=/userdata/system/snapos/settings.cfg
+    local v=200 pct tmp
+    [ -r "$desired" ] && read -r v < "$desired"
+    case "$v" in ''|*[!0-9]*) v=200 ;; esac
+    v=$((v + delta * 2))       # UI and hotkeys both move in exact 5% steps (10/200)
+    [ "$v" -lt 0 ] && v=0
+    [ "$v" -gt 200 ] && v=200
+    printf '%s\n' "$v" > "$desired"
+    /usr/bin/brightness set "$v" >/dev/null 2>&1
+    pct=$((v * 100 / 200))
+    knulli-settings-set display.brightness "$pct" >/dev/null 2>&1
+    if [ -f "$cfg" ]; then
+      tmp="${cfg}.brightness.$$"
+      awk -v p="$pct" 'BEGIN{done=0} /^brightness_pct=/{print "brightness_pct=" p; done=1; next} {print} END{if(!done) print "brightness_pct=" p}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+    fi
+  }
   while read -r ln; do
     case "$ln" in
       *"(KEY_GOTO)"*" value 1"*) fn=1 ;;
       *"(KEY_GOTO)"*" value 0"*) fn=0 ;;
-      *"(KEY_VOLUMEUP)"*" value 1"*)   [ "$fn" = 1 ] && in_game && knulli-brightness + 5 >/dev/null 2>&1 ;;
-      *"(KEY_VOLUMEDOWN)"*" value 1"*) [ "$fn" = 1 ] && in_game && knulli-brightness - 5 >/dev/null 2>&1 ;;
+      *"(KEY_VOLUMEUP)"*" value 1"*)   [ "$fn" = 1 ] && in_game && game_brightness_step 5 ;;
+      *"(KEY_VOLUMEDOWN)"*" value 1"*) [ "$fn" = 1 ] && in_game && game_brightness_step -5 ;;
     esac
   done < <(evtest "$DEV" 2>/dev/null)
 }
@@ -122,6 +158,7 @@ case "$1" in
       kill_es
       hide_screen
       blank_fb
+      install_link_cores
       ( for i in $(seq 1 40); do kill_es; sleep 0.05; done
         for i in $(seq 1 40); do kill_es; sleep 0.25; done ) &
       init_lid

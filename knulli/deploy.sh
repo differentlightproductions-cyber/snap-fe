@@ -21,6 +21,14 @@ find assets -name '*:Zone.Identifier' -delete 2>/dev/null || true
 echo ">> deploying to $DEV  (one password prompt)"
 EXTRA=""
 [ -f scrape_boxart.py ] && EXTRA="$EXTRA scrape_boxart.py"
+[ -f background_browser.py ] && EXTRA="$EXTRA background_browser.py"
+[ -f ra_achievements.py ] && EXTRA="$EXTRA ra_achievements.py"
+for core in gpsp_libretro.so gambatte_libretro.so; do
+  [ -s "vendor/link-cores/$core" ] || {
+    echo "missing vendor/link-cores/$core -- run ./knulli/setup-link-cores.sh" >&2
+    exit 1
+  }
+done
 # Personal dev convenience: if knulli/thegamesdb.key exists locally, ship it so
 # you don't have to type the key on the device. Not part of a clean checkout.
 KEYSEED=""
@@ -28,7 +36,9 @@ if [ -f knulli/thegamesdb.key ]; then
   cp -f knulli/thegamesdb.key ./_thegamesdb.key
   KEYSEED="_thegamesdb.key"
 fi
-tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets -C knulli custom.sh \
+tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
+  vendor/link-cores/gpsp_libretro.so vendor/link-cores/gambatte_libretro.so \
+  -C knulli custom.sh \
 | ssh "$DEV" '
   set -e
   # stop the frontend so nothing holds the old files open. Do NOT pkill on
@@ -54,6 +64,13 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets -C knulli 
   # extract straight over the top (tar replaces each file).
   # --no-same-owner/-perms because /userdata is FAT-ish.
   tar xzf - --no-same-owner --no-same-permissions
+  mkdir -p cores core-backup
+  cp -f vendor/link-cores/gpsp_libretro.so cores/gpsp_libretro.so
+  cp -f vendor/link-cores/gambatte_libretro.so cores/gambatte_libretro.so
+  [ -e core-backup/gpsp_libretro.so ] || cp -p /usr/lib/libretro/gpsp_libretro.so core-backup/gpsp_libretro.so
+  [ -e core-backup/gambatte_libretro.so ] || cp -p /usr/lib/libretro/gambatte_libretro.so core-backup/gambatte_libretro.so
+  cp -f cores/gpsp_libretro.so /usr/lib/libretro/gpsp_libretro.so
+  cp -f cores/gambatte_libretro.so /usr/lib/libretro/gambatte_libretro.so
   sync
   mv -f snapos_ui.aarch64 snapos_ui
   if [ -f _thegamesdb.key ]; then
@@ -71,7 +88,8 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets -C knulli 
     echo "   saved old custom.sh -> custom.sh.pre-snapos"
   fi
   mv -f custom.sh /userdata/system/custom.sh
-  chmod 0755 snapos_ui /userdata/system/custom.sh 2>/dev/null || true
+  chmod 0755 snapos_ui *.py cores/*.so /usr/lib/libretro/gpsp_libretro.so \
+    /usr/lib/libretro/gambatte_libretro.so /userdata/system/custom.sh 2>/dev/null || true
   echo "   installed to /userdata/system/snapos/"
   if [ -x snapos_ui ]; then echo "   exec bit: OK"; else
     echo "   NOTE: no exec bit (FAT /userdata). custom.sh runs it as: sh -c ./snapos_ui"

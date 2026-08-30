@@ -26,6 +26,18 @@ mkdir -p "$DEST"
 cp "$BIN_SRC" "$DEST/snapos_ui"
 chmod +x "$DEST/snapos_ui"
 
+for helper in scrape_boxart.py background_browser.py ra_achievements.py; do
+  [[ -f "../$helper" ]] && cp "../$helper" "$DEST/$helper"
+done
+
+for core in gpsp_libretro.so gambatte_libretro.so; do
+  [[ -s "../vendor/link-cores/$core" ]] || {
+    echo "missing ../vendor/link-cores/$core -- run ./knulli/setup-link-cores.sh" >&2
+    exit 1
+  }
+  install -D -m 0755 "../vendor/link-cores/$core" "$DEST/cores/$core"
+done
+
 # Ship the assets Snap FE needs (fonts, sounds, icons, backgrounds).
 rsync -a --delete ../assets/ "$DEST/assets/" 2>/dev/null || cp -r ../assets "$DEST/"
 mkdir -p "$DEST/config" "$ROOT/roms"

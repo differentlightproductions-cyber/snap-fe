@@ -31,11 +31,12 @@ Download `dist/SnapFE-Alpha-<version>.zip`, then:
 
 1. Power off, put the SD card in your computer, open the **SHARE** partition
    (that's `/userdata` on the device).
-2. Copy the `system/` and `roms/` folders from the zip into the root of SHARE
-   (merge — it only adds files).
+2. Extract the release ZIP directly into the root of SHARE (merge/replace when
+   prompted). The archive is intentionally flat: `system/` and `roms/` land in
+   the correct locations without opening a version wrapper folder.
 3. Eject, reboot. Under **Ports** in EmulationStation you now have:
    * **Snap FE** — launch to try it; quit to return to ES (nothing else changes)
-   * **Snap FE (Set As Default)** — make it the boot frontend, then reboot
+   * **Snap FE (Set As Default)** — validate, install, and reboot automatically
    * **Snap FE (Restore EmulationStation)** — undo that
 
 Full steps + uninstall are in `INSTALL.txt` inside the zip. No card removal
@@ -57,9 +58,9 @@ needed if you have SSH or the network share — see INSTALL.txt.
 ./knulli/package.sh                             # -> dist/SnapFE-Alpha-<version>.zip
 ```
 
-Toolchain: `build-knulli.sh` auto-uses
-`~/buildroot/output/host/bin/aarch64-buildroot-linux-gnu-gcc`, falling back to
-`aarch64-linux-gnu-gcc`.
+Toolchain: `build-knulli.sh` prefers `aarch64-linux-gnu-gcc` so public binaries
+retain an older glibc baseline. It falls back to Knulli's Buildroot compiler,
+but the package step refuses glibc 2.38+ release binaries.
 
 ### What `-DSNAPOS_TARGET_KNULLI` changes
 
@@ -92,8 +93,8 @@ static-linked.
 
 ## Not done yet
 
-- **GBA Link Play** — needs a standalone VBA-M-SDL build (no libretro core has
-  GBA link cable over network). GB/GBC link works now via gambatte.
+- Link Play remains limited to the protocols implemented by the packaged
+  Gambatte/gpSP cores; it does not claim universal multiplayer compatibility.
 - Full custom `.img` ("Snap FE Edition" of Knulli) — a real image means a
   Buildroot package + OS build.
 - Parse `es_systems.cfg` for every console instead of the 6-system table.

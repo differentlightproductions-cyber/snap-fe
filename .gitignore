@@ -7,6 +7,10 @@ snapos_ui.aarch64
 # release zips
 dist/
 
+# downloaded official Libretro release inputs (run knulli/setup-link-cores.sh)
+vendor/link-cores/*.so
+vendor/link-cores/*.zip
+
 # local dev state (created at runtime under the repo dir on desktop builds)
 settings.cfg
 activity.dat

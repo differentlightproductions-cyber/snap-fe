@@ -1,72 +1,57 @@
-Snap FE - Alpha Build 1.1.0
-for the Anbernic RG34XX-SP / RG34XX running Knulli
+Snap FE - Alpha Build 1.1.6
+for H700 Anbernic RG34XX-SP / RG34XX devices running Knulli
 
 
-What this is
-------------
-A different menu for your handheld. Knulli still runs everything under the
-hood - emulators, controllers, sound, all of it. Snap FE just replaces the
-EmulationStation menu with a nicer one.
+Install or update from 1.1.5
+----------------------------
+1. Download the RELEASE ASSET named SnapFE-Alpha-1.1.6.zip. Do not download
+   GitHub's automatically generated "Source code" ZIP.
 
-It's a separate program that runs instead of the ES menu - not a fork of
-EmulationStation or Knulli, and it doesn't modify either. It only adds two
-things: a folder (system/snapos) and a boot file (system/custom.sh). It never
-formats or repartitions the card and never touches your ROMs, saves or BIOS.
+2. Turn the handheld off and put the Knulli SD card in your computer.
 
-Nothing gets overwritten. Your games, saves and settings are left alone, and
-you can go back to EmulationStation any time by deleting system/custom.sh.
+3. Open the drive named SHARE and extract the contents of this ZIP DIRECTLY
+   onto SHARE. After extraction, these paths must exist:
 
-Still an alpha: it launches RetroArch / libretro games only for now, not every
-system Knulli supports, and the artwork is still being filled in.
+      SHARE/system/snapos/snapos_ui
+      SHARE/roms/ports/Snap FE (Set As Default).sh
 
+   Choose Merge/Replace if asked. Your settings, favorites, saves, ROMs,
+   scraped art, BIOS, and account files are not included in the package and
+   are not removed.
 
-Installing
-----------
-1. Turn the handheld off and put the Knulli SD card in your computer.
+4. Safely eject the card, put it back in the handheld, and boot Knulli.
 
-2. Open the drive called SHARE.
+5. In EmulationStation, open PORTS and run:
 
-3. Copy the "system" and "roms" folders from this zip onto SHARE. If it asks,
-   choose Merge - it only adds files.
+      Snap FE (Set As Default)
 
-4. Eject, put the card back, turn the handheld on.
-
-5. It boots into EmulationStation this one time. Go to PORTS and you'll see:
-
-      Snap FE                        - try it. Quit to come back to ES.
-      Snap FE (Set As Default)       - boot straight into Snap FE from now on
-      Snap FE (Restore EmulationStation) - undo that
-
-6. Run "Snap FE (Set As Default)" and reboot. Done.
+   The installer checks the CPU, loader, glibc, SDL libraries, executable, and
+   boot hook. On success it reboots automatically into Snap FE.
 
 
-First run
----------
-It asks you a few things - which handheld you have, time zone, your city (for
-weather and radio), and where your games are. All of it can be changed later
-in Settings.
-
-First boot can take a minute. That's normal for this chip. It's quick after.
+Try without installing
+----------------------
+Run "Snap FE" in PORTS. Quitting Snap FE returns to EmulationStation and does
+not change the boot frontend.
 
 
-Going back to EmulationStation
-------------------------------
-Any one of these:
-  - In Snap FE: Settings > Device > "Switch Back to EmulationStation"
-  - In Knulli's PORTS menu: "Snap FE (Restore EmulationStation)"
-  - On a computer: delete system/custom.sh from SHARE
+If a Port flashes black and returns
+-----------------------------------
+The repaired launcher records the actual failure instead of silently exiting.
+On the SHARE drive, read or send these files:
 
-To remove Snap FE completely, also delete the system/snapos folder and the
-three "Snap FE" files in roms/ports.
+   system/snapos/LAST-PORT-STATUS.txt
+   system/snapos/loader-check.log
+   system/snapos/port-launch.log
+   system/snapos/install.log
+
+The most common cause with 1.1.5 was extracting the version wrapper folder
+instead of putting system/ and roms/ at the root of SHARE. The 1.1.6 ZIP is
+flat so "Extract to SHARE" now produces the correct layout automatically.
 
 
-A few notes
------------
-  - No sound? Reboot once more.
-  - Box art: Settings > Account. A free screenscraper.fr login works well.
-    Or drop your own art in system/snapos/boxart.
-  - Music: put mp3/flac/wav/ogg files in a "music" folder on SHARE.
-  - Low battery: Settings > Device has Auto Power Save and Night Mode.
-
-It's an alpha, so expect rough edges. If something breaks, note your Knulli
-version, which handheld, and what you were doing.
+Restore EmulationStation
+------------------------
+Run "Snap FE (Restore EmulationStation)" in PORTS and reboot, or delete
+SHARE/system/custom.sh. A pre-existing custom.sh is saved as
+custom.sh.pre-snapos and restored when available.

@@ -44,8 +44,8 @@ menu itself doesn't need them.
 Cross-compiles to `snapos_ui.aarch64`. You need an aarch64 GCC and the
 device's own SDL shared objects + headers in a sysroot.
 
-**1. aarch64 toolchain** — either Knulli's Buildroot toolchain at
-`~/buildroot/output/host/bin/aarch64-buildroot-linux-gnu-gcc`, or a distro one:
+**1. aarch64 toolchain** — use Ubuntu's cross compiler for public releases. Its
+glibc 2.35 baseline keeps the executable compatible with pinned Knulli builds:
 
 ```bash
 sudo apt install gcc-aarch64-linux-gnu
@@ -62,12 +62,23 @@ grab matching headers (SSH must be enabled on the handheld; default password
 **3. Compile:**
 
 ```bash
-./build-knulli.sh --sysroot ~/knulli-sysroot    # -> snapos_ui.aarch64
+./build-knulli.sh --sysroot ~/knulli-sysroot \
+  --cc /usr/bin/aarch64-linux-gnu-gcc           # -> snapos_ui.aarch64
 ```
 
 `build-knulli.sh` flags: `--cc <gcc>`, `--sysroot <dir>`, `--out <file>`.
 
-Nothing is static-linked — the binary loads the device's own
+**4. Fetch the official Link Play cores before packaging or SSH deployment:**
+
+```bash
+./knulli/setup-link-cores.sh
+```
+
+The script downloads the ARM64 gpSP and Gambatte builds from Libretro's
+official buildbot and verifies both architecture and required link options.
+
+The build script warns if a different toolchain introduces glibc 2.38+ symbols,
+and the release packager refuses such a binary. Nothing is static-linked — the binary loads the device's own
 `libSDL2 / _ttf / _image` (and their deps: freetype, png, z, …) at runtime.
 
 ---
@@ -76,9 +87,9 @@ Nothing is static-linked — the binary loads the device's own
 
 Any one of:
 
-- **SD card:** run `./knulli/package.sh` to build
-  `dist/SnapFE-Alpha-<version>.zip`, then copy its `system/` and `roms/`
-  folders onto the card's SHARE partition. Details + revert steps in
+- **SD card:** run `./knulli/package.sh 1.1.6` to build
+  `dist/SnapFE-Alpha-1.1.6.zip`, then extract the ZIP directly onto the card's
+  SHARE partition. The archive root is already `system/` + `roms/`. Details + revert steps in
   `knulli/INSTALL.txt`.
 - **Over SSH:** `./knulli/deploy.sh root@<device-ip>` — pushes the binary +
   assets + `custom.sh` and reboots.
