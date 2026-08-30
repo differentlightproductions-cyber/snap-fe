@@ -569,6 +569,7 @@ char wifi_status[96] = "";
 char wifi_target_ssid[64] = "";    // network we're entering a password for
 int  wifi_scanning = 0;            // show a "Scanning..." screen, then run the (blocking) scan
 int  wifi_scan_shown = 0;          // one frame has been presented showing "Scanning..."
+Uint32 wifi_reconnect_last = 0;     // rate-limit the saved-network self-heal
 
 // --- Per-game options (Select button on a game in the library) -------------
 int gopts_sel = 0;
@@ -673,11 +674,16 @@ static void deep_rest_enter(void) {
 }
 static void deep_rest_exit(void) {
     cpu_set_governor(g_saved_governor[0] ? g_saved_governor : "ondemand");
+    wifi_reconnect_last = SDL_GetTicks();
     system(
         "knulli-brightness dispon >/dev/null 2>&1;"
         "echo 1 > /sys/class/power_supply/axp2202-battery/work_led 2>/dev/null;"
         "knulli-power-led power on >/dev/null 2>&1;"
-        "( connmanctl enable wifi >/dev/null 2>&1;"
+        // Reloading through knulli-wifi restores the persisted SSID/key and
+        // gives ConnMan a fresh connection attempt. A bare `connmanctl enable`
+        // can leave a favorite idle forever after the AP vanished during rest.
+        "( [ \"$(/usr/bin/knulli-settings-get wifi.enabled 2>/dev/null)\" = 1 ] &&"
+        "  /usr/bin/knulli-wifi enable >/dev/null 2>&1;"
         "  export XDG_RUNTIME_DIR=/var/run;"
         "  for s in $(pactl list short sinks 2>/dev/null | cut -f1); do pactl suspend-sink \"$s\" 0; done ) &");
 }
@@ -4251,7 +4257,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         if (wy + sh <= region_bot) SDL_RenderCopy(ren, snt, NULL, &(SDL_Rect){ wx, wy, sw, sh });
         wy += nameh + 4;
 
-        SDL_Texture *hint = render_text_fit(ren, font_label, "L1 / R1  Tune     Sel  Play / Stop", g_ui_dim, wmaxw);
+        SDL_Texture *hint = render_text_fit(ren, font_label, "L1/R1 Tune   Sel Play/Stop", g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
         return;
@@ -4473,6 +4479,11 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
 int wrap_desc(TTF_Font *font, const char *text, int max_width, char lines[][128], int cap) {
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", text);
+    // Scraped descriptions commonly contain CR/LF and tabs. SDL_ttf renders
+    // those control bytes as missing-glyph boxes when they survive inside a
+    // token, so normalize all ASCII whitespace before word wrapping.
+    for (char *p = buf; *p; p++)
+        if (*p == '\r' || *p == '\n' || *p == '\t') *p = ' ';
     int n = 0;
     char *save = NULL;
     char *word = strtok_r(buf, " ", &save);
@@ -4499,6 +4510,8 @@ int wrap_text(TTF_Font *font, const char *text, int max_width, char lines[MAX_LI
     char buf[256];
     strncpy(buf, text, sizeof(buf) - 1);
     buf[sizeof(buf)-1] = '\0';
+    for (char *p = buf; *p; p++)
+        if (*p == '\r' || *p == '\n' || *p == '\t') *p = ' ';
     int line_count = 0;
     char *word = strtok(buf, " ");
     char current[160] = "";
@@ -6146,10 +6159,14 @@ void roms_detect_and_apply(int verbose) {
     if (g_roms_nroots == 1 && strcmp(g_roms_roots[0], primary) == 0) g_roms_nroots = 0;
 
     if (verbose) {
-        if (extra == 0)
-            snprintf(roms_status, sizeof roms_status,
-                     primary_n ? "Main card only: %d games in %s" : "No games found yet in %s",
-                     primary_n ? primary_n : 0, primary);
+        if (extra == 0) {
+            if (primary_n > 0)
+                snprintf(roms_status, sizeof roms_status,
+                         "Main card only: %d games in %s", primary_n, primary);
+            else
+                snprintf(roms_status, sizeof roms_status,
+                         "No games found yet in %s", primary);
+        }
         else {
             int tot = primary_n; for (int i = 1; i < g_roms_nroots; i++) tot += cnt[i];
             snprintf(roms_status, sizeof roms_status,
@@ -7794,13 +7811,48 @@ static void wifi_set_enabled(int on) {
     system(on ? "/usr/bin/knulli-wifi enable >/dev/null 2>&1 &"
               : "/usr/bin/knulli-wifi disable >/dev/null 2>&1 &");
     wifi_enabled_now = on;
+    wifi_reconnect_last = SDL_GetTicks();
     snprintf(wifi_status, sizeof wifi_status, on ? "Wi-Fi turning on..." : "Wi-Fi off");
+}
+
+// ConnMan normally reconnects a Favorite service on its own, but this driver /
+// firmware combination can leave it idle after the handheld spends time out of
+// range. Knulli still has wifi.ssid and wifi.key at that point; periodically
+// reloading through its helper is enough to restore the saved network. Keep the
+// helper in the background (it may wait up to 20 seconds) and rate-limit retries
+// so an unavailable AP does not create a busy loop or drain the battery.
+static void wifi_reconnect_tick(void) {
+    Uint32 now = SDL_GetTicks();
+    if (wifi_reconnect_last && now - wifi_reconnect_last < 45000) return;
+    wifi_reconnect_last = now;
+
+    FILE *p = popen("ip -4 -o addr show 2>/dev/null | awk '$2 ~ /wl/ && $3==\"inet\" {print $4; exit}'", "r");
+    char ip[48] = "";
+    if (p) {
+        if (fgets(ip, sizeof ip, p)) ip[strcspn(ip, "\r\n")] = '\0';
+        pclose(p);
+    }
+    if (ip[0]) return;
+
+    int enabled = 0;
+    p = popen("/usr/bin/knulli-settings-get wifi.enabled 2>/dev/null", "r");
+    if (p) {
+        char b[16] = "";
+        if (fgets(b, sizeof b, p)) enabled = (atoi(b) == 1);
+        pclose(p);
+    }
+    if (!enabled) return;
+
+    system("( /usr/bin/knulli-wifi enable >/dev/null 2>&1 || {"
+           " connmanctl scan wifi >/dev/null 2>&1; sleep 2;"
+           " /usr/bin/knulli-wifi enable >/dev/null 2>&1; } ) &");
 }
 #else
 static void wifi_scan(void) { wifi_ssid_count = 0; }
 static void wifi_refresh_status(void) { snprintf(wifi_status, sizeof wifi_status, "Wi-Fi (device only)"); }
 static void wifi_connect(const char *ssid, const char *psk) { (void)ssid; (void)psk; }
 static void wifi_set_enabled(int on) { wifi_enabled_now = on; }
+static void wifi_reconnect_tick(void) {}
 #endif
 
 // Wi-Fi signal for the header icon: 0 = not connected, 1..4 = bars.
@@ -9112,6 +9164,35 @@ static void save_screenshot(SDL_Renderer *ren, const char *path) {
     SDL_FreeSurface(s);
 }
 
+// Promo runs must be useful offline and must never depend on the developer's
+// cached station list. These clearly generic sample stations exercise the real
+// radio UI without starting playback or making a network request.
+static void promo_seed_radio(void) {
+    static const struct { const char *name, *codec; int bitrate; } demo[] = {
+        { "Desert Jazz 91.5",       "AAC",  128 },
+        { "Valley Public Radio",    "MP3",  192 },
+        { "Downtown Indie",         "AAC",  128 },
+        { "Phoenix Mix",            "MP3",  192 },
+        { "Ambient Southwest",      "AAC",  96  },
+        { "Classic Rock Arizona",   "MP3",  256 },
+        { "Night Drive Radio",      "AAC",  128 },
+    };
+    radio_count = (int)(sizeof(demo) / sizeof(demo[0]));
+    for (int i = 0; i < radio_count; i++) {
+        memset(&radio_stations[i], 0, sizeof radio_stations[i]);
+        snprintf(radio_stations[i].name, sizeof radio_stations[i].name, "%s", demo[i].name);
+        snprintf(radio_stations[i].codec, sizeof radio_stations[i].codec, "%s", demo[i].codec);
+        radio_stations[i].bitrate = demo[i].bitrate;
+    }
+    radio_sel = 3;
+    radio_playing_idx = -1;
+    radio_pid = 0;
+    radio_loading = 0;
+    radio_volume_pct = 82;
+    snprintf(radio_place, sizeof radio_place, "Phoenix, Arizona");
+    snprintf(radio_status, sizeof radio_status, "%d local stations ready", radio_count);
+}
+
 int main(int argc, char *argv[]) {
     srand((unsigned int)time(NULL));
     for (int i = 1; i < argc; i++) {
@@ -9122,31 +9203,45 @@ int main(int argc, char *argv[]) {
     if (promo_mode && !promo_dir[0]) snprintf(promo_dir, sizeof promo_dir, "%s/promo", sn_data_root());
     if (promo_mode) mkdir(promo_dir, 0755);
     load_settings();
+    // Promo mode is a deterministic still-image renderer: do not run the
+    // greeting crawl, persist its daily marker, or inherit private/custom data.
+    if (promo_mode) {
+        greeting_enabled = 0; greeting_started_at = 0;
+        surprise_me_enabled = 0;
+        global_font_color_idx = 0;
+        hud_font_color_idx = 0;
+        home_apps_mask = (1 << APP_RETROARCH) | (1 << APP_RADIO) |
+                         (1 << APP_MUSIC) | (1 << APP_MINIGAMES);
+    }
     // Two widget slots must never hold the same widget (a stale config or a
     // hand-edited file could); fall the bottom slot back to None.
     if (home_widget2_idx == home_widget_idx && home_widget_idx != HOME_WIDGET_NONE)
         home_widget2_idx = HOME_WIDGET_NONE;
     apply_timezone();                 // make localtime()/strftime() honour the saved zone
     load_ra_config();
-    if (ra_configured()) run_ra_check(0);   // confirm the sign-in on boot
+    if (!promo_mode && ra_configured()) run_ra_check(0);   // confirm the sign-in on boot
     load_system_overrides();
     load_activity_records();
     load_favorites();
     load_ss_config();
     minigames_load();
-    game_audio_mute(0);       // sync fast-forward + "clear the mute" into knulli.conf up front
-    link_restore_core_opts(); // in case a previous link session was interrupted mid-game
-    cpu_apply_pref();   // Power Save -> conservative, Performance -> performance, else ondemand
+    if (!promo_mode) {
+        game_audio_mute(0);       // sync fast-forward + "clear the mute" into knulli.conf up front
+        link_restore_core_opts(); // in case a previous link session was interrupted mid-game
+        cpu_apply_pref();         // apply the saved CPU governor preference
+    }
     // snap the saved brightness onto the BRIGHT_STEP grid, then push it to the panel
     brightness_pct = (brightness_pct + BRIGHT_STEP / 2) / BRIGHT_STEP * BRIGHT_STEP;
     if (brightness_pct < BRIGHT_MIN_PCT) brightness_pct = BRIGHT_MIN_PCT;
     if (brightness_pct > 100) brightness_pct = 100;
-    apply_brightness();
+    if (!promo_mode) apply_brightness();
     // Volume: our saved level is the source of truth. custom.sh sets a boot
     // default for the brief window before we start; push the user's real value
     // over it here. Only a fresh install (no saved level) seeds from the system.
-    if (sys_volume_loaded) sys_volume_apply(sys_volume_pct);
-    else { int v = sys_volume_read(); if (v >= 0) sys_volume_pct = v; }
+    if (!promo_mode) {
+        if (sys_volume_loaded) sys_volume_apply(sys_volume_pct);
+        else { int v = sys_volume_read(); if (v >= 0) sys_volume_pct = v; }
+    }
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
     IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
@@ -9154,8 +9249,8 @@ int main(int argc, char *argv[]) {
 
     // Kick a weather fetch right away on launch if either widget slot wants it
     // -- the saved last reading (see load_settings) shows instantly meanwhile.
-    if (home_widget_idx  == HOME_WIDGET_WEATHER || home_widget_idx  == HOME_WIDGET_DATEWX ||
-        home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX) weather_kick(1);
+    if (!promo_mode && (home_widget_idx  == HOME_WIDGET_WEATHER || home_widget_idx  == HOME_WIDGET_DATEWX ||
+        home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX)) weather_kick(1);
 
     // Raw-joystick input only. The handheld pad has no valid SDL controller
     // mapping, so letting SDL guess one gave inconsistent button semantics
@@ -10953,6 +11048,11 @@ int main(int argc, char *argv[]) {
         if (light_rest_active) { system("knulli-brightness dispon >/dev/null 2>&1"); light_rest_active = 0; }
         if (deep_rest_active) { deep_rest_exit(); deep_rest_active = 0; }
 
+        // Self-heal a saved Wi-Fi connection when the device comes back into
+        // range. This is intentionally skipped while the lid/deep-rest path is
+        // active because that path continues above before reaching this point.
+        wifi_reconnect_tick();
+
         // Hold-to-repeat for d-pad / analog nav: after an initial delay, keep
         // firing the held direction so long lists scroll fast.
         {
@@ -11712,30 +11812,38 @@ int main(int argc, char *argv[]) {
                     }
                 }
             } else if (platform_view_style == 2) {
-                // Grid view -- systems laid out in a configurable columns x rows
-                // grid (Settings > Display), each an equal-size box with its name
-                // fitted UNDERNEATH it. No scaling/fading animation; the selected
-                // box gets a thicker highlighted border. Cells shrink to fit the
-                // screen at any grid size, and the label always sits below the
-                // box, never on top of it, however small the box gets.
+                // Grid view -- honor the configured columns x rows as a real
+                // page size. The old renderer silently added enough rows for
+                // every system, turning a 3x2 choice into five tiny rows.
                 ensure_platform_icons_loaded(ren, ICON_STYLE_GRID);
 
                 int cols = platform_grid_cols;
                 int rows = platform_grid_rows;
-                // Never hide a system: if the chosen grid can't hold every
-                // *visible* system, add rows (cells just get shorter) to fit.
-                int need_rows = (g_nplat + cols - 1) / cols;
-                if (need_rows < 1) need_rows = 1;
-                if (rows < need_rows) rows = need_rows;
+                if (cols < 1) cols = 1; else if (cols > 6) cols = 6;
+                if (rows < 1) rows = 1; else if (rows > 6) rows = 6;
+                int capacity = cols * rows;
+                int page_count = (g_nplat + capacity - 1) / capacity;
+                if (page_count < 1) page_count = 1;
+                int page = g_sel_ord / capacity;
+                if (page >= page_count) page = page_count - 1;
+                int page_first = page * capacity;
+                int page_last = page_first + capacity;
+                if (page_last > g_nplat) page_last = g_nplat;
+
+                // Subdue busy per-system artwork so labels and empty-icon
+                // fallbacks retain contrast without discarding the backdrop.
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 205);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ 0, HUD_BAR_H, WIN_W, WIN_H - HUD_BAR_H });
 
                 int gap = cols > 3 || rows > 3 ? 10 : 18;
-                int margin_x = 24, top_y = 76, bottom_y = 44; // leave room for dock + a breath at the bottom
+                int margin_x = 24, top_y = 76, bottom_y = 52;
                 int area_w = WIN_W - margin_x * 2;
                 int area_h = WIN_H - top_y - bottom_y;
 
                 int cell_w = (area_w - gap * (cols - 1)) / cols;
                 int cell_h = (area_h - gap * (rows - 1)) / rows;
-                int label_h = 16; // reserved strip under each box for the fitted name
+                int label_h = TTF_FontHeight(font_label) + 3;
                 if (label_h > cell_h / 3) label_h = cell_h / 3;
                 int box_h = cell_h - label_h - 4;
 
@@ -11744,12 +11852,15 @@ int main(int argc, char *argv[]) {
                 int start_x = WIN_W/2 - grid_w/2;
                 int start_y = top_y + (area_h - grid_h) / 2;
 
-                for (int oi = 0; oi < g_nplat; oi++) {
+                for (int oi = page_first; oi < page_last; oi++) {
                     int p = g_plat[oi];
-                    int gc = oi % cols, gr = oi / cols;
+                    int slot = oi - page_first;
+                    int gc = slot % cols, gr = slot / cols;
                     int cx = start_x + gc * (cell_w + gap);
                     int cy = start_y + gr * (cell_h + gap);
                     SDL_Rect box_bounds = { cx, cy, cell_w, box_h };
+
+                    int selected = (p == platform_selected);
 
                     if (platform_icon_cache[p]) {
                         SDL_Rect fit = img_aspect(cover_rect_for_texture(platform_icon_cache[p], box_bounds));
@@ -11757,11 +11868,16 @@ int main(int argc, char *argv[]) {
                         SDL_RenderCopy(ren, platform_icon_cache[p], NULL, &fit);
                         SDL_RenderSetClipRect(ren, NULL);
                     } else {
-                        SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 217);
+                        SDL_Color fill = selected ? th->accent1 : th->select_bg;
+                        SDL_SetRenderDrawColor(ren, fill.r, fill.g, fill.b, selected ? 235 : 220);
                         SDL_RenderFillRect(ren, &box_bounds);
+                        SDL_Texture *badge = render_text_fit(ren, font_small_bold,
+                            platform_short[p], selected ? th->bg : g_ui_text, cell_w - 16);
+                        int bw2, bh2; SDL_QueryTexture(badge, NULL, NULL, &bw2, &bh2);
+                        SDL_RenderCopy(ren, badge, NULL,
+                            &(SDL_Rect){ cx + (cell_w - bw2)/2, cy + (box_h - bh2)/2, bw2, bh2 });
                     }
 
-                    int selected = (p == platform_selected);
                     SDL_Color bc = selected ? th->accent2 : g_ui_text;
                     int bw = selected ? 3 : 1;
                     for (int b = 0; b < bw; b++) {
@@ -11772,12 +11888,20 @@ int main(int argc, char *argv[]) {
 
                     // Name UNDER the box, scaled to fit the cell width so it
                     // never spills past the box edges at any grid size.
-                    SDL_Texture *lbl = render_text_fit(ren, font_small, platform_short[p],
+                    SDL_Texture *lbl = render_text_fit(ren, font_label, platform_maker[p],
                                                        selected ? g_ui_text : g_ui_dim, cell_w);
                     int lw, lh;
                     SDL_QueryTexture(lbl, NULL, NULL, &lw, &lh);
                     SDL_Rect ldst = { cx + cell_w/2 - lw/2, cy + box_h + 3, lw, lh };
                     SDL_RenderCopy(ren, lbl, NULL, &ldst);
+                }
+
+                if (page_count > 1) {
+                    char pg[32]; snprintf(pg, sizeof pg, "%d / %d", page + 1, page_count);
+                    SDL_Texture *pgt = render_text(ren, font_label, pg, g_ui_dim);
+                    int pgw, pgh; SDL_QueryTexture(pgt, NULL, NULL, &pgw, &pgh);
+                    SDL_RenderCopy(ren, pgt, NULL,
+                        &(SDL_Rect){ WIN_W - pgw - 18, HUD_BAR_H + 6, pgw, pgh });
                 }
             } else if (platform_view_style == 3) {
                 // List view: the list occupies the left 55% over a scrim that
@@ -12071,9 +12195,17 @@ int main(int argc, char *argv[]) {
                 snprintf(phint, sizeof phint,
                     "%s Browse   A: Open   X: Sort (%s)   L2/R2: View   B: Home",
                     platform_view_style == 3 ? "^ v" : "< >", bookshelf_sort_names[bookshelf_sort % 3]);
-                SDL_Texture *pht = render_text_fit(ren, font_label, phint, (SDL_Color){255,255,255,255}, WIN_W - 24);
+                int pane_view = (platform_view_style == 2 || platform_view_style == 3);
+                SDL_Color hint_col = pane_view ? g_ui_text : (SDL_Color){255,255,255,255};
+                SDL_Texture *pht = render_text_fit(ren, font_label, phint, hint_col, WIN_W - 24);
                 int phw, phh; SDL_QueryTexture(pht, NULL, NULL, &phw, &phh);
                 SDL_Rect phr = { WIN_W/2 - phw/2, WIN_H - phh - 12, phw, phh };
+                if (pane_view) {
+                    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                    SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b,
+                                           (Uint8)(220 * ph_hf));
+                    SDL_RenderFillRect(ren, &(SDL_Rect){ 0, phr.y - 5, WIN_W, phh + 10 });
+                }
                 if (ph_hf < 1.0f) {
                     SDL_SetTextureAlphaMod(pht, (Uint8)(255 * ph_hf));
                     SDL_RenderCopy(ren, pht, NULL, &phr);
@@ -12092,14 +12224,14 @@ int main(int argc, char *argv[]) {
             // lighter-weight way to surface this info on those views (a
             // small floating label, maybe) is worth revisiting later.
             if (platform_view_style == 0) {
-                int panel_w = 260;
+                int panel_w = 300;
                 int panel_y = 70;
-                int panel_h = WIN_H - panel_y - 16;
-                int fade_w = panel_w + 100; // extends past the text so the fade actually reads as a fade, not a hard edge
+                int panel_h = WIN_H - panel_y - 48; // reserve the controls line
+                int fade_w = panel_w + 80;
                 int strip_w = 4;
-                int max_alpha = platform_bg_tex ? 225 : 255; // fully opaque if there's no photo to show through yet
+                int max_alpha = platform_bg_tex ? 242 : 255;
                 for (int fx = 0; fx < fade_w; fx += strip_w) {
-                    float t = (float)fx / (float)fade_w; // 0 at left edge -> 1 at fade_w
+                    float t = fx < panel_w ? 0.0f : (float)(fx - panel_w) / (float)(fade_w - panel_w);
                     Uint8 alpha = (Uint8)(max_alpha * (1.0f - t));
                     SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, alpha);
                     SDL_Rect strip = { fx, panel_y, strip_w, panel_h };
@@ -12109,20 +12241,27 @@ int main(int argc, char *argv[]) {
                 int cy = panel_y + 16;
                 int cx = 20;
                 int panel_text_w = panel_w - 40;
+                int panel_bottom = panel_y + panel_h - 10;
+                SDL_Rect panel_clip = { 0, panel_y, panel_w, panel_h };
+                SDL_RenderSetClipRect(ren, &panel_clip);
 
-                SDL_Texture *nt = render_text_fit(ren, font_label, platform_names[platform_selected], g_ui_text, panel_text_w);
-                int ntw, nth;
-                SDL_QueryTexture(nt, NULL, NULL, &ntw, &nth);
-                SDL_Rect ndst = { cx, cy, ntw, nth };
-                SDL_RenderCopy(ren, nt, NULL, &ndst);
-                cy += nth + 4;
+                char name_lines[MAX_LINES][128];
+                int name_n = wrap_text(font_small, platform_names[platform_selected], panel_text_w, name_lines);
+                if (name_n > 2) name_n = 2;
+                for (int ni = 0; ni < name_n; ni++) {
+                    SDL_Texture *nt = render_text(ren, font_small, name_lines[ni], g_ui_text);
+                    int ntw, nth; SDL_QueryTexture(nt, NULL, NULL, &ntw, &nth);
+                    SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ cx, cy, ntw, nth });
+                    cy += nth + 2;
+                }
+                cy += 2;
 
                 SDL_Texture *mt = render_text_fit(ren, font_label, platform_maker[platform_selected], g_ui_dim, panel_text_w);
                 int mtw, mth;
                 SDL_QueryTexture(mt, NULL, NULL, &mtw, &mth);
                 SDL_Rect mdst = { cx, cy, mtw, mth };
                 SDL_RenderCopy(ren, mt, NULL, &mdst);
-                cy += mth + 10;
+                cy += mth + 6;
 
                 char yeartype[48];
                 snprintf(yeartype, sizeof(yeartype), "%s * %s", platform_year[platform_selected], platform_form[platform_selected]);
@@ -12131,7 +12270,7 @@ int main(int argc, char *argv[]) {
                 SDL_QueryTexture(yt, NULL, NULL, &ytw, &yth);
                 SDL_Rect ydst = { cx, cy, ytw, yth };
                 SDL_RenderCopy(ren, yt, NULL, &ydst);
-                cy += yth + 14;
+                cy += yth + 8;
 
                 char countstr[32];
                 int gc = platform_game_count_cache[platform_selected];
@@ -12141,18 +12280,30 @@ int main(int argc, char *argv[]) {
                 SDL_QueryTexture(gt, NULL, NULL, &gtw, &gth);
                 SDL_Rect gdst = { cx, cy, gtw, gth };
                 SDL_RenderCopy(ren, gt, NULL, &gdst);
-                cy += gth + 14;
+                cy += gth + 8;
 
                 char blurb_lines[MAX_LINES][128];
-                int bn = wrap_text(font_label, platform_blurb[platform_selected], panel_w - 40, blurb_lines);
+                const float body_scale = 0.82f;
+                int bn = wrap_text(font_label, platform_blurb[platform_selected],
+                                   (int)((panel_w - 40) / body_scale), blurb_lines);
+                int blurb_cut = 0;
                 for (int bi = 0; bi < bn; bi++) {
                     SDL_Texture *bt = render_text(ren, font_label, blurb_lines[bi], g_ui_dim);
                     int btw, bth;
                     SDL_QueryTexture(bt, NULL, NULL, &btw, &bth);
-                    SDL_Rect bdst = { cx, cy, btw, bth };
+                    int bsw = (int)(btw * body_scale), bsh = (int)(bth * body_scale);
+                    if (cy + bsh > panel_bottom) { blurb_cut = 1; break; }
+                    SDL_Rect bdst = { cx, cy, bsw, bsh };
                     SDL_RenderCopy(ren, bt, NULL, &bdst);
-                    cy += bth + 4;
+                    cy += bsh + 3;
                 }
+                if (blurb_cut) {
+                    SDL_Texture *more = render_text(ren, font_label, "...", g_ui_dim);
+                    int mw, mh; SDL_QueryTexture(more, NULL, NULL, &mw, &mh);
+                    SDL_RenderCopy(ren, more, NULL,
+                        &(SDL_Rect){ cx, panel_bottom - mh, mw, mh });
+                }
+                SDL_RenderSetClipRect(ren, NULL);
             }
 
         } else if (state == STATE_QUICKCFG) {
@@ -13767,15 +13918,16 @@ int main(int argc, char *argv[]) {
 
                 char fh[112];
                 if (book_info_page == 3 && book_info_more)
-                    snprintf(fh, sizeof fh, "< >  Page %d/%d    R1: Artwork    B: Back    A: Play", book_info_page + 1, BOOK_INFO_PAGES);
+                    snprintf(fh, sizeof fh, "< > Page %d/%d   R1 Art   B Back   A Play", book_info_page + 1, BOOK_INFO_PAGES);
                 else if (book_info_more_l || book_info_scroll_l > 0)
-                    snprintf(fh, sizeof fh, "< >  Page %d/%d    L1/R1: Scroll    B: Back    A: Play", book_info_page + 1, BOOK_INFO_PAGES);
+                    snprintf(fh, sizeof fh, "< > Page %d/%d   L1/R1 Scroll   B Back   A Play", book_info_page + 1, BOOK_INFO_PAGES);
                 else
-                    snprintf(fh, sizeof fh, "< >  Page %d/%d      B: Back      A: Play", book_info_page + 1, BOOK_INFO_PAGES);
-                SDL_Texture *fht = render_text_fit(ren, font_label, fh, g_ui_dim, (int)((WIN_W - 40) / 0.8f));
+                    snprintf(fh, sizeof fh, "< > Page %d/%d   B Back   A Play", book_info_page + 1, BOOK_INFO_PAGES);
+                SDL_Color book_footer = { 224, 218, 210, 255 };
+                SDL_Texture *fht = render_text_fit(ren, font_label, fh, book_footer, WIN_W - 24);
                 int fhw, fhh; SDL_QueryTexture(fht, NULL, NULL, &fhw, &fhh);
-                int fhws = (int)(fhw * 0.8f), fhhs = (int)(fhh * 0.8f);
-                SDL_RenderCopy(ren, fht, NULL, &(SDL_Rect){ WIN_W/2 - fhws/2, by + bh + 12, fhws, fhhs });
+                SDL_RenderCopy(ren, fht, NULL,
+                    &(SDL_Rect){ WIN_W/2 - fhw/2, WIN_H - fhh - 8, fhw, fhh });
             } else {
                 Uint32 fe = SDL_GetTicks() - book_flip_start;
                 float ft = (book_flip_dir == 0 || fe >= (Uint32)BOOK_FLIP_MS) ? 1.0f : (float)fe / BOOK_FLIP_MS;
@@ -13802,11 +13954,26 @@ int main(int argc, char *argv[]) {
                     { char _wl[MAX_LINES][128]; int _wn = wrap_text(font_small, games[_gi].title, _lcw, _wl); \
                       for (int _i = 0; _i < _wn && _in < 80; _i++) { snprintf(_IL[_in].s, 128, "%s", _wl[_i]); _IL[_in].hdr = 1; _in++; } } \
                     if (_in < 80) { _IL[_in].s[0] = '\0'; _IL[_in].hdr = 0; _in++; } \
-                    snprintf(_bf, sizeof _bf, "System   %s", platform_display_name(games[_gi].platform_dir)); if (_in<80){snprintf(_IL[_in].s,128,"%s",_bf);_IL[_in].hdr=0;_in++;} \
-                    if (games[_gi].year[0])         { snprintf(_bf,sizeof _bf,"Year   %s",games[_gi].year); if(_in<80){snprintf(_IL[_in].s,128,"%s",_bf);_IL[_in].hdr=0;_in++;} } \
-                    if (games[_gi].region[0])       { snprintf(_bf,sizeof _bf,"Region   %s",games[_gi].region); if(_in<80){snprintf(_IL[_in].s,128,"%s",_bf);_IL[_in].hdr=0;_in++;} } \
-                    if (games[_gi].languages[0])    { snprintf(_bf,sizeof _bf,"Languages   %s",games[_gi].languages); if(_in<80){snprintf(_IL[_in].s,128,"%s",_bf);_IL[_in].hdr=0;_in++;} } \
-                    if (games[_gi].version_info[0]) { snprintf(_bf,sizeof _bf,"Version   %s",games[_gi].version_info); if(_in<80){snprintf(_IL[_in].s,128,"%s",_bf);_IL[_in].hdr=0;_in++;} } \
+                    { int _pi = platform_index_for_dir(games[_gi].platform_dir); \
+                      snprintf(_bf, sizeof _bf, "System   %s", _pi >= 0 ? platform_short[_pi] : platform_display_name(games[_gi].platform_dir)); \
+                      char _ml[MAX_LINES][128]; int _mn = wrap_text(font_label, _bf, _lcw, _ml); \
+                      for (int _mi=0; _mi<_mn && _in<80; _mi++){snprintf(_IL[_in].s,128,"%s",_ml[_mi]);_IL[_in].hdr=0;_in++;} } \
+                    if (games[_gi].year[0]) { \
+                      snprintf(_bf,sizeof _bf,"Year   %s",games[_gi].year); \
+                      char _ml[MAX_LINES][128]; int _mn=wrap_text(font_label,_bf,_lcw,_ml); \
+                      for(int _mi=0;_mi<_mn&&_in<80;_mi++){snprintf(_IL[_in].s,128,"%s",_ml[_mi]);_IL[_in].hdr=0;_in++;} } \
+                    if (games[_gi].region[0]) { \
+                      snprintf(_bf,sizeof _bf,"Region   %s",games[_gi].region); \
+                      char _ml[MAX_LINES][128]; int _mn=wrap_text(font_label,_bf,_lcw,_ml); \
+                      for(int _mi=0;_mi<_mn&&_in<80;_mi++){snprintf(_IL[_in].s,128,"%s",_ml[_mi]);_IL[_in].hdr=0;_in++;} } \
+                    if (games[_gi].languages[0]) { \
+                      snprintf(_bf,sizeof _bf,"Languages   %s",games[_gi].languages); \
+                      char _ml[MAX_LINES][128]; int _mn=wrap_text(font_label,_bf,_lcw,_ml); \
+                      for(int _mi=0;_mi<_mn&&_in<80;_mi++){snprintf(_IL[_in].s,128,"%s",_ml[_mi]);_IL[_in].hdr=0;_in++;} } \
+                    if (games[_gi].version_info[0]) { \
+                      snprintf(_bf,sizeof _bf,"Version   %s",games[_gi].version_info); \
+                      char _ml[MAX_LINES][128]; int _mn=wrap_text(font_label,_bf,_lcw,_ml); \
+                      for(int _mi=0;_mi<_mn&&_in<80;_mi++){snprintf(_IL[_in].s,128,"%s",_ml[_mi]);_IL[_in].hdr=0;_in++;} } \
                     if (_in < 80) { _IL[_in].s[0] = '\0'; _IL[_in].hdr = 0; _in++; } \
                     if (games[_gi].description[0] && games[_gi].description[0] != ' ') { \
                         char _dl[64][128]; int _dn = wrap_desc(font_label, games[_gi].description, _lcw, _dl, 64); \
@@ -13901,15 +14068,14 @@ int main(int argc, char *argv[]) {
 
                 char pg[144];
                 if (book_l_more || book_r_more || book_l_scroll > 0)
-                    snprintf(pg, sizeof pg, "< > Page   L1 Scroll   R1 Artwork   A Play   X More   Y Fav   B Close");
+                    snprintf(pg, sizeof pg, "< > Page   L1 Text   R1 Art   A Play   X Info   Y Fav   B Close");
                 else
-                    snprintf(pg, sizeof pg, "Page %d/%d   A Play   X Extra Info   Y Favourite   B Close", selected + 1, game_count);
-                // Book-page controls stay on screen the whole time, so keep
-                // them visually quiet: render at the label size, blit at ~80%.
-                SDL_Texture *pt = render_text_fit(ren, font_label, pg, g_ui_dim, (int)((WIN_W - 32) / 0.8f));
+                    snprintf(pg, sizeof pg, "%d/%d   A Play   X Info   Y Favorite   B Close", selected + 1, game_count);
+                SDL_Color book_footer = { 224, 218, 210, 255 };
+                SDL_Texture *pt = render_text_fit(ren, font_label, pg, book_footer, WIN_W - 24);
                 int pw, ph; SDL_QueryTexture(pt, NULL, NULL, &pw, &ph);
-                int pws = (int)(pw * 0.8f), phs = (int)(ph * 0.8f);
-                SDL_RenderCopy(ren, pt, NULL, &(SDL_Rect){ WIN_W / 2 - pws / 2, by + bh + 12, pws, phs });
+                SDL_RenderCopy(ren, pt, NULL,
+                    &(SDL_Rect){ WIN_W / 2 - pw / 2, WIN_H - ph - 8, pw, ph });
 
                 if (is_favorite(games[selected].path)) {
                     SDL_Texture *fav = render_text(ren, font_small, "*", th->accent3);
@@ -14400,49 +14566,65 @@ int main(int argc, char *argv[]) {
         // --- promo screenshot tour --------------------------------------
         if (promo_mode) {
             static int pstep = 0, pf = 0, psapphire = -1;
-            const int PSETTLE = 70;
+            const int PSETTLE = 90;
             static const char *pnames[] = {
-                "home-clock", "home-theme-cream", "home-theme-amber", "home-radio-widget",
-                "home-app-grid", "console-carousel", "console-grid", "console-list",
-                "console-single-card", "console-bookshelf", "book-open", "book-artwork",
-                "book-extra-info", "library-grid", "library-single", "minigames",
-                "settings-display", "settings-account", "console-bookshelf-dark", "home-dark"
+                "home-overview-modern", "home-radio-rounded", "radio-stations-mono",
+                "home-app-grid-pixel", "console-carousel-bold", "console-grid-rounded",
+                "console-list-condensed", "console-single-rounded",
+                "console-bookshelf-condensed", "console-bookshelf-dark",
+                "book-sapphire-serif", "book-artwork-gallery-serif",
+                "library-sapphire-rounded", "minigames-pixel", "home-dark-bold"
+            };
+            static const int pfonts[] = {
+                0, 3, 7, 9, 1, 3, 2, 3, 2, 0, 4, 4, 3, 9, 1
             };
             const int PROMO_STEPS = (int)(sizeof(pnames)/sizeof(pnames[0]));
             last_input_time = SDL_GetTicks();   // keep the loop at 60fps so anims settle
             if (pf == 0) {
                 book_info_open = 0; book_l_scroll = book_r_scroll = 0;
-                home_view_idx = 0; platform_selected = 0;
+                home_view_idx = 0; platform_selected = 0; selected = 0;
+                home_widget_idx = HOME_WIDGET_NONE; home_widget2_idx = HOME_WIDGET_NONE;
+                font_choice_idx = pfonts[pstep];
+                font_size_idx = 1;              // Medium: legible without crowding
+                font_bold = 0;
+                reload_fonts();
+                hud_font_color_idx = (pstep == 4 || pstep == 5 || pstep == 7 ||
+                                      (pstep >= 8 && pstep <= 11)) ? 1 : 0;
                 switch (pstep) {
-                  case 0:  state = STATE_HOME; theme_idx = 1;  home_widget_idx = HOME_WIDGET_CLOCK; home_widget2_idx = HOME_WIDGET_STATS; break;
-                  case 1:  state = STATE_HOME; theme_idx = 4;  break;
-                  case 2:  state = STATE_HOME; theme_idx = 6;  break;
-                  case 3:  state = STATE_HOME; theme_idx = 2;  home_widget_idx = HOME_WIDGET_RADIO; break;
-                  case 4:  state = STATE_HOME; theme_idx = 1;  home_view_idx = 1; home_widget_idx = HOME_WIDGET_CLOCK; break;
-                  case 5:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 1; break;
-                  case 6:  state = STATE_PLATFORM; platform_view_style = 2; break;
-                  case 7:  state = STATE_PLATFORM; platform_view_style = 3; break;
-                  case 8:  state = STATE_PLATFORM; platform_view_style = 0; break;
-                  case 9:  state = STATE_PLATFORM; platform_view_style = 4; break;
-                  case 10: case 11: case 12:
+                  case 0:  state = STATE_HOME; theme_idx = 1; home_view_idx = 0; home_selected = 1;
+                           home_widget_idx = HOME_WIDGET_CLOCK; home_widget2_idx = HOME_WIDGET_STATS; break;
+                  case 1:  promo_seed_radio(); state = STATE_HOME; theme_idx = 2; home_view_idx = 0; home_selected = 5;
+                           home_widget_idx = HOME_WIDGET_RADIO; home_widget2_idx = HOME_WIDGET_STATS; break;
+                  case 2:  promo_seed_radio(); state = STATE_RADIO; theme_idx = 2; break;
+                  case 3:  state = STATE_HOME; theme_idx = 1; home_view_idx = 1; home_selected = 5; break;
+                  case 4:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 1; break;
+                  case 5:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 2; break;
+                  case 6:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 3; break;
+                  case 7:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 0; break;
+                  case 8:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 4; break;
+                  case 9:  state = STATE_PLATFORM; theme_idx = 11; platform_view_style = 4; break;
+                  case 10: case 11:
+                       theme_idx = 1;
                        free_games(ren); scan_games(ren, font_label, 0);
                        if (psapphire < 0) { psapphire = 0; for (int gi = 0; gi < game_count; gi++) if (strstr(games[gi].title, "Sapphire") || strstr(games[gi].raw_filename, "Sapphire")) { psapphire = gi; break; } }
                        selected = psapphire;
                        state = STATE_BOOK; book_open_start = anim_start(); book_prev_sel = selected; book_flip_dir = 0;
-                       if (pstep == 12) { book_info_open = 1; book_info_page = 0; }
+                       if (pstep == 11) { book_info_open = 1; book_info_page = 3; }
                        break;
-                  case 13: free_games(ren); scan_games(ren, font_label, 0); selected = 0;
-                       state = STATE_MENU; grid_cols = 4; grid_rows = 2; break;
-                  case 14: state = STATE_MENU; selected = (psapphire >= 0 ? psapphire : 0); grid_cols = 1; grid_rows = 1; break;
-                  case 15: state = STATE_MINIGAMES; mg_menu_sel = 0; break;
-                  case 16: state = STATE_SETTINGS; current_tab = 1; settings_selected = 0; settings_scroll_offset = 0; break;
-                  case 17: state = STATE_SETTINGS; current_tab = 4; settings_selected = 0; settings_scroll_offset = 0; break;
-                  case 18: state = STATE_PLATFORM; theme_idx = 11; platform_view_style = 4; break;
-                  case 19: state = STATE_HOME; theme_idx = 11; home_view_idx = 0; home_widget_idx = HOME_WIDGET_DATEWX; home_widget2_idx = HOME_WIDGET_STATS; break;
+                  case 12: free_games(ren); scan_games(ren, font_label, 0);
+                           selected = (psapphire >= 0 ? psapphire : 0);
+                           state = STATE_MENU; grid_cols = 1; grid_rows = 1; theme_idx = 1; break;
+                  case 13: state = STATE_MINIGAMES; theme_idx = 1; mg_menu_sel = 0; break;
+                  case 14: state = STATE_HOME; theme_idx = 9; home_view_idx = 0; home_selected = 1;
+                           home_widget_idx = HOME_WIDGET_DATEWX; home_widget2_idx = HOME_WIDGET_STATS; break;
                 }
                 carousel_transition_start = anim_start(); platform_enter_time = SDL_GetTicks();
+                if (pstep >= 4 && pstep <= 7) platform_enter_time -= 11000;
                 page_transition_start = SDL_GetTicks(); selection_transition_start_1x1 = SDL_GetTicks();
             }
+            // Entering STATE_PLATFORM resets the timer on its first rendered
+            // frame; keep temporary help text aged out in subsequent promo frames.
+            if (pstep >= 4 && pstep <= 7 && pf > 0) platform_enter_time = SDL_GetTicks() - 11000;
             pf++;
             if (pf == PSETTLE) {
                 char pp[700];
