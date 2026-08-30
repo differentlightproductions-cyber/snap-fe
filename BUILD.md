@@ -87,8 +87,8 @@ and the release packager refuses such a binary. Nothing is static-linked — the
 
 Any one of:
 
-- **SD card:** run `./knulli/package.sh 1.1.6` to build
-  `dist/SnapFE-Alpha-1.1.6.zip`, then extract the ZIP directly onto the card's
+- **SD card:** run `./knulli/package.sh 1.1.7` to build
+  `dist/SnapFE-Alpha-1.1.7.zip`, then extract the ZIP directly onto the card's
   SHARE partition. The archive root is already `system/` + `roms/`. Details + revert steps in
   `knulli/INSTALL.txt`.
 - **Over SSH:** `./knulli/deploy.sh root@<device-ip>` — pushes the binary +

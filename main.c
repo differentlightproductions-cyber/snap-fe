@@ -19,8 +19,11 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#ifdef SNAPOS_TARGET_KNULLI
+#include <linux/input.h>
+#endif
 
-#define SNAPFE_VERSION "Alpha Build 1.1.6"
+#define SNAPFE_VERSION "Alpha Build 1.1.7"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -3019,6 +3022,33 @@ Uint32 last_input_time = 0;
 int is_sleeping = 0;
 int lid_closed = 0;          // clamshell state (RG34XX-SP): 0 open, 1 closed
 Uint32 lid_last_evt = 0;     // debounce for the polled hall sensor
+static int lid_evdev_fd = -1;       // raw controller event stream; survives SDL video handoff
+static int game_lid_paused = 0;     // emulator process group is SIGSTOP'd while the lid is shut
+static unsigned renderer_epoch = 1; // invalidates local/static GPU texture caches after RetroArch
+
+static void lid_log(const char *event) {
+#ifdef SNAPOS_TARGET_KNULLI
+    FILE *f = fopen("/userdata/system/snapos/lid-events.log", "a");
+    if (f) {
+        fprintf(f, "%ld %s game=%d emu_pid=%d\n", (long)time(NULL), event,
+                game_running, (int)emu_pid);
+        fclose(f);
+    }
+#else
+    (void)event;
+#endif
+}
+
+static void lid_set_state(int want_closed) {
+    Uint32 now = SDL_GetTicks();
+    if (want_closed != lid_closed && now - lid_last_evt > 250) {
+        lid_last_evt = now;
+        lid_closed = want_closed;
+        is_sleeping = want_closed;
+        if (!want_closed) last_input_time = now;
+        lid_log(want_closed ? "closed" : "opened");
+    }
+}
 
 char* activity_path() {
     static char path[512];
@@ -4577,6 +4607,15 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
 
         // Cache the standalone cover (+ its silhouette shadow) keyed on the ROM path.
         static SDL_Texture *np_art = NULL, *np_shadow = NULL; static char np_key[800] = ""; static unsigned char np_op[4] = {0,0,255,255};
+        static unsigned np_epoch = 0;
+        if (np_epoch != renderer_epoch) {
+            // The old renderer already freed these GPU objects. Do not destroy
+            // the stale pointers; just forget them and rebuild on this frame.
+            np_art = np_shadow = NULL;
+            np_key[0] = '\0';
+            np_op[0] = np_op[1] = 0; np_op[2] = np_op[3] = 255;
+            np_epoch = renderer_epoch;
+        }
         if (strcmp(np_key, activity_records[npi].path) != 0) {
             if (np_art) { SDL_DestroyTexture(np_art); np_art = NULL; }
             if (np_shadow) { SDL_DestroyTexture(np_shadow); np_shadow = NULL; }
@@ -7217,6 +7256,35 @@ static int find_evdev_for(const char *name, char *out, size_t outsz) {
     return 0;
 }
 
+// SDL's keyboard events come from the video backend. Snap FE deliberately
+// tears that backend down while RetroArch owns DRM, so the normal INSERT /
+// DELETE lid events disappear during a game. Keep a separate non-blocking
+// reader on the controller's evdev node so clamshell sleep still works while
+// our window does not exist. Multiple readers are supported; RetroArch keeps
+// receiving the same controller events independently.
+static void lid_evdev_open(void) {
+    if (lid_evdev_fd >= 0) return;
+    char path[64];
+    // The RG34XX-SP hall switch lives on the AXP power-management input
+    // device, not the game controller. On current Knulli that is event0 and
+    // advertises KEY_INSERT/KEY_DELETE. Resolve by device name because event
+    // numbering can change when USB/Bluetooth controllers are connected.
+    if (find_evdev_for("axp2202-pek", path, sizeof path))
+        lid_evdev_fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (lid_evdev_fd < 0 && access("/dev/input/event0", R_OK) == 0)
+        lid_evdev_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
+}
+static void lid_evdev_poll(void) {
+    lid_evdev_open();
+    if (lid_evdev_fd < 0) return;
+    struct input_event iev;
+    while (read(lid_evdev_fd, &iev, sizeof iev) == (ssize_t)sizeof iev) {
+        if (iev.type != EV_KEY || iev.value == 0) continue;
+        if (iev.code == KEY_INSERT)      lid_set_state(1);
+        else if (iev.code == KEY_DELETE) lid_set_state(0);
+    }
+}
+
 // Fork/exec Batocera's emulatorlauncher for one ROM, passing the live SDL pad
 // info as -p1* args (without them configgen binds no controller). force_core is
 // an optional libretro core short name ("gambatte") -- NULL lets configgen pick.
@@ -7275,6 +7343,7 @@ static pid_t spawn_emulatorlauncher(const char *sys, const char *rompath, const 
     return spawn_emulatorlauncher_ex(sys, rompath, force_core, NULL);
 }
 #else
+static void lid_evdev_poll(void) {}
 static pid_t spawn_emulatorlauncher(const char *sys, const char *rompath, const char *force_core) {
     (void)sys; (void)rompath; (void)force_core; return -1; // desktop dev has no emulatorlauncher
 }
@@ -8003,6 +8072,10 @@ static void snap_make_window(SDL_Window **win, SDL_Renderer **ren) {
 // so RetroArch gets a clean display, then rebuild on return. Every cached
 // texture pointer is nulled -- the lazy loaders repopulate them next frame.
 static void snap_release_video(SDL_Window **win, SDL_Renderer **ren) {
+    // Cancel queued/finished artwork uploads before the renderer disappears.
+    // Otherwise the worker can hand the main thread a surface while `ren` is
+    // NULL, leaving that game's queue state stuck on a destroyed GPU object.
+    art_async_reset();
     if (*ren) { SDL_DestroyRenderer(*ren); *ren = NULL; } // destroys all its textures too
     if (*win) { SDL_DestroyWindow(*win); *win = NULL; }
     // Fully drop the video subsystem so RetroArch gets a clean DRM master AND we
@@ -8010,8 +8083,15 @@ static void snap_release_video(SDL_Window **win, SDL_Renderer **ren) {
     // render-to-texture path (the composed carousel cards, bookshelf, etc.)
     // broken on the mali driver -- textures came back blank until a full restart.
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    renderer_epoch++;                           // local/static caches rebuild lazily
     text_cache_count = 0;                       // entries already freed by DestroyRenderer
-    for (int i = 0; i < game_count; i++) games[i].box_art = NULL;
+    for (int i = 0; i < game_count; i++) {
+        games[i].box_art = NULL;
+        games[i].box_shadow = NULL;
+        games[i].art_q_state = 0;
+        games[i].art_op[0] = games[i].art_op[1] = 0;
+        games[i].art_op[2] = games[i].art_op[3] = 255;
+    }
     art_ring_n = 0; art_ring_head = 0;
     g_art_pending = NULL;   // freed with the renderer; rebuilt lazily
     platform_bg_tex = NULL;
@@ -8027,7 +8107,8 @@ static void snap_release_video(SDL_Window **win, SDL_Renderer **ren) {
     platform_assets_loaded_for = -1;
     bookshelf_bg = NULL;   bookshelf_assets_tried = 0;
     listview_bg  = NULL;   listview_bg_tried = 0;
-    book_shot_tex = NULL;  book_shot_for = -1;
+    book_shot_tex = NULL;  book_shot_shadow = NULL; book_shot_for = -1;
+    list_prev_one = NULL;
     for (int i = 0; i < PLATFORM_COUNT; i++) book_spine_icon[i] = NULL;
 }
 static void snap_acquire_video(SDL_Window **win, SDL_Renderer **ren) {
@@ -8934,6 +9015,12 @@ static SDL_Texture *hgrid_icon_cache[HGRID_SLUG_N] = { 0 };
 static int          hgrid_icon_tried[HGRID_SLUG_N] = { 0 };
 
 static SDL_Texture *hgrid_icon(SDL_Renderer *ren, const char *slug) {
+    static unsigned icon_epoch = 0;
+    if (icon_epoch != renderer_epoch) {
+        memset(hgrid_icon_cache, 0, sizeof hgrid_icon_cache);
+        memset(hgrid_icon_tried, 0, sizeof hgrid_icon_tried);
+        icon_epoch = renderer_epoch;
+    }
     for (int i = 0; i < HGRID_SLUG_N; i++) if (strcmp(HGRID_SLUGS[i], slug) == 0) {
         if (!hgrid_icon_tried[i]) {
             hgrid_icon_tried[i] = 1;
@@ -8952,6 +9039,12 @@ static SDL_Texture *hgrid_icon(SDL_Renderer *ren, const char *slug) {
 static struct { char key[288]; SDL_Texture *tex; } hgrid_art[HGRID_ART_CAP];
 static int hgrid_art_n = 0;
 static SDL_Texture *hgrid_cover(SDL_Renderer *ren, const char *pdir, const char *path) {
+    static unsigned art_epoch = 0;
+    if (art_epoch != renderer_epoch) {
+        memset(hgrid_art, 0, sizeof hgrid_art);
+        hgrid_art_n = 0;
+        art_epoch = renderer_epoch;
+    }
     char raw[200]; const char *b = strrchr(path, '/');
     strip_ext(b ? b + 1 : path, raw, sizeof raw);
     char key[288]; snprintf(key, sizeof key, "%s|%s", pdir, raw);
@@ -10256,7 +10349,9 @@ int main(int argc, char *argv[]) {
                               : scrolling ? 2
                               : power_save_mode ? 3 : 6;
         }
-        art_drain(ren, art_decode_budget);
+        // `ren` is intentionally NULL for the whole RetroArch session. Never
+        // try to upload decoded covers into a renderer that has been released.
+        if (ren) art_drain(ren, art_decode_budget);
         // Look-ahead: covers around the cursor so the next flip already has art.
         if (game_count > 0 && (state == STATE_MENU || state == STATE_BOOK))
             art_prefetch(selected, 6, 24);
@@ -10374,19 +10469,7 @@ int main(int argc, char *argv[]) {
                 if (e.key.keysym.scancode == SDL_SCANCODE_INSERT ||
                     e.key.keysym.scancode == SDL_SCANCODE_DELETE) {
                     int want_closed = (e.key.keysym.scancode == SDL_SCANCODE_INSERT);
-                    Uint32 lnow = SDL_GetTicks();
-                    if (want_closed != lid_closed && lnow - lid_last_evt > 250) {
-                        lid_last_evt = lnow;
-                        lid_closed = want_closed;
-                        // Actual power-down / power-up is handled by the
-                        // deep-rest fast path in the main loop (based on lid_closed).
-                        if (want_closed) {
-                            is_sleeping = 1;
-                        } else {
-                            is_sleeping = 0;
-                            last_input_time = lnow;
-                        }
-                    }
+                    lid_set_state(want_closed);
                     continue; // a lid key is never a normal keypress
                 }
 
@@ -12115,6 +12198,33 @@ int main(int argc, char *argv[]) {
         // (RetroArch owns the pad). We only watch for the emulator exiting.
         if (game_running) {
             if (!game_video_released) { snap_release_video(&win, &ren); game_video_released = 1; }
+
+            // With SDL video shut down there are no SDL keyboard events, so
+            // watch the RG34XX-SP hall sensor directly through evdev. Closing
+            // the lid freezes the entire launcher/emulator process group and
+            // enters the same deep-rest path used by the frontend. Reopening
+            // restores power first, then resumes the game exactly where it was.
+            lid_evdev_poll();
+            if (lid_closed) {
+                if (!game_lid_paused) {
+                    if (emu_pid > 0) { kill(-emu_pid, SIGSTOP); kill(emu_pid, SIGSTOP); }
+                    if (!deep_rest_active) { deep_rest_enter(); deep_rest_active = 1; }
+                    game_lid_paused = 1;
+                    lid_log("game-paused");
+                }
+                SDL_Delay(250);
+                continue;
+            }
+            if (game_lid_paused) {
+                if (deep_rest_active) { deep_rest_exit(); deep_rest_active = 0; }
+                if (emu_pid > 0) { kill(-emu_pid, SIGCONT); kill(emu_pid, SIGCONT); }
+                game_lid_paused = 0;
+                lid_log("game-resumed");
+#ifdef SNAPOS_TARGET_KNULLI
+                brightness_guard_last = 0;
+#endif
+                last_input_time = SDL_GetTicks();
+            }
             brightness_guard_tick();
             // Drain the queue so nothing piles up, but honour ONE gesture:
             // Menu(16) + Start(9) held together -> kill the game. This is the
@@ -12122,6 +12232,12 @@ int main(int argc, char *argv[]) {
             // pad that never got autoconfigured). Everything else is discarded.
             SDL_Event ge;
             while (SDL_PollEvent(&ge)) {
+                if (ge.type == SDL_KEYDOWN &&
+                    (ge.key.keysym.scancode == SDL_SCANCODE_INSERT ||
+                     ge.key.keysym.scancode == SDL_SCANCODE_DELETE)) {
+                    lid_set_state(ge.key.keysym.scancode == SDL_SCANCODE_INSERT);
+                    continue;
+                }
                 if (ge.type == SDL_JOYBUTTONDOWN && emu_pid > 0 &&
                     (ge.jbutton.button == 10 || ge.jbutton.button == 16)) {
                     SDL_Joystick *js = SDL_JoystickFromInstanceID(ge.jbutton.which);
@@ -12141,6 +12257,7 @@ int main(int argc, char *argv[]) {
             pid_t r = (emu_pid > 0) ? waitpid(emu_pid, &status, WNOHANG) : emu_pid;
             if (r != 0) {
                 game_running = 0; emu_pid = -1;
+                game_lid_paused = 0;
                 if (ingame_volume_changed) { save_settings(); ingame_volume_changed = 0; } // persist volume nudged mid-game
                 if (g_link_active) { link_restore_core_opts(); g_link_active = 0; } // undo network-link core options
                 game_audio_mute(0);   // clear the "radio over games" mute, if set

@@ -5,8 +5,18 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
 
-**Current release: Alpha 1.1.6.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.1.7.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.1.7 hotfix
+
+- Closing the RG34XX-SP lid during a RetroArch game now pauses the emulator,
+  enters Snap FE deep rest, and resumes the same session when the lid opens.
+- The lid watcher now follows the real AXP hall-sensor input device rather than
+  the game-controller event node, so it remains active while Snap FE gives the
+  display to RetroArch.
+- Returning from a game now rebuilds cover-art, shadow, Home-widget, and app-grid
+  GPU caches instead of occasionally showing corrupted or overlapping artwork.
 
 ### 1.1.6 highlights
 
@@ -60,7 +70,7 @@ now — not every emulator or system Knulli supports. Expect alpha rough edges.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.1.6.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.1.7.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
@@ -69,7 +79,7 @@ and libraries, installs the hook atomically, and reboots automatically.
 
 If a launcher returns to EmulationStation, send the files named
 `loader-check.log`, `port-launch.log`, and `install.log` from
-`SHARE/system/snapos/`; 1.1.6 no longer fails silently.
+`SHARE/system/snapos/`; current packages no longer fail silently.
 
 ## Development
 
