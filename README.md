@@ -5,8 +5,26 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
 
-**Current release: Alpha 1.1.7.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.1.8.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.1.8 highlights
+
+- App Focused Home is now a strict, paged 4x2 layout. Hold X to rearrange apps
+  with the familiar jiggle mode, including movement between pages.
+- The Game settings tab now contains Games Folder, Display Art, and Show
+  Descriptions. Display Art refreshes the library only after Save and only when
+  the saved art type actually changed.
+- Battery and Night controls are separate collapsible groups, and all remaining
+  test-build PC-key prompts have been replaced with handheld ABXY/D-pad labels.
+- CPU Performance Mode has a visible `PERF` status badge, Top Bar underlines
+  adapt to the selected backdrop color, and a Dark Purple theme is included.
+- Link Play protects its controls footer and shows the seven or eight games that
+  fit the current font size while keeping the full list scrollable.
+- Block Roll now contains ten solvable stages. The Mini Games browser shows five
+  legible games at a time and scrolls to the rest.
+- The 1.1.7 in-game lid sleep/wake and post-game renderer-cache hotfixes remain
+  included in this release.
 
 ### 1.1.7 hotfix
 
@@ -70,7 +88,7 @@ now — not every emulator or system Knulli supports. Expect alpha rough edges.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.1.7.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.1.8.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
