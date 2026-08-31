@@ -2465,15 +2465,21 @@ Uint32 desc_marq_start = 0;
 // index, so it survives files being added/removed later. ---
 #define MAX_BG_FILES 32
 char background_files[MAX_BG_FILES][256];
+char background_titles[MAX_BG_FILES][128];
+char background_details[MAX_BG_FILES][160];
 int background_file_count = 0;
 int background_picker_selected = 0;
 char platform_bg_choice[PLATFORM_COUNT][256] = { { 0 } };
 int bg_picker_platform = 0; // which platform the picker is scoped to when opened from Settings
+char bg_picker_status[160] = "";
+int bg_delete_confirm_index = -1;
+Uint32 bg_delete_confirm_until = 0;
 
 #define BG_ONLINE_MAX 12
 char bg_online_title[BG_ONLINE_MAX][128];
 char bg_online_license[BG_ONLINE_MAX][64];
 char bg_online_artist[BG_ONLINE_MAX][96];
+char bg_online_details[BG_ONLINE_MAX][160];
 int bg_online_count = 0, bg_online_selected = 0;
 char bg_online_status[160] = "Connect to Wi-Fi to browse free backgrounds.";
 char bg_online_query[96] = "";
@@ -2596,6 +2602,8 @@ AppState kb_return_state = STATE_SETTINGS;
 #define KB_PURPOSE_PLAYER_NAME 12
 #define KB_PURPOSE_RA_WEB_KEY 13
 #define KB_PURPOSE_BG_SEARCH 14
+#define KB_PURPOSE_WALLHAVEN_KEY 15
+#define KB_PURPOSE_BG_RENAME 16
 int kb_purpose = KB_PURPOSE_API_KEY;
 
 // --- Scraper progress overlay (backgrounded scrape + polled status file) ---
@@ -2648,6 +2656,8 @@ int DEVICE_COUNT = 2;
 #define ROW_SCRAPE_HEADER 24
 #define ROW_WALLHAVEN_HEADER 25
 #define ROW_WALLHAVEN_NOTE 26
+#define ROW_WALLHAVEN_KEY 27
+#define ROW_WALLHAVEN_SEARCH 28
 #define MAX_ACCOUNT_ROWS 40
 
 int build_account_rows(int *row_type, int *row_extra) {
@@ -2682,7 +2692,11 @@ int build_account_rows(int *row_type, int *row_extra) {
         if (ra_signin_status[0]) { row_type[idx] = ROW_RA_STATUS; row_extra[idx] = 0; idx++; }
     }
     row_type[idx] = ROW_WALLHAVEN_HEADER; row_extra[idx] = 0; idx++;
-    if (wallhaven_dropdown_open) { row_type[idx] = ROW_WALLHAVEN_NOTE; row_extra[idx] = 0; idx++; }
+    if (wallhaven_dropdown_open) {
+        row_type[idx] = ROW_WALLHAVEN_NOTE; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_WALLHAVEN_KEY; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_WALLHAVEN_SEARCH; row_extra[idx] = 0; idx++;
+    }
     row_type[idx] = ROW_ACCT_RESTORE; row_extra[idx] = 0; idx++;
     return idx;
 }
@@ -6952,6 +6966,148 @@ int list_backgrounds_for_platform(int platform, char filenames[][256], int max_c
     return count;
 }
 
+static void background_human_name(const char *filename, char *out, size_t outsz) {
+    snprintf(out, outsz, "%s", filename ? filename : "Background");
+    char *dot = strrchr(out, '.');
+    if (dot) *dot = '\0';
+    for (char *p = out; *p; p++) if (*p == '-' || *p == '_') *p = ' ';
+    if (!out[0]) snprintf(out, outsz, "Background");
+}
+
+static void refresh_background_picker(void) {
+    background_file_count = list_backgrounds_for_platform(bg_picker_platform, background_files, MAX_BG_FILES);
+    for (int i = 0; i < background_file_count; i++) {
+        background_human_name(background_files[i], background_titles[i], sizeof background_titles[i]);
+        background_details[i][0] = '\0';
+
+        char sidecar[900];
+        snprintf(sidecar, sizeof sidecar, "%s/assets/backgrounds/%s/%s.license.txt",
+                 sn_data_root(), platform_dirs[bg_picker_platform], background_files[i]);
+        FILE *f = fopen(sidecar, "r");
+        if (!f) continue;
+        char line[1000], creator[96] = "", resolution[40] = "", category[48] = "", stats[96] = "";
+        while (fgets(line, sizeof line, f)) {
+            char *nl = strpbrk(line, "\r\n"); if (nl) *nl = '\0';
+            if (!strncmp(line, "Title: ", 7) && line[7])
+                snprintf(background_titles[i], sizeof background_titles[i], "%.127s", line + 7);
+            else if (!strncmp(line, "Creator: ", 9))
+                snprintf(creator, sizeof creator, "%.95s", line + 9);
+            else if (!strncmp(line, "Resolution: ", 12))
+                snprintf(resolution, sizeof resolution, "%.39s", line + 12);
+            else if (!strncmp(line, "Category: ", 10))
+                snprintf(category, sizeof category, "%.47s", line + 10);
+            else if (!strncmp(line, "Stats: ", 7))
+                snprintf(stats, sizeof stats, "%.95s", line + 7);
+        }
+        fclose(f);
+        if (resolution[0] || category[0] || creator[0]) {
+            snprintf(background_details[i], sizeof background_details[i], "%s%s%s%s%s",
+                     resolution, resolution[0] && category[0] ? "  |  " : "", category,
+                     (resolution[0] || category[0]) && creator[0] ? "  |  by " : creator[0] ? "by " : "", creator);
+        } else if (stats[0]) {
+            snprintf(background_details[i], sizeof background_details[i], "%s", stats);
+        }
+    }
+}
+
+static void background_sidecar_set_title(const char *path, const char *title) {
+    char tmp[920]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *in = fopen(path, "r");
+    FILE *out = fopen(tmp, "w");
+    if (!out) { if (in) fclose(in); return; }
+    fprintf(out, "Title: %s\n", title);
+    if (in) {
+        char line[1000];
+        while (fgets(line, sizeof line, in)) if (strncmp(line, "Title: ", 7)) fputs(line, out);
+        fclose(in);
+    }
+    fclose(out);
+    rename(tmp, path);
+}
+
+static void rename_selected_background(void) {
+    if (background_picker_selected <= 0 || background_picker_selected > background_file_count) return;
+    int bi = background_picker_selected - 1;
+    const char *oldname = background_files[bi];
+    const char *ext = strrchr(oldname, '.');
+    if (!ext || (!has_ext(oldname, ".png") && !has_ext(oldname, ".jpg") && !has_ext(oldname, ".jpeg"))) ext = ".jpg";
+
+    char stem[112]; int n = 0, pending_space = 0;
+    for (int i = 0; kb_buffer[i] && n < (int)sizeof(stem) - 1; i++) {
+        unsigned char c = (unsigned char)kb_buffer[i];
+        if (isalnum(c) || c == '-' || c == '_' || c == '(' || c == ')') {
+            if (pending_space && n > 0) stem[n++] = ' ';
+            pending_space = 0; stem[n++] = (char)c;
+        } else if (c == ' ' || c == '.') pending_space = n > 0;
+    }
+    while (n > 0 && (stem[n - 1] == ' ' || stem[n - 1] == '.')) n--;
+    stem[n] = '\0';
+    if (!stem[0]) { snprintf(bg_picker_status, sizeof bg_picker_status, "Enter a name before pressing Done."); return; }
+
+    char newname[256], dir[700], oldpath[980], newpath[980], oldside[1000], newside[1000];
+    snprintf(newname, sizeof newname, "%s%s", stem, ext);
+    if (!strcmp(oldname, newname)) { snprintf(bg_picker_status, sizeof bg_picker_status, "That background already has this name."); return; }
+    snprintf(dir, sizeof dir, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    snprintf(oldpath, sizeof oldpath, "%s/%s", dir, oldname);
+    snprintf(newpath, sizeof newpath, "%s/%s", dir, newname);
+    if (access(newpath, F_OK) == 0) { snprintf(bg_picker_status, sizeof bg_picker_status, "A background with that name already exists."); return; }
+    if (rename(oldpath, newpath) != 0) { snprintf(bg_picker_status, sizeof bg_picker_status, "Could not rename this background."); return; }
+
+    snprintf(oldside, sizeof oldside, "%s.license.txt", oldpath);
+    snprintf(newside, sizeof newside, "%s.license.txt", newpath);
+    if (access(oldside, F_OK) == 0) rename(oldside, newside);
+    background_sidecar_set_title(newside, stem);
+    if (!strcmp(platform_bg_choice[bg_picker_platform], oldname)) {
+        snprintf(platform_bg_choice[bg_picker_platform], sizeof platform_bg_choice[bg_picker_platform], "%s", newname);
+        settings_dirty = 1;
+        save_settings();
+    }
+    if (bg_picker_platform == platform_selected) platform_assets_loaded_for = -1;
+    invalidate_carousel_bg(bg_picker_platform);
+    refresh_background_picker();
+    background_picker_selected = 1;
+    for (int i = 0; i < background_file_count; i++) if (!strcmp(background_files[i], newname)) { background_picker_selected = i + 1; break; }
+    snprintf(bg_picker_status, sizeof bg_picker_status, "Renamed to %s", newname);
+}
+
+static void delete_selected_background(void) {
+    if (background_picker_selected <= 0 || background_picker_selected > background_file_count) return;
+    int bi = background_picker_selected - 1;
+    char filename[256], title[128], dir[700], path[980], sidecar[1000];
+    snprintf(filename, sizeof filename, "%s", background_files[bi]);
+    snprintf(title, sizeof title, "%.127s", background_titles[bi][0] ? background_titles[bi] : filename);
+    snprintf(dir, sizeof dir, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    snprintf(path, sizeof path, "%s/%s", dir, filename);
+    snprintf(sidecar, sizeof sidecar, "%s.license.txt", path);
+    if (remove(path) != 0) {
+        snprintf(bg_picker_status, sizeof bg_picker_status, "Could not delete this background.");
+        return;
+    }
+    remove(sidecar);
+    if (!strcmp(platform_bg_choice[bg_picker_platform], filename)) {
+        platform_bg_choice[bg_picker_platform][0] = '\0';
+        settings_dirty = 1;
+        save_settings();
+    }
+    invalidate_carousel_bg(bg_picker_platform);
+    refresh_background_picker();
+    if (background_picker_selected > background_file_count) background_picker_selected = background_file_count;
+    bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
+    snprintf(bg_picker_status, sizeof bg_picker_status, "Deleted %.110s", title);
+}
+
+static void shell_quote_arg(const char *src, char *out, size_t outsz) {
+    size_t n = 0;
+    if (!outsz) return;
+    out[n++] = '\'';
+    for (const char *p = src ? src : ""; *p && n + 5 < outsz; p++) {
+        if (*p == '\'') { out[n++] = '\''; out[n++] = '\\'; out[n++] = '\''; out[n++] = '\''; }
+        else out[n++] = *p;
+    }
+    if (n + 1 < outsz) out[n++] = '\'';
+    out[n] = '\0';
+}
+
 static void bg_online_paths(char *results, size_t rsz, char *receipt, size_t psz) {
     char cache[600];
     snprintf(cache, sizeof cache, "%s/cache", sn_data_root());
@@ -6971,6 +7127,33 @@ static int wallhaven_key_configured(void) {
     return n >= 20;
 }
 
+static void save_wallhaven_key_from_buffer(void) {
+    char cfg_dir[600], path[700];
+    snprintf(cfg_dir, sizeof cfg_dir, "%s/config", sn_data_root());
+    mkdir(cfg_dir, 0755);
+    snprintf(path, sizeof path, "%s/wallhaven.key", cfg_dir);
+
+    /* A blank submission deliberately removes the optional personal key.
+       Public SFW search remains available, so users can always recover. */
+    if (kb_len <= 0) {
+        remove(path);
+        snprintf(bg_online_status, sizeof bg_online_status,
+                 "Personal API key cleared. Public SFW search is ready.");
+        return;
+    }
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        snprintf(bg_online_status, sizeof bg_online_status,
+                 "Could not save the WallHaven API key.");
+        return;
+    }
+    fwrite(kb_buffer, 1, (size_t)kb_len, f);
+    fputc('\n', f);
+    fclose(f);
+    snprintf(bg_online_status, sizeof bg_online_status,
+             "Personal API key saved. Search is ready.");
+}
+
 static void bg_online_read_results(void) {
     char results[700], receipt[700]; bg_online_paths(results, sizeof results, receipt, sizeof receipt);
     FILE *f = fopen(results, "r");
@@ -6982,24 +7165,29 @@ static void bg_online_read_results(void) {
         char *url = strchr(title, '\t'); if (!url) continue; *url++ = '\0';
         char *license = strchr(url, '\t'); if (!license) continue; *license++ = '\0';
         char *artist = strchr(license, '\t'); if (!artist) continue; *artist++ = '\0';
-        char *source = strchr(artist, '\t'); if (source) *source = '\0';
-        char *nl = strchr(artist, '\n'); if (nl) *nl = '\0';
+        char *source = strchr(artist, '\t'); if (!source) continue; *source++ = '\0';
+        char *details = strchr(source, '\t');
+        if (details) { *details++ = '\0'; char *nl = strpbrk(details, "\r\n"); if (nl) *nl = '\0'; }
+        else details = "";
         snprintf(bg_online_title[bg_online_count], sizeof bg_online_title[0], "%.127s", title);
         snprintf(bg_online_license[bg_online_count], sizeof bg_online_license[0], "%.63s", license);
         snprintf(bg_online_artist[bg_online_count], sizeof bg_online_artist[0], "%.95s", artist);
+        snprintf(bg_online_details[bg_online_count], sizeof bg_online_details[0], "%.159s", details);
         bg_online_count++;
     }
     fclose(f);
 }
 
 static void bg_online_search(SDL_Renderer *ren) {
-    char results[700], receipt[700], command[1800];
+    char results[700], receipt[700], dest[700], quoted_query[420], command[2200];
     bg_online_paths(results, sizeof results, receipt, sizeof receipt);
+    snprintf(dest, sizeof dest, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    shell_quote_arg(bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform], quoted_query, sizeof quoted_query);
     remove(results); remove(receipt);
     draw_progress(ren, "Finding free backgrounds", 0.25f);
     snprintf(command, sizeof command,
-             "python3 \"%s/background_browser.py\" search --query \"%s\" --output \"%s\"",
-             sn_data_root(), bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform], results);
+             "python3 \"%s/background_browser.py\" search --query %s --output \"%s\" --dest-dir \"%s\"",
+             sn_data_root(), quoted_query, results, dest);
     int rc = system(command);
     bg_online_read_results();
     bg_online_selected = 0;
@@ -9564,6 +9752,12 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
         case KB_PURPOSE_BG_SEARCH:
             if (kb_buffer[0]) { snprintf(bg_online_query, sizeof bg_online_query, "%.95s", kb_buffer); bg_online_search_pending = 1; }
             break;
+        case KB_PURPOSE_WALLHAVEN_KEY:
+            save_wallhaven_key_from_buffer();
+            break;
+        case KB_PURPOSE_BG_RENAME:
+            rename_selected_background();
+            break;
         default: break;   // KB_PURPOSE_PRACTICE
     }
     kb_shift = 0;
@@ -11766,13 +11960,49 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if (state == STATE_BG_PICKER) {
+                    Uint32 bg_now = SDL_GetTicks();
+                    if (bg_delete_confirm_index >= 0 && bg_now > bg_delete_confirm_until) {
+                        bg_delete_confirm_index = -1;
+                        bg_delete_confirm_until = 0;
+                        bg_picker_status[0] = '\0';
+                    }
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
                         state = STATE_SETTINGS;
                     }
                     int picker_count = background_file_count + 1; // first row is the online browser
-                    if (e.key.keysym.sym == SDLK_DOWN) background_picker_selected = (background_picker_selected + 1) % picker_count;
-                    if (e.key.keysym.sym == SDLK_UP) background_picker_selected = (background_picker_selected - 1 + picker_count) % picker_count;
+                    if (e.key.keysym.sym == SDLK_DOWN) {
+                        background_picker_selected = (background_picker_selected + 1) % picker_count;
+                        bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
+                    }
+                    if (e.key.keysym.sym == SDLK_UP) {
+                        background_picker_selected = (background_picker_selected - 1 + picker_count) % picker_count;
+                        bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
+                    }
+                    if (e.key.keysym.sym == SDLK_s && background_picker_selected > 0) {
+                        bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
+                        int bi = background_picker_selected - 1;
+                        snprintf(kb_buffer, sizeof kb_buffer, "%s", background_files[bi]);
+                        char *dot = strrchr(kb_buffer, '.'); if (dot) *dot = '\0';
+                        kb_len = (int)strlen(kb_buffer); kb_row = kb_col = 0;
+                        kb_return_state = STATE_BG_PICKER; kb_purpose = KB_PURPOSE_BG_RENAME;
+                        play_click(); state = STATE_KEYBOARD;
+                    }
+                    if (e.key.keysym.sym == SDLK_f && background_picker_selected > 0) {
+                        if (bg_delete_confirm_index == background_picker_selected && bg_now <= bg_delete_confirm_until) {
+                            play_click();
+                            delete_selected_background();
+                        } else {
+                            bg_delete_confirm_index = background_picker_selected;
+                            bg_delete_confirm_until = bg_now + 5000;
+                            snprintf(bg_picker_status, sizeof bg_picker_status,
+                                     "Delete %.96s? Press Y again to confirm.",
+                                     background_titles[background_picker_selected - 1]);
+                            play_click();
+                        }
+                    }
                     if (e.key.keysym.sym == SDLK_RETURN) {
+                        bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
                         if (background_picker_selected == 0) {
                             play_click();
                             bg_online_search(ren);
@@ -12413,8 +12643,6 @@ int main(int argc, char *argv[]) {
                             int rt = acct_row_type[settings_selected];
                             if (rt == ROW_SCRAPE_HEADER) {
                                 scrape_dropdown_open = !scrape_dropdown_open;
-                            } else if (rt == ROW_WALLHAVEN_HEADER) {
-                                wallhaven_dropdown_open = !wallhaven_dropdown_open;
                             } else if (rt == ROW_SCRAPE_SOURCE) {
                                 scrape_source = (scrape_source + dir + 2) % 2;
                                 save_settings();
@@ -12591,7 +12819,9 @@ int main(int argc, char *argv[]) {
                                 int m=game_row_extra[settings_selected]; if(m>=0&&m<BG_MAKER_COUNT)bg_maker_open[m]=!bg_maker_open[m]; play_click();
                             } else if (rt == ROW_G_BG_ITEM) {
                                 bg_picker_platform = game_row_extra[settings_selected];
-                                background_file_count = list_backgrounds_for_platform(bg_picker_platform, background_files, MAX_BG_FILES);
+                                bg_picker_status[0] = '\0';
+                                bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
+                                refresh_background_picker();
                                 background_picker_selected = 0;
                                 for(int bi=0;bi<background_file_count;bi++) if(!strcmp(background_files[bi],platform_bg_choice[bg_picker_platform])){background_picker_selected=bi+1;break;}
                                 play_click(); state = STATE_BG_PICKER;
@@ -12652,7 +12882,9 @@ int main(int argc, char *argv[]) {
                                 bg_dropdown_open = !bg_dropdown_open;
                             } else if (rt == ROW_DISP_BG_ITEM) {
                                 bg_picker_platform = disp_row_extra[settings_selected];
-                                background_file_count = list_backgrounds_for_platform(bg_picker_platform, background_files, MAX_BG_FILES);
+                                bg_picker_status[0] = '\0';
+                                bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
+                                refresh_background_picker();
                                 background_picker_selected = 0;
                                 // Remember where we were: land on the currently-saved choice, not always the top.
                                 for (int bi = 0; bi < background_file_count; bi++) {
@@ -12668,7 +12900,32 @@ int main(int argc, char *argv[]) {
                             }
                         } else if (current_tab == TAB_ACCOUNT) {
                             int rt = acct_row_type[settings_selected];
-                            if (rt == ROW_SCRAPE_SOURCE) {
+                            if (rt == ROW_SCRAPE_HEADER) {
+                                scrape_dropdown_open = !scrape_dropdown_open;
+                            } else if (rt == ROW_WALLHAVEN_HEADER) {
+                                wallhaven_dropdown_open = !wallhaven_dropdown_open;
+                            } else if (rt == ROW_WALLHAVEN_KEY) {
+                                kb_buffer[0] = '\0'; /* never expose a saved personal key on screen */
+                                kb_len = 0;
+                                kb_row = 0; kb_col = 0;
+                                kb_return_state = STATE_SETTINGS;
+                                kb_purpose = KB_PURPOSE_WALLHAVEN_KEY;
+                                state = STATE_KEYBOARD;
+                            } else if (rt == ROW_WALLHAVEN_SEARCH) {
+                                bg_picker_platform = platform_selected;
+                                bg_picker_status[0] = '\0';
+                                bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
+                                refresh_background_picker();
+                                background_picker_selected = 0;
+                                snprintf(kb_buffer, sizeof kb_buffer, "%s",
+                                         bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform]);
+                                kb_len = (int)strlen(kb_buffer);
+                                kb_row = 0; kb_col = 0;
+                                kb_return_state = STATE_BG_ONLINE;
+                                kb_purpose = KB_PURPOSE_BG_SEARCH;
+                                play_click();
+                                state = STATE_KEYBOARD;
+                            } else if (rt == ROW_SCRAPE_SOURCE) {
                                 scrape_source = scrape_source ? 0 : 1;
                                 save_settings();
                             } else if (rt == ROW_SCRAPE_SS_USER) {
@@ -14346,23 +14603,29 @@ int main(int argc, char *argv[]) {
 
             {
                 int total = background_file_count + 1;
-                int first = background_picker_selected - 3; if (first < 0) first = 0;
-                if (first + 8 > total) first = total > 8 ? total - 8 : 0;
-                int y = 120;
-                for (int i = first; i < total && i < first + 8; i++) {
-                    const char *name = i == 0 ? "Get Free Backgrounds over Wi-Fi..." : background_files[i - 1];
+                int first = background_picker_selected - 2; if (first < 0) first = 0;
+                if (first + 5 > total) first = total > 5 ? total - 5 : 0;
+                int y = 112, rowh = 56;
+                for (int i = first; i < total && i < first + 5; i++) {
+                    const char *name = i == 0 ? "Get Free Backgrounds over Wi-Fi..." : background_titles[i - 1];
+                    const char *detail = i == 0 ? "Search WallHaven by title, game, system, or style" : background_details[i - 1];
                     SDL_Color c = (i == background_picker_selected) ? g_ui_text : g_ui_dim;
-                    SDL_Texture *ft = render_text_fit(ren, font_label, name, c, WIN_W - 80);
+                    SDL_Texture *ft = render_text_fit(ren, font_label, name, c, WIN_W - 104);
                     int fw, fh;
                     SDL_QueryTexture(ft, NULL, NULL, &fw, &fh);
                     if (i == background_picker_selected) {
                         SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
-                        SDL_Rect hl = { WIN_W/2 - fw/2 - 16, y - 6, fw + 32, fh + 12 };
+                        SDL_Rect hl = { 32, y - 5, WIN_W - 64, rowh - 4 };
                         SDL_RenderFillRect(ren, &hl);
                     }
                     SDL_Rect fdst = { WIN_W/2 - fw/2, y, fw, fh };
                     SDL_RenderCopy(ren, ft, NULL, &fdst);
-                    y += fh + 14;
+                    if (detail[0]) {
+                        SDL_Texture *dt = render_text_fit(ren, font_fixed ? font_fixed : font_label, detail, g_ui_dim, WIN_W - 116);
+                        int dw, dh; SDL_QueryTexture(dt, NULL, NULL, &dw, &dh);
+                        SDL_RenderCopy(ren, dt, NULL, &(SDL_Rect){ WIN_W/2 - dw/2, y + fh + 2, dw, dh });
+                    }
+                    y += rowh;
                 }
                 if (background_file_count == 0) {
                     SDL_Texture *m = render_text(ren, font_label, "No downloaded backgrounds yet", g_ui_dim);
@@ -14371,7 +14634,12 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            SDL_Texture *hint = render_text(ren, font_label, "A  Choose        B  Back", g_ui_dim);
+            if (bg_picker_status[0]) {
+                SDL_Texture *st = render_text_fit(ren, font_fixed ? font_fixed : font_label, bg_picker_status, th->accent2, WIN_W - 80);
+                int stw, sth; SDL_QueryTexture(st, NULL, NULL, &stw, &sth);
+                SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ WIN_W/2 - stw/2, WIN_H - sth - 42, stw, sth });
+            }
+            SDL_Texture *hint = render_text_fit(ren, font_label, "A  Choose     X  Rename     Y  Delete     B  Back", g_ui_dim, WIN_W - 48);
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hiw/2, WIN_H - hih - 14, hiw, hih });
 
@@ -14383,10 +14651,10 @@ int main(int argc, char *argv[]) {
             SDL_Texture *status = render_text_fit(ren, font_label, bg_online_status, g_ui_dim, WIN_W - 60);
             int sw, sh; SDL_QueryTexture(status, NULL, NULL, &sw, &sh);
             SDL_RenderCopy(ren, status, NULL, &(SDL_Rect){ WIN_W/2 - sw/2, 92, sw, sh });
-            int top = 124, rowh = 48;
-            int first = bg_online_selected - 3; if (first < 0) first = 0;
-            if (first + 6 > bg_online_count) first = bg_online_count > 6 ? bg_online_count - 6 : 0;
-            for (int i = first; i < bg_online_count && i < first + 6; i++) {
+            int top = 122, rowh = 68;
+            int first = bg_online_selected - 2; if (first < 0) first = 0;
+            if (first + 4 > bg_online_count) first = bg_online_count > 4 ? bg_online_count - 4 : 0;
+            for (int i = first; i < bg_online_count && i < first + 4; i++) {
                 int y = top + (i - first) * rowh, sel = (i == bg_online_selected);
                 if (sel) {
                     SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
@@ -14395,7 +14663,11 @@ int main(int argc, char *argv[]) {
                 SDL_Texture *nm = render_text_fit(ren, font_label, bg_online_title[i], sel ? g_ui_text : g_ui_dim, WIN_W - 90);
                 int nw, nh; SDL_QueryTexture(nm, NULL, NULL, &nw, &nh);
                 SDL_RenderCopy(ren, nm, NULL, &(SDL_Rect){ 44, y, nw, nh });
-                char credit[180]; snprintf(credit, sizeof credit, "%s  \xC2\xB7  %s", bg_online_license[i], bg_online_artist[i]);
+                char credit[260];
+                if (bg_online_details[i][0])
+                    snprintf(credit, sizeof credit, "%s  \xC2\xB7  by %s", bg_online_details[i], bg_online_artist[i]);
+                else
+                    snprintf(credit, sizeof credit, "%s  \xC2\xB7  %s", bg_online_license[i], bg_online_artist[i]);
                 SDL_Texture *cr = render_text_fit(ren, font_fixed ? font_fixed : font_label, credit, g_ui_dim, WIN_W - 100);
                 int cw, ch; SDL_QueryTexture(cr, NULL, NULL, &cw, &ch);
                 SDL_RenderCopy(ren, cr, NULL, &(SDL_Rect){ 44, y + nh + 2, cw, ch });
@@ -14673,6 +14945,9 @@ int main(int argc, char *argv[]) {
                         case ROW_WALLHAVEN_HEADER: snprintf(text, sizeof(text), "%c WallHaven", wallhaven_dropdown_open ? 'v' : '>'); break;
                         case ROW_WALLHAVEN_NOTE: snprintf(text, sizeof(text), "%s",
                             wallhaven_key_configured() ? "Personal API: Linked (SFW search)" : "Public SFW search: Ready (no key needed)"); indent = 1; break;
+                        case ROW_WALLHAVEN_KEY: snprintf(text, sizeof(text), "Personal API Key: %s",
+                            wallhaven_key_configured() ? "Set (Press A to change)" : "Optional (Press A to enter)"); indent = 1; break;
+                        case ROW_WALLHAVEN_SEARCH: snprintf(text, sizeof(text), "Search WallHaven (Press A)"); indent = 1; break;
                         case ROW_ACCT_RESTORE: snprintf(text, sizeof(text), "Restore to Default (Accounts): %s", confirm_account_restore ? "Press A again to confirm" : "Press A"); break;
                     }
                 }
@@ -15094,6 +15369,9 @@ int main(int argc, char *argv[]) {
                                  : kb_purpose == KB_PURPOSE_PLAYER_NAME ? "YOUR NAME"
                                  : kb_purpose == KB_PURPOSE_BT_PASSKEY ? "BLUETOOTH PASSKEY / PIN"
                                  : kb_purpose == KB_PURPOSE_RADIO_SEARCH ? "SEARCH RADIO STATIONS"
+                                 : kb_purpose == KB_PURPOSE_BG_SEARCH ? "SEARCH WALLHAVEN BACKGROUNDS"
+                                 : kb_purpose == KB_PURPOSE_WALLHAVEN_KEY ? "WALLHAVEN PERSONAL API KEY"
+                                 : kb_purpose == KB_PURPOSE_BG_RENAME ? "RENAME BACKGROUND FILE"
                                  : "API KEY";
             // Bigger keys, and the whole block centred in the space below the
             // status bar so it fills the screen instead of floating up top.

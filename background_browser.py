@@ -9,8 +9,10 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 API = "https://wallhaven.cc/api/v1/search"
+INFO_API = "https://wallhaven.cc/api/v1/w/"
 UA = "SnapFE/1.1.9 (background-browser; https://github.com/differentlightproductions-cyber/snap-fe)"
 
 
@@ -39,31 +41,90 @@ def clean(value, limit=120):
     return value[:limit]
 
 
-def request_json(params):
-    url = API + "?" + urllib.parse.urlencode(params)
+def request_json(params, endpoint=API):
+    url = endpoint + ("?" + urllib.parse.urlencode(params) if params else "")
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=18) as response:
         return json.load(response)
 
 
-def search(query, output):
+def wallpaper_info(page, key, query):
+    """Add the descriptive fields omitted from Wallhaven search listings."""
+    wid = clean(page.get("id", "wallpaper"), 24)
+    detail = page
+    try:
+        params = {"apikey": key} if key else {}
+        detail = request_json(params, INFO_API + wid).get("data", page)
+    except Exception:
+        # A listing is still useful if an individual metadata lookup times out.
+        detail = page
+
+    tags = [clean(tag.get("name", ""), 48) for tag in detail.get("tags", [])]
+    tags = [tag for tag in tags if tag]
+    subject = ", ".join(tags[:3]) or clean(query.title(), 80) or "Wallpaper"
+    title = f"{subject} [{wid}]"
+    artist = clean(detail.get("uploader", {}).get("username") or "Wallhaven contributor", 80)
+    source = clean(detail.get("source") or detail.get("url") or ("https://wallhaven.cc/w/" + wid), 900)
+    resolution = clean(detail.get("resolution") or page.get("resolution") or "Unknown size", 32)
+    category = clean(detail.get("category") or page.get("category") or "general", 32).title()
+    views = int(detail.get("views") or page.get("views") or 0)
+    favorites = int(detail.get("favorites") or page.get("favorites") or 0)
+    created = clean(detail.get("created_at") or page.get("created_at") or "", 32)
+    stats = f"{resolution} | {category} | {views:,} views | {favorites:,} saves"
+    direct_url = detail.get("path") or page.get("path") or ""
+    original_filename = os.path.basename(urllib.parse.urlparse(direct_url).path)
+    return (title, direct_url, "Wallhaven", artist, source, stats, wid, resolution,
+            category, str(views), str(favorites), created, original_filename)
+
+
+def downloaded_identities(dest_dir):
+    """Return stable Wallhaven IDs/direct filenames already saved in a system folder."""
+    ids, direct_names = set(), set()
+    if not dest_dir or not os.path.isdir(dest_dir):
+        return ids, direct_names
+    for name in os.listdir(dest_dir):
+        if not name.endswith(".license.txt"):
+            match = re.search(r"wallhaven[-_ ]([a-z0-9]{6})(?:[-_. ]|$)", name, re.I)
+            if match:
+                ids.add(match.group(1).lower())
+            continue
+        try:
+            with open(os.path.join(dest_dir, name), encoding="utf-8") as fh:
+                for line in fh:
+                    label, sep, value = line.partition(":")
+                    if not sep:
+                        continue
+                    value = value.strip()
+                    if label == "Wallhaven ID" and value:
+                        ids.add(value.lower())
+                    elif label == "Original Filename" and value:
+                        direct_names.add(value.lower())
+                    elif label == "Source":
+                        match = re.search(r"wallhaven\.cc/w/([a-z0-9]{6})", value, re.I)
+                        if match:
+                            ids.add(match.group(1).lower())
+        except OSError:
+            pass
+    return ids, direct_names
+
+
+def search(query, output, dest_dir=""):
     params = {"q": query, "categories": "111", "purity": "100", "sorting": "relevance", "atleast": "640x480"}
     key = api_key()
     if key:
         params["apikey"] = key
     data = request_json(params)
-    rows = []
+    saved_ids, saved_names = downloaded_identities(dest_dir)
+    pages = []
     for page in data.get("data", []):
-        url = page.get("path") or ""
-        if not url:
+        direct_name = os.path.basename(urllib.parse.urlparse(page.get("path") or "").path).lower()
+        if not page.get("path") or str(page.get("id", "")).lower() in saved_ids or direct_name in saved_names:
             continue
-        wid = clean(page.get("id", "wallpaper"), 24)
-        title = f"Wallhaven {wid} ({page.get('resolution', 'wallpaper')})"
-        artist = clean(page.get("uploader", {}).get("username") or "Wallhaven contributor", 80)
-        source = page.get("url") or ("https://wallhaven.cc/w/" + wid)
-        rows.append((title, url, "Wallhaven", artist, source))
-        if len(rows) >= 12:
+        pages.append(page)
+        if len(pages) >= 12:
             break
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(lambda page: wallpaper_info(page, key, query), pages))
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as fh:
         for row in rows:
@@ -98,12 +159,12 @@ def download(results, index, dest_dir, receipt):
     os.replace(target + ".part", target)
     with open(target + ".license.txt", "w", encoding="utf-8") as fh:
         fh.write("Title: " + title + "\n")
-        if len(rows[index]) > 2:
-            fh.write("License: " + rows[index][2] + "\n")
-        if len(rows[index]) > 3:
-            fh.write("Creator: " + rows[index][3] + "\n")
-        if len(rows[index]) > 4:
-            fh.write("Source: " + rows[index][4] + "\n")
+        labels = ((2, "License"), (3, "Creator"), (4, "Source"), (5, "Stats"),
+                  (6, "Wallhaven ID"), (7, "Resolution"), (8, "Category"), (11, "Created"),
+                  (12, "Original Filename"))
+        for field, label in labels:
+            if len(rows[index]) > field and rows[index][field]:
+                fh.write(label + ": " + rows[index][field] + "\n")
     with open(receipt, "w", encoding="utf-8") as fh:
         fh.write(filename + "\n")
     return 0
@@ -115,6 +176,7 @@ def main():
     find = sub.add_parser("search")
     find.add_argument("--query", required=True)
     find.add_argument("--output", required=True)
+    find.add_argument("--dest-dir", default="")
     get = sub.add_parser("download")
     get.add_argument("--results", required=True)
     get.add_argument("--index", required=True, type=int)
@@ -123,10 +185,11 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "search":
-            return search(args.query, args.output)
+            return search(args.query, args.output, args.dest_dir)
         return download(args.results, args.index, args.dest_dir, args.receipt)
-    except Exception as exc:
-        print(f"background browser: {exc}", file=sys.stderr)
+    except Exception:
+        # Do not echo request URLs: authenticated URLs contain the user's key.
+        print("background browser: request failed", file=sys.stderr)
         return 1
 
 

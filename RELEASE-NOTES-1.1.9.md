@@ -1,5 +1,21 @@
 # Snap FE Alpha 1.1.9
 
+## Current-release hotfix
+
+- Fixed the WallHaven Accounts menu so **A** opens it normally instead of
+  requiring left/right navigation.
+- Added on-device WallHaven API-key entry and an explicit searchable wallpaper
+  browser. Public SFW searches continue to work without a key.
+- Wallpaper results now show readable tag-based titles, creator, resolution,
+  category, views, and saves instead of opaque filenames.
+- Downloaded background selectors now display the saved metadata and support
+  **X** to rename the real image file without losing its active selection.
+- Added **Y**, then **Y** again to confirm wallpaper deletion. Deleting the
+  active image safely returns that system to its default background.
+- New downloads preserve their original WallHaven ID and direct filename in a
+  private sidecar record. Searches use those stable identities to hide images
+  already installed, including files renamed by the user and legacy downloads.
+
 This release focuses on making Snap FE feel native both in the frontend and
 inside RetroArch, while preserving each user's own settings.
 
