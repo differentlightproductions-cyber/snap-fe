@@ -1,2 +1,2 @@
-bc68a3a1e2baee4d9f9bce6c60ff6d01940d79db165d1d7c4d04670ed6160610  SnapFE-Alpha-1.1.9.zip
-fbd31745b5945afdd17aa709e7519baed0ed4f13b8edccb7a2244253441a3855  snapos_ui-1.1.9.aarch64
+580be051bb324f87115d8e5aea2b25b46af7d4a1595e2992fd1ffcaaa4b2dea9  SnapFE-Alpha-1.1.9.zip
+d4171ba89d9c5fb8081a110a702e7b23114f38d14e6fdb9c33da222564cac66b  snapos_ui-1.1.9.aarch64

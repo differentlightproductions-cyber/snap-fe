@@ -73,8 +73,10 @@ def wallpaper_info(page, key, query):
     stats = f"{resolution} | {category} | {views:,} views | {favorites:,} saves"
     direct_url = detail.get("path") or page.get("path") or ""
     original_filename = os.path.basename(urllib.parse.urlparse(direct_url).path)
+    thumbs = detail.get("thumbs") or page.get("thumbs") or {}
+    preview_url = thumbs.get("large") or thumbs.get("original") or thumbs.get("small") or ""
     return (title, direct_url, "Wallhaven", artist, source, stats, wid, resolution,
-            category, str(views), str(favorites), created, original_filename)
+            category, str(views), str(favorites), created, original_filename, preview_url)
 
 
 def downloaded_identities(dest_dir):
@@ -108,7 +110,34 @@ def downloaded_identities(dest_dir):
     return ids, direct_names
 
 
-def search(query, output, dest_dir=""):
+def cache_preview(row, preview_dir):
+    """Cache a small search thumbnail and replace its remote URL with a local path."""
+    preview_url = row[13] if len(row) > 13 else ""
+    local_path = ""
+    if preview_dir and preview_url:
+        os.makedirs(preview_dir, exist_ok=True)
+        local_path = os.path.join(preview_dir, clean(row[6], 24) + ".jpg")
+        if not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
+            part = local_path + ".part"
+            try:
+                req = urllib.request.Request(preview_url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=20) as response, open(part, "wb") as out:
+                    while True:
+                        block = response.read(65536)
+                        if not block:
+                            break
+                        out.write(block)
+                os.replace(part, local_path)
+            except Exception:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                local_path = ""
+    return tuple(row[:13]) + (local_path,)
+
+
+def search(query, output, dest_dir="", preview_dir=""):
     params = {"q": query, "categories": "111", "purity": "100", "sorting": "relevance", "atleast": "640x480"}
     key = api_key()
     if key:
@@ -125,6 +154,9 @@ def search(query, output, dest_dir=""):
             break
     with ThreadPoolExecutor(max_workers=4) as pool:
         rows = list(pool.map(lambda page: wallpaper_info(page, key, query), pages))
+    if preview_dir:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            rows = list(pool.map(lambda row: cache_preview(row, preview_dir), rows))
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as fh:
         for row in rows:
@@ -177,6 +209,7 @@ def main():
     find.add_argument("--query", required=True)
     find.add_argument("--output", required=True)
     find.add_argument("--dest-dir", default="")
+    find.add_argument("--preview-dir", default="")
     get = sub.add_parser("download")
     get.add_argument("--results", required=True)
     get.add_argument("--index", required=True, type=int)
@@ -185,7 +218,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "search":
-            return search(args.query, args.output, args.dest_dir)
+            return search(args.query, args.output, args.dest_dir, args.preview_dir)
         return download(args.results, args.index, args.dest_dir, args.receipt)
     except Exception:
         # Do not echo request URLs: authenticated URLs contain the user's key.

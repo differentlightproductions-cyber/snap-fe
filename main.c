@@ -85,7 +85,7 @@ int WIN_H = 480;
 #define MAX_LINES 4
 #define MAX_GAMES 4000
 
-typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS } AppState;
+typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS } AppState;
 typedef enum { TAB_SOUND, TAB_DISPLAY, TAB_GAME, TAB_DEVICE, TAB_ACCOUNT, TAB_COUNT } SettingsTab;
 
 // Points at main()'s `state` so pre-main helpers (e.g. play_click) can tell
@@ -1968,7 +1968,8 @@ static int ra_book_load(void) {
     FILE *f = fopen(ra_achievements_path(), "r");
     if (!f) { ra_achievement_count = 0; return 0; }
     ra_achievement_count = 0;
-    char line[1400];
+    /* The source URL can be long; keep the final preview-path field intact. */
+    char line[2600];
     while (fgets(line, sizeof line, f)) {
         char *nl = strpbrk(line, "\r\n"); if (nl) *nl = '\0';
         char *field[9]; field[0] = line;
@@ -2480,10 +2481,17 @@ char bg_online_title[BG_ONLINE_MAX][128];
 char bg_online_license[BG_ONLINE_MAX][64];
 char bg_online_artist[BG_ONLINE_MAX][96];
 char bg_online_details[BG_ONLINE_MAX][160];
+char bg_online_preview[BG_ONLINE_MAX][700];
 int bg_online_count = 0, bg_online_selected = 0;
 char bg_online_status[160] = "Connect to Wi-Fi to browse free backgrounds.";
 char bg_online_query[96] = "";
 int bg_online_search_pending = 0;
+int bg_target_selected = 0;
+int bg_preview_index = 0;
+int bg_download_pending_index = -1;
+SDL_Texture *bg_preview_tex = NULL;
+int bg_preview_loaded_index = -1;
+AppState bg_online_return_state = STATE_SETTINGS;
 
 // Shared scroll offset for settings tabs, so long lists (like Display with
 // Background Images open) scroll instead of cutting content off the bottom.
@@ -7161,34 +7169,38 @@ static void bg_online_read_results(void) {
     if (!f) return;
     char line[1400];
     while (bg_online_count < BG_ONLINE_MAX && fgets(line, sizeof line, f)) {
-        char *title = line;
-        char *url = strchr(title, '\t'); if (!url) continue; *url++ = '\0';
-        char *license = strchr(url, '\t'); if (!license) continue; *license++ = '\0';
-        char *artist = strchr(license, '\t'); if (!artist) continue; *artist++ = '\0';
-        char *source = strchr(artist, '\t'); if (!source) continue; *source++ = '\0';
-        char *details = strchr(source, '\t');
-        if (details) { *details++ = '\0'; char *nl = strpbrk(details, "\r\n"); if (nl) *nl = '\0'; }
-        else details = "";
-        snprintf(bg_online_title[bg_online_count], sizeof bg_online_title[0], "%.127s", title);
-        snprintf(bg_online_license[bg_online_count], sizeof bg_online_license[0], "%.63s", license);
-        snprintf(bg_online_artist[bg_online_count], sizeof bg_online_artist[0], "%.95s", artist);
-        snprintf(bg_online_details[bg_online_count], sizeof bg_online_details[0], "%.159s", details);
+        char *fields[14] = { 0 };
+        int nf = 1; fields[0] = line;
+        for (char *p = line; *p && nf < 14; p++) {
+            if (*p == '\t') { *p = '\0'; fields[nf++] = p + 1; }
+        }
+        char *nl = strpbrk(fields[nf - 1], "\r\n"); if (nl) *nl = '\0';
+        if (nf < 6) continue;
+        snprintf(bg_online_title[bg_online_count], sizeof bg_online_title[0], "%.127s", fields[0]);
+        snprintf(bg_online_license[bg_online_count], sizeof bg_online_license[0], "%.63s", fields[2]);
+        snprintf(bg_online_artist[bg_online_count], sizeof bg_online_artist[0], "%.95s", fields[3]);
+        snprintf(bg_online_details[bg_online_count], sizeof bg_online_details[0], "%.159s", fields[5]);
+        snprintf(bg_online_preview[bg_online_count], sizeof bg_online_preview[0], "%s", nf > 13 ? fields[13] : "");
         bg_online_count++;
     }
     fclose(f);
 }
 
 static void bg_online_search(SDL_Renderer *ren) {
-    char results[700], receipt[700], dest[700], quoted_query[420], command[2200];
+    char results[700], receipt[700], dest[700], previews[700], quoted_query[420], command[2400];
     bg_online_paths(results, sizeof results, receipt, sizeof receipt);
     snprintf(dest, sizeof dest, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    snprintf(previews, sizeof previews, "%s/cache/background-previews", sn_data_root());
+    mkdir(previews, 0755);
     shell_quote_arg(bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform], quoted_query, sizeof quoted_query);
     remove(results); remove(receipt);
     draw_progress(ren, "Finding free backgrounds", 0.25f);
     snprintf(command, sizeof command,
-             "python3 \"%s/background_browser.py\" search --query %s --output \"%s\" --dest-dir \"%s\"",
-             sn_data_root(), quoted_query, results, dest);
+             "python3 \"%s/background_browser.py\" search --query %s --output \"%s\" --dest-dir \"%s\" --preview-dir \"%s\"",
+             sn_data_root(), quoted_query, results, dest, previews);
     int rc = system(command);
+    if (bg_preview_tex) { SDL_DestroyTexture(bg_preview_tex); bg_preview_tex = NULL; }
+    bg_preview_loaded_index = -1;
     bg_online_read_results();
     bg_online_selected = 0;
     if (rc == 0 && bg_online_count > 0)
@@ -7221,6 +7233,11 @@ static int bg_online_download(SDL_Renderer *ren, int index) {
     if (bg_picker_platform == platform_selected) platform_assets_loaded_for = -1;
     invalidate_carousel_bg(bg_picker_platform);
     snprintf(bg_online_status, sizeof bg_online_status, "Saved %s", filename);
+    refresh_background_picker();
+    background_picker_selected = 0;
+    for (int i = 0; i < background_file_count; i++)
+        if (!strcmp(background_files[i], filename)) { background_picker_selected = i + 1; break; }
+    snprintf(bg_picker_status, sizeof bg_picker_status, "Downloaded and selected: %.110s", filename);
     return 1;
 }
 
@@ -9750,7 +9767,11 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
         case KB_PURPOSE_BT_PASSKEY:    bt_agent_answer_code(kb_buffer); break;
         case KB_PURPOSE_RADIO_SEARCH:  if (kb_buffer[0]) radio_refresh(kb_buffer); break;
         case KB_PURPOSE_BG_SEARCH:
-            if (kb_buffer[0]) { snprintf(bg_online_query, sizeof bg_online_query, "%.95s", kb_buffer); bg_online_search_pending = 1; }
+            if (kb_buffer[0]) {
+                snprintf(bg_online_query, sizeof bg_online_query, "%.95s", kb_buffer);
+                bg_online_search_pending = 1;
+                kb_return_state = STATE_BG_ONLINE;
+            }
             break;
         case KB_PURPOSE_WALLHAVEN_KEY:
             save_wallhaven_key_from_buffer();
@@ -11283,7 +11304,7 @@ int main(int argc, char *argv[]) {
                 if (hk_flashlight_on && jb == hk_flashlight_btn &&
                     !(state == STATE_HOTKEYS && hk_capture >= 0) &&
                     state != STATE_FLASHLIGHT && state != STATE_BOOT &&
-                    state != STATE_KEYBOARD && state != STATE_SETUP && state != STATE_BG_PICKER && state != STATE_BG_ONLINE) {
+                    state != STATE_KEYBOARD && state != STATE_SETUP && state != STATE_BG_PICKER && state != STATE_BG_ONLINE && state != STATE_BG_PREVIEW && state != STATE_BG_TARGET) {
                     static Uint32 fl_t[3] = { 0, 0, 0 };
                     Uint32 tnow = SDL_GetTicks();
                     fl_t[0] = fl_t[1]; fl_t[1] = fl_t[2]; fl_t[2] = tnow;
@@ -11363,7 +11384,7 @@ int main(int argc, char *argv[]) {
                 }
                 // Start button -> jump straight to Settings (press again to leave).
                 if (e.key.keysym.sym == SDLK_F1 &&
-                    state != STATE_BOOT && state != STATE_KEYBOARD && state != STATE_BG_PICKER && state != STATE_BG_ONLINE &&
+                    state != STATE_BOOT && state != STATE_KEYBOARD && state != STATE_BG_PICKER && state != STATE_BG_ONLINE && state != STATE_BG_PREVIEW && state != STATE_BG_TARGET &&
                     state != STATE_FLASHLIGHT) {
                     play_click();
                     if (state == STATE_HOME && flashlight_pending) { flashlight_pending = 0; continue; }
@@ -11375,7 +11396,7 @@ int main(int argc, char *argv[]) {
                             settings_pending_tab = current_tab;
                         } else state = settings_return_state;
                     } else {
-                        settings_return_state = (state == STATE_KEYBOARD || state == STATE_BG_PICKER || state == STATE_BG_ONLINE)
+                        settings_return_state = (state == STATE_KEYBOARD || state == STATE_BG_PICKER || state == STATE_BG_ONLINE || state == STATE_BG_PREVIEW || state == STATE_BG_TARGET)
                                               ? settings_return_state : state;
                         current_tab = TAB_SOUND;
                         settings_selected = 0;
@@ -12005,6 +12026,8 @@ int main(int argc, char *argv[]) {
                         bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
                         if (background_picker_selected == 0) {
                             play_click();
+                            snprintf(bg_online_query, sizeof bg_online_query, "%s", platform_names[bg_picker_platform]);
+                            bg_online_return_state = STATE_BG_PICKER;
                             bg_online_search(ren);
                             state = STATE_BG_ONLINE;
                         } else {
@@ -12020,7 +12043,7 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if (state == STATE_BG_ONLINE) {
-                    if (e.key.keysym.sym == SDLK_ESCAPE) { play_click(); state = STATE_BG_PICKER; }
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { play_click(); state = bg_online_return_state; }
                     else if (e.key.keysym.sym == SDLK_s) {
                         snprintf(kb_buffer, sizeof kb_buffer, "%s", bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform]);
                         kb_len = (int)strlen(kb_buffer); kb_row = kb_col = 0;
@@ -12032,8 +12055,40 @@ int main(int argc, char *argv[]) {
                         if (e.key.keysym.sym == SDLK_UP) { play_click(); bg_online_selected = (bg_online_selected - 1 + bg_online_count) % bg_online_count; }
                         if (e.key.keysym.sym == SDLK_RETURN) {
                             play_click();
-                            if (bg_online_download(ren, bg_online_selected)) state = STATE_SETTINGS;
+                            bg_preview_index = bg_online_selected;
+                            if (bg_preview_tex) { SDL_DestroyTexture(bg_preview_tex); bg_preview_tex = NULL; }
+                            bg_preview_loaded_index = -1;
+                            if (bg_online_preview[bg_preview_index][0])
+                                bg_preview_tex = load_scaled_texture(ren, bg_online_preview[bg_preview_index], 900);
+                            bg_preview_loaded_index = bg_preview_index;
+                            state = STATE_BG_PREVIEW;
                         }
+                    }
+                }
+                else if (state == STATE_BG_PREVIEW) {
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { play_click(); state = STATE_BG_ONLINE; }
+                    else if (e.key.keysym.sym == SDLK_RETURN) {
+                        play_click();
+                        bg_download_pending_index = bg_preview_index;
+                        bg_target_selected = bg_picker_platform;
+                        state = STATE_BG_TARGET;
+                    }
+                }
+                else if (state == STATE_BG_TARGET) {
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { play_click(); state = STATE_BG_PREVIEW; }
+                    else if (e.key.keysym.sym == SDLK_DOWN) {
+                        play_click(); bg_target_selected = (bg_target_selected + 1) % PLATFORM_COUNT;
+                    } else if (e.key.keysym.sym == SDLK_UP) {
+                        play_click(); bg_target_selected = (bg_target_selected - 1 + PLATFORM_COUNT) % PLATFORM_COUNT;
+                    } else if (e.key.keysym.sym == SDLK_RETURN) {
+                        play_click();
+                        bg_picker_platform = bg_target_selected;
+                        bg_picker_status[0] = '\0';
+                        bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
+                        refresh_background_picker();
+                        background_picker_selected = 0;
+                        if (bg_online_download(ren, bg_download_pending_index)) state = STATE_BG_PICKER;
+                        else state = STATE_BG_PREVIEW;
                     }
                 }
                 else if (state == STATE_MENU) {
@@ -12915,13 +12970,11 @@ int main(int argc, char *argv[]) {
                                 bg_picker_platform = platform_selected;
                                 bg_picker_status[0] = '\0';
                                 bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
-                                refresh_background_picker();
-                                background_picker_selected = 0;
-                                snprintf(kb_buffer, sizeof kb_buffer, "%s",
-                                         bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform]);
+                                bg_online_return_state = STATE_SETTINGS;
+                                snprintf(kb_buffer, sizeof kb_buffer, "%s", bg_online_query);
                                 kb_len = (int)strlen(kb_buffer);
                                 kb_row = 0; kb_col = 0;
-                                kb_return_state = STATE_BG_ONLINE;
+                                kb_return_state = STATE_SETTINGS;
                                 kb_purpose = KB_PURPOSE_BG_SEARCH;
                                 play_click();
                                 state = STATE_KEYBOARD;
@@ -14643,6 +14696,71 @@ int main(int argc, char *argv[]) {
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hiw/2, WIN_H - hih - 14, hiw, hih });
 
+        } else if (state == STATE_BG_PREVIEW) {
+            draw_dock_logo(ren, font_small);
+            SDL_Texture *title = render_text_fit(ren, font_small,
+                bg_online_title[bg_preview_index], th->accent2, WIN_W - 84);
+            int tw, thh; SDL_QueryTexture(title, NULL, NULL, &tw, &thh);
+            SDL_RenderCopy(ren, title, NULL, &(SDL_Rect){ WIN_W/2 - tw/2, 58, tw, thh });
+
+            char detail[300];
+            snprintf(detail, sizeof detail, "%s  \xC2\xB7  by %s",
+                     bg_online_details[bg_preview_index], bg_online_artist[bg_preview_index]);
+            SDL_Texture *dt = render_text_fit(ren, font_fixed ? font_fixed : font_label,
+                                               detail, g_ui_dim, WIN_W - 88);
+            int dw, dh; SDL_QueryTexture(dt, NULL, NULL, &dw, &dh);
+            SDL_RenderCopy(ren, dt, NULL, &(SDL_Rect){ WIN_W/2 - dw/2, 88, dw, dh });
+
+            SDL_Rect box = { 48, 118, WIN_W - 96, 270 };
+            SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 220);
+            SDL_RenderFillRect(ren, &box);
+            if (bg_preview_tex && bg_preview_loaded_index == bg_preview_index) {
+                int iw = 0, ih = 0; SDL_QueryTexture(bg_preview_tex, NULL, NULL, &iw, &ih);
+                if (iw > 0 && ih > 0) {
+                    float scale = fminf((float)box.w / iw, (float)box.h / ih);
+                    SDL_Rect fit = { box.x + (box.w - (int)(iw * scale)) / 2,
+                                     box.y + (box.h - (int)(ih * scale)) / 2,
+                                     (int)(iw * scale), (int)(ih * scale) };
+                    fit = img_aspect(fit);
+                    SDL_RenderCopy(ren, bg_preview_tex, NULL, &fit);
+                }
+            } else {
+                SDL_Texture *missing = render_text(ren, font_label, "Preview unavailable", g_ui_dim);
+                int mw, mh; SDL_QueryTexture(missing, NULL, NULL, &mw, &mh);
+                SDL_RenderCopy(ren, missing, NULL, &(SDL_Rect){ WIN_W/2 - mw/2, box.y + box.h/2 - mh/2, mw, mh });
+            }
+            SDL_Texture *hint = render_text(ren, font_label, "A  Download        B  Back to Results", g_ui_dim);
+            int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
+            SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hw/2, WIN_H - hh - 14, hw, hh });
+
+        } else if (state == STATE_BG_TARGET) {
+            draw_dock_logo(ren, font_small);
+            SDL_Texture *title = render_text(ren, font_small, "SAVE WALLPAPER TO...", th->accent2);
+            int tw, thh; SDL_QueryTexture(title, NULL, NULL, &tw, &thh);
+            SDL_RenderCopy(ren, title, NULL, &(SDL_Rect){ WIN_W/2 - tw/2, 58, tw, thh });
+            char qline[150]; snprintf(qline, sizeof qline, "%.127s", bg_online_title[bg_download_pending_index]);
+            SDL_Texture *qt = render_text_fit(ren, font_fixed ? font_fixed : font_label, qline, g_ui_dim, WIN_W - 72);
+            int qw, qh; SDL_QueryTexture(qt, NULL, NULL, &qw, &qh);
+            SDL_RenderCopy(ren, qt, NULL, &(SDL_Rect){ WIN_W/2 - qw/2, 88, qw, qh });
+
+            int first = bg_target_selected - 3; if (first < 0) first = 0;
+            if (first + 7 > PLATFORM_COUNT) first = PLATFORM_COUNT > 7 ? PLATFORM_COUNT - 7 : 0;
+            int y = 120, rowh = 42;
+            for (int i = first; i < PLATFORM_COUNT && i < first + 7; i++) {
+                int sel = i == bg_target_selected;
+                if (sel) {
+                    SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                    SDL_RenderFillRect(ren, &(SDL_Rect){ 48, y - 5, WIN_W - 96, rowh - 5 });
+                }
+                SDL_Texture *nm = render_text_fit(ren, font_label, platform_names[i], sel ? g_ui_text : g_ui_dim, WIN_W - 140);
+                int nw, nh; SDL_QueryTexture(nm, NULL, NULL, &nw, &nh);
+                SDL_RenderCopy(ren, nm, NULL, &(SDL_Rect){ WIN_W/2 - nw/2, y, nw, nh });
+                y += rowh;
+            }
+            SDL_Texture *hint = render_text(ren, font_label, "A  Download Here        B  Back", g_ui_dim);
+            int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
+            SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hw/2, WIN_H - hh - 14, hw, hh });
+
         } else if (state == STATE_BG_ONLINE) {
             draw_dock_logo(ren, font_small);
             SDL_Texture *title = render_text(ren, font_small, "WALLHAVEN BACKGROUNDS", th->accent2);
@@ -14672,7 +14790,7 @@ int main(int argc, char *argv[]) {
                 int cw, ch; SDL_QueryTexture(cr, NULL, NULL, &cw, &ch);
                 SDL_RenderCopy(ren, cr, NULL, &(SDL_Rect){ 44, y + nh + 2, cw, ch });
             }
-            SDL_Texture *hint = render_text(ren, font_label, "A  Download        X  Search        B  Back", g_ui_dim);
+            SDL_Texture *hint = render_text(ren, font_label, "A  Preview        X  Search        B  Back", g_ui_dim);
             int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hw/2, WIN_H - hh - 12, hw, hh });
 
@@ -16800,7 +16918,7 @@ int main(int argc, char *argv[]) {
             SDL_SetRenderDrawColor(ren, edge.r, edge.g, edge.b, 255);
             SDL_RenderFillRect(ren, &(SDL_Rect){ 0, HUD_BAR_H - 2, WIN_W, 2 });
             if (state == STATE_HOME || state == STATE_SURPRISE || state == STATE_PLATFORM ||
-                state == STATE_BG_PICKER || state == STATE_BG_ONLINE || state == STATE_MENU || state == STATE_BOOK ||
+                state == STATE_BG_PICKER || state == STATE_BG_ONLINE || state == STATE_BG_PREVIEW || state == STATE_BG_TARGET || state == STATE_MENU || state == STATE_BOOK ||
                 state == STATE_ACHIEVEMENTS) {
                 draw_dock_logo(ren, font_small);
             }

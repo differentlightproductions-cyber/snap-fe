@@ -15,6 +15,12 @@
 - New downloads preserve their original WallHaven ID and direct filename in a
   private sidecar record. Searches use those stable identities to hide images
   already installed, including files renamed by the user and legacy downloads.
+- Search results can now be opened in a full wallpaper preview before download.
+  The destination system is chosen only after the user selects **Download**,
+  and every download returns to that system's selector with the new image
+  selected.
+- Back navigation now unwinds one screen at a time and returns search results to
+  the exact Backgrounds or Accounts page that originally opened the search.
 
 This release focuses on making Snap FE feel native both in the frontend and
 inside RetroArch, while preserving each user's own settings.
