@@ -5,8 +5,33 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
 
-**Current release: Alpha 1.1.9 Hotfix 2.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.2.0.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.2.0 stability and performance release
+
+- Game handoff now releases SNAP's Mali renderer before Knulli configgen starts,
+  removes leaked joystick references, and avoids redundant governor/config
+  writes. On the RG34XX-SP test device, SNAP's measured press-to-launcher handoff
+  is 69 ms; the remaining startup work belongs to Knulli and RetroArch.
+- Knulli's configgen Python modules and RetroArch executable are warmed at low
+  priority behind the branded boot intro, reducing the cold black-screen gap
+  without bypassing Knulli's controller, core, save, shader, or hook setup.
+- In-game brightness remains independent from volume, moves in exact 5% steps,
+  and reaches the real panel's 1% floor. Readiness-based reassertion now works on
+  the H700's Linux 4.9 kernel, and a bounded boot guard defeats late brightness
+  resets without permanent polling.
+- Devices affected by the prior RetroArch bridge's 800+ generated overrides are
+  repaired automatically with an exact backup. User-owned portable RetroArch
+  preferences and hotkeys remain intact; generated controller/path state does not
+  leak back into global configuration.
+- Post-game video recovery retries the complete window/renderer transaction and
+  invalidates stale art caches, preventing corrupt carousel/bookshelf/library art.
+  Wi-Fi status checks no longer fork shell pipelines, and duplicate Bluetooth
+  agents are suppressed.
+- The release package is flat for direct SHARE extraction, includes the complete
+  bundled console art and helpers, rejects incompatible glibc builds, and excludes
+  ROMs, saves, settings, accounts, and API keys.
 
 ### 1.1.9 Hotfix 2
 
@@ -122,7 +147,7 @@ now — not every emulator or system Knulli supports. Expect alpha rough edges.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.1.9.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.2.0.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,

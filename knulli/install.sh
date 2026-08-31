@@ -26,7 +26,7 @@ mkdir -p "$DEST"
 cp "$BIN_SRC" "$DEST/snapos_ui"
 chmod +x "$DEST/snapos_ui"
 
-for helper in scrape_boxart.py background_browser.py ra_achievements.py brightness-hotkey.sh; do
+for helper in scrape_boxart.py background_browser.py ra_achievements.py brightness-hotkey.sh volume-gate.sh; do
   [[ -f "../$helper" ]] && cp "../$helper" "$DEST/$helper"
 done
 
@@ -38,8 +38,9 @@ for core in gpsp_libretro.so gambatte_libretro.so; do
   install -D -m 0755 "../vendor/link-cores/$core" "$DEST/cores/$core"
 done
 
-# Ship the assets Snap FE needs (fonts, sounds, icons, backgrounds).
-rsync -a --delete ../assets/ "$DEST/assets/" 2>/dev/null || cp -r ../assets "$DEST/"
+# Ship the assets Snap FE needs without deleting user-added bookshelf spines,
+# list icons or backgrounds during an upgrade.
+rsync -a ../assets/ "$DEST/assets/" 2>/dev/null || cp -r ../assets "$DEST/"
 mkdir -p "$DEST/config" "$ROOT/roms"
 
 # --- frontend hook -------------------------------------------------------------
@@ -49,7 +50,7 @@ if [[ -f "$HOOK" && ! -f "$HOOK.pre-snapos" ]] && ! grep -q "Snap FE frontend ho
   echo ">> backed up existing custom.sh -> custom.sh.pre-snapos"
 fi
 cp ./custom.sh "$HOOK"
-chmod +x "$HOOK" "$DEST/brightness-hotkey.sh" 2>/dev/null || true
+chmod +x "$HOOK" "$DEST/brightness-hotkey.sh" "$DEST/volume-gate.sh" 2>/dev/null || true
 
 echo
 echo "Installed to $DEST"

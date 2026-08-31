@@ -26,13 +26,16 @@ else
   [ "$pct" -lt 5 ] && pct=1
 fi
 
-absolute=$((pct * 2))
-[ "$absolute" -lt 3 ] && absolute=3
-/usr/bin/brightness set "$absolute" >/dev/null 2>&1
-knulli-settings-set display.brightness "$pct" >/dev/null 2>&1
+if [ "$pct" -le 1 ]; then absolute=1; else absolute=$((pct * 2)); fi
+[ "$absolute" -lt 1 ] && absolute=1
 printf '%s\n' "$pct" > "$desired"
+LCD_BRIGHTNESS_MINIMUM=1 /usr/bin/brightness set "$absolute" >/dev/null 2>&1
 
-# Keep SNAP's next boot and post-game state in agreement with the panel.
+# Keep SNAP's next boot and post-game state in agreement with the panel. Do not
+# run knulli-settings-set for every key repeat: that rewrites knulli.conf while
+# configgen is launching and was both a latency source and a late brightness
+# writer. SNAP persists the final value once when the emulator exits; a crash is
+# still recovered from this settings file on the next frontend start.
 if [ -f "$settings" ]; then
   if grep -q '^brightness_pct=' "$settings" 2>/dev/null; then
     sed -i "s/^brightness_pct=.*/brightness_pct=$pct/" "$settings"

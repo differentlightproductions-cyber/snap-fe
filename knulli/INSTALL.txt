@@ -1,10 +1,10 @@
-Snap FE - Alpha Build 1.1.9
+Snap FE - Alpha Build 1.2.0
 for H700 Anbernic RG34XX-SP / RG34XX devices running Knulli
 
 
 Install or update
 -----------------
-1. Download the RELEASE ASSET named SnapFE-Alpha-1.1.9.zip. Do not download
+1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.0.zip. Do not download
    GitHub's automatically generated "Source code" ZIP.
 
 2. Turn the handheld off and put the Knulli SD card in your computer.
@@ -46,7 +46,7 @@ On the SHARE drive, read or send these files:
    system/snapos/install.log
 
 The most common cause with 1.1.5 was extracting the version wrapper folder
-instead of putting system/ and roms/ at the root of SHARE. The 1.1.9 ZIP is
+instead of putting system/ and roms/ at the root of SHARE. The 1.2.0 ZIP is
 flat so "Extract to SHARE" now produces the correct layout automatically.
 
 

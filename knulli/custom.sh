@@ -14,7 +14,8 @@ LOADER=/lib/ld-linux-aarch64.so.1
 SNAPOS_CORES=/userdata/system/snapos/cores
 SYSTEM_CORES=/usr/lib/libretro
 CORE_BACKUP=/userdata/system/snapos/core-backup
-BRIGHTNESS_HOTKEY=/userdata/system/snapos/brightness-hotkey.sh
+VOLUME_GATE=/userdata/system/snapos/volume-gate.sh
+MODIFIER_STATE=/tmp/snapfe-brightness-modifier
 TRIGGER_CFG=/etc/triggerhappy/triggers.d/multimedia_keys.conf
 TRIGGER_BACKUP=/userdata/system/snapos/triggerhappy-multimedia_keys.stock
 TRIGGER_OVERLAY=/userdata/system/snapos/triggerhappy-multimedia_keys.snapfe
@@ -31,7 +32,11 @@ install_link_cores() {
     if [ -e "$SYSTEM_CORES/$core" ] && [ ! -e "$CORE_BACKUP/$core" ]; then
       cp -p "$SYSTEM_CORES/$core" "$CORE_BACKUP/$core"
     fi
-    install -m 0755 "$SNAPOS_CORES/$core" "$SYSTEM_CORES/$core"
+    # Root is an overlay on these images; rewriting an identical multi-MB core
+    # every boot wastes I/O and extends the black startup gap.
+    if ! cmp -s "$SNAPOS_CORES/$core" "$SYSTEM_CORES/$core"; then
+      install -m 0755 "$SNAPOS_CORES/$core" "$SYSTEM_CORES/$core"
+    fi
   done
 }
 
@@ -43,7 +48,9 @@ kill_es() {
 # Blank every framebuffer + console right now, so nothing ES drew (or the boot
 # console text) is visible in the gap before Snap FE takes the screen.
 hide_screen() {
-  for fb in /dev/fb0 /dev/fb1; do [ -c "$fb" ] && dd if=/dev/zero of="$fb" bs=1M count=16 2>/dev/null; done
+  # 720x480x32bpp is ~1.4 MiB; two MiB covers the whole panel without pushing
+  # 16 MiB through each framebuffer character device at every boot.
+  for fb in /dev/fb0 /dev/fb1; do [ -c "$fb" ] && dd if=/dev/zero of="$fb" bs=1M count=2 2>/dev/null; done
   for c in /dev/tty0 /dev/tty1; do [ -c "$c" ] && { printf '\033[2J\033[H\033[?25l' > "$c" 2>/dev/null; }; done
   setterm --blank force >/dev/null 2>&1 || true
 }
@@ -81,19 +88,12 @@ init_audio() {
   amixer -c 0 sset 'OutputR Mixer DACR' on   >/dev/null 2>&1
 }
 
-# Black out any partial EmulationStation frame so the gap before Snap FE's own
-# boot screen is just black, not a broken ES screen.
-blank_fb() {
-  for fb in /dev/fb0 /dev/fb1; do
-    [ -c "$fb" ] && dd if=/dev/zero of="$fb" bs=1M count=16 2>/dev/null
-  done
-}
-
 # Clamshell: let Snap FE own the lid (screen off on close, on on open) instead
 # of Knulli's lid-control doing a real suspend whose wake path is broken when
 # ES isn't running. Set back to "suspend" if you prefer true suspend-to-RAM.
 init_lid() {
-  knulli-settings-set system.lid none >/dev/null 2>&1
+  [ "$(knulli-settings-get system.lid 2>/dev/null)" = "none" ] ||
+    knulli-settings-set system.lid none >/dev/null 2>&1
 }
 
 # Bluetooth: Knulli's S32bluetooth brings up the radio + bluetoothd + pairing
@@ -101,8 +101,46 @@ init_lid() {
 # session; do it here. Opt-in -- BT off = no extra battery drain.
 init_bluetooth() {
   [ "$(knulli-settings-get controllers.bluetooth.enabled 2>/dev/null)" = "1" ] || return 0
-  /etc/init.d/S29namebluetooth start >/dev/null 2>&1
-  /etc/init.d/S32bluetooth start     >/dev/null 2>&1
+  # custom.sh and S32bluetooth can overlap late in boot. Give the stock service
+  # a moment to win the race, start it only if it did not, then keep the oldest
+  # agent if this firmware nevertheless spawned a duplicate.
+  sleep 2
+  if ! pgrep -f '[/]usr/bin/knulli-bluetooth-agent' >/dev/null 2>&1; then
+    /etc/init.d/S29namebluetooth start >/dev/null 2>&1
+    /etc/init.d/S32bluetooth start     >/dev/null 2>&1
+    sleep 1
+  fi
+  keep=""
+  for pid in $(pgrep -f '[/]usr/bin/knulli-bluetooth-agent' 2>/dev/null); do
+    if [ -z "$keep" ]; then keep="$pid"; else kill "$pid" >/dev/null 2>&1 || true; fi
+  done
+}
+
+# Configgen imports a sizeable Python module tree before every emulator start.
+# Populate the reclaimable Linux page cache once, at low CPU/I/O priority,
+# while SNAP is showing its boot quote and loading libraries/art. Nothing stays
+# resident and no system file is modified; the first game simply avoids cold SD
+# reads for the same modules and RetroArch executable.
+prewarm_game_launcher() {
+  (
+    command -v ionice >/dev/null 2>&1 && IO="ionice -c 3" || IO=""
+    $IO nice -n 15 /usr/bin/python -c 'import configgen.emulatorlauncher' >/dev/null 2>&1 || true
+    # Configgen lazily imports generator modules only after it knows the chosen
+    # system. Read those small files sequentially now instead of paying hundreds
+    # of cold SD metadata reads on the black handoff screen.
+    for root in /usr/lib/python*/site-packages/configgen /usr/lib/python*/configgen; do
+      [ -d "$root" ] || continue
+      $IO nice -n 15 find "$root" -type f -size -2M -exec cat '{}' + >/dev/null 2>&1 || true
+    done
+    for file in /usr/bin/retroarch \
+      /usr/lib/libretro/mgba_libretro.so /usr/lib/libretro/gpsp_libretro.so \
+      /usr/lib/libretro/gambatte_libretro.so /usr/lib/libretro/snes9x_libretro.so \
+      /usr/lib/libretro/fceumm_libretro.so /usr/lib/libretro/genesis_plus_gx_libretro.so \
+      /usr/lib/libretro/pcsx_rearmed_libretro.so /usr/lib/libretro/fbneo_libretro.so \
+      /userdata/system/knulli.conf /userdata/system/configs/emulationstation/es_input.cfg; do
+      [ -r "$file" ] && $IO nice -n 15 dd if="$file" of=/dev/null bs=256K 2>/dev/null || true
+    done
+  ) &
 }
 
 run_snapos() {
@@ -110,22 +148,26 @@ run_snapos() {
   if [ -x "$SNAPOS" ]; then "$SNAPOS"; else "$LOADER" "$SNAPOS"; fi
 }
 
-# Keep Knulli's normal Volume controls intact and add the standard
-# Function(Menu)+Volume brightness pair at triggerhappy level. This runs
-# outside RetroArch, so a game's hotkey changes cannot steal screen brightness.
+# Keep Knulli's normal Volume controls intact, but route their press through a
+# tiny gate while SNAP owns a game. SNAP's native evdev reader sees Menu and
+# Volume on their separate kernel devices, changes brightness itself, and marks
+# MODIFIER_STATE so triggerhappy does not also change volume for that chord.
 install_input_routing() {
   [ -r "$TRIGGER_CFG" ] || return 0
-  [ -x "$BRIGHTNESS_HOTKEY" ] || return 0
-  [ -s "$TRIGGER_BACKUP" ] || cp -p "$TRIGGER_CFG" "$TRIGGER_BACKUP" 2>/dev/null || return 0
-  awk -v helper="$BRIGHTNESS_HOTKEY" '
-       $1 ~ /^KEY_VOLUMEUP\+BTN_TL2$/ || $1 ~ /^KEY_VOLUMEDOWN\+BTN_TL2$/ {next}
-       {print}
-       END {
-         print "KEY_VOLUMEUP+BTN_MODE 1 " helper " up"
-         print "KEY_VOLUMEDOWN+BTN_MODE 1 " helper " down"
-         print "KEY_VOLUMEUP+KEY_GOTO 1 " helper " up"
-         print "KEY_VOLUMEDOWN+KEY_GOTO 1 " helper " down"
-       }' "$TRIGGER_BACKUP" > "$TRIGGER_OVERLAY" || return 0
+  [ -x "$VOLUME_GATE" ] || return 0
+  # A bind mount from an in-place update may still be active. Drop it first,
+  # then refresh the base from this firmware's real stock rules. Keeping one
+  # forever across Knulli updates silently resurrected obsolete controller
+  # mappings and was a source of "controller not configured" regressions.
+  umount "$TRIGGER_CFG" >/dev/null 2>&1 || true
+  cp -p "$TRIGGER_CFG" "$TRIGGER_BACKUP.tmp" 2>/dev/null || return 0
+  mv -f "$TRIGGER_BACKUP.tmp" "$TRIGGER_BACKUP" || return 0
+  printf '0\n' > "$MODIFIER_STATE"
+  awk -v gate="$VOLUME_GATE" '
+       $1 ~ /^KEY_VOLUME(UP|DOWN)\+(BTN_TL2|BTN_MODE|KEY_GOTO)$/ {next}
+       $1 == "KEY_VOLUMEUP" && $2 == "1"   {print "KEY_VOLUMEUP 1 " gate " volup"; next}
+       $1 == "KEY_VOLUMEDOWN" && $2 == "1" {print "KEY_VOLUMEDOWN 1 " gate " voldown"; next}
+       {print}' "$TRIGGER_BACKUP" > "$TRIGGER_OVERLAY" || return 0
   mount --bind "$TRIGGER_OVERLAY" "$TRIGGER_CFG" >/dev/null 2>&1 || return 0
   for svc in /etc/init.d/S*triggerhappy; do
     [ -x "$svc" ] && { "$svc" restart >/dev/null 2>&1 || true; break; }
@@ -140,19 +182,24 @@ restore_input_routing() {
 case "$1" in
   start|"")
     (
-      # No sleep -- ES was just started, kill it before it renders. Hammer it
-      # hard for the first ~2s (tight loop), then relax to a slow guard so a
-      # tester never sees a frame of EmulationStation.
+      # ES was just started, so stop it once before it renders. Keep a short
+      # conditional guard for a late service restart, but do not call the full
+      # init script 80 times: that process storm competed with SNAP's boot art
+      # preload (and with a game launched immediately after boot) on the H700.
       kill_es
       hide_screen
-      blank_fb
       install_link_cores
       install_input_routing
-      ( for i in $(seq 1 40); do kill_es; sleep 0.05; done
-        for i in $(seq 1 40); do kill_es; sleep 0.25; done ) &
+      ( for i in $(seq 1 20); do
+          if pidof emulationstation emulationstation-standalone emulationstation.sh >/dev/null 2>&1; then
+            kill_es
+          fi
+          sleep 0.25
+        done ) &
       init_lid
       init_bluetooth &      # opt-in; runs in parallel, not on the critical path
       init_audio            # sequential -- audio must be routed before Snap FE
+      prewarm_game_launcher # low-priority work overlaps SNAP's branded intro
       while true; do
         kill_es
         run_snapos

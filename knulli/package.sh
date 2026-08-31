@@ -16,7 +16,7 @@ BIN=snapos_ui.aarch64
 [[ -d assets ]] || { echo "no assets/ here?" >&2; exit 1; }
 
 # Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.0
-RELEASE="${1:-1.1.0}"
+RELEASE="${1:-1.2.0}"
 VER="Alpha-${RELEASE}"
 STAGE="$(mktemp -d)"
 DEST="$STAGE/system/snapos"
@@ -42,6 +42,7 @@ cp scrape_boxart.py "$DEST/"
 cp background_browser.py "$DEST/"
 cp ra_achievements.py "$DEST/"
 cp brightness-hotkey.sh "$DEST/"
+cp volume-gate.sh "$DEST/"
 cp knulli/custom.sh "$DEST/snapos-custom.sh"          # staged; 'Set As Default' installs it
 cp knulli/port-restore-es.sh "$DEST/snapos-uninstall.sh"
 printf 'Snap FE Alpha Build %s\nbuilt %s\n' "$RELEASE" "$(date -u +%FT%TZ)" > "$DEST/VERSION"
@@ -133,6 +134,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
         'system/snapos/snapos_ui',
         'system/snapos/snapos-custom.sh',
         'system/snapos/brightness-hotkey.sh',
+        'system/snapos/volume-gate.sh',
         'system/snapos/background_browser.py',
         'system/snapos/ra_achievements.py',
         'roms/ports/Snap FE.sh',

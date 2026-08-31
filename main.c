@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.1.9"
+#define SNAPFE_VERSION "Alpha Build 1.2.0"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -122,6 +122,8 @@ char games_loaded_search[64] = "";
 void scan_games(SDL_Renderer *ren, TTF_Font *font_label, int platform);
 void free_games(SDL_Renderer *ren);
 int wrap_text(TTF_Font *font, const char *text, int max_width, char lines[MAX_LINES][128]);
+static void snap_release_video(SDL_Window **win, SDL_Renderer **ren);
+static void snap_acquire_video(SDL_Window **win, SDL_Renderer **ren);
 
 const char *platform_names[] = {
     "GAME BOY ADVANCE", "GAME BOY COLOR", "GAME BOY", "NINTENDO ENTERTAINMENT SYSTEM",
@@ -689,10 +691,28 @@ int device_idx = 0;            // persisted; index into device_profiles[]
 #ifdef SNAPOS_TARGET_KNULLI
 static void cpu_set_governor(const char *g) {
     if (!g || !g[0]) return;
-    char cmd[240];
-    snprintf(cmd, sizeof cmd,
-        "for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo %s > \"$c\" 2>/dev/null; done", g);
-    system(cmd);
+
+    // This used to fork a shell on every game launch even when the requested
+    // governor was already active.  Besides adding avoidable latency, that
+    // shell competed with configgen on a four-core H700.  Read the live value
+    // and write sysfs directly only when a transition is actually required.
+    char current[32] = "";
+    FILE *r = fopen("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", "r");
+    if (r) {
+        if (fgets(current, sizeof current, r)) current[strcspn(current, "\r\n")] = '\0';
+        fclose(r);
+    }
+    if (strcmp(current, g) == 0) return;
+
+    for (int cpu = 0; cpu < 16; cpu++) {
+        char path[128];
+        snprintf(path, sizeof path,
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
+        FILE *w = fopen(path, "w");
+        if (!w) continue;
+        fputs(g, w);
+        fclose(w);
+    }
 }
 // Lid shut: really cut power. Screen off, power LED off, CPU pinned to minimum,
 // Wi-Fi radio down, audio sinks suspended, any running scrape killed.
@@ -1307,6 +1327,24 @@ static int ra_line_key(const char *line, char *key, size_t key_sz, const char **
     return 1;
 }
 
+// Knulli's top-level keys contain dots (for example global.retroarch.video_*),
+// unlike RetroArch's underscore-only keys parsed above. Extract the complete
+// left-hand side so a bloated file can be compacted without changing which
+// value wins: for duplicate keys Knulli uses the last one, and so do we.
+static int knulli_line_key(const char *line, char *key, size_t key_sz) {
+    const char *p = line;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p || *p == '#') return 0;
+    const char *eq = strchr(p, '=');
+    if (!eq) return 0;
+    const char *end = eq;
+    while (end > p && isspace((unsigned char)end[-1])) end--;
+    size_t n = (size_t)(end - p);
+    if (!n || n >= key_sz) return 0;
+    memcpy(key, p, n); key[n] = '\0';
+    return 1;
+}
+
 static int ra_hotkey_key(const char *key) {
     return ra_hotkey_index(key) >= 0;
 }
@@ -1424,6 +1462,53 @@ static void game_audio_mute(int on) {
     const char *path = "/userdata/system/knulli.conf";
     ra_hotkeys_load();
     if (access(ra_user_settings_path(), R_OK) != 0) ra_user_settings_capture();
+
+    // Hotfix 2 briefly mirrored an entire generated retroarchcustom.cfg back
+    // into knulli.conf.  Affected devices now carry 800+ global.retroarch.*
+    // overrides (a normal hand-edited file has only a handful), so every game
+    // is rebuilt from stale generated state and user changes can be masked.
+    // Migrate only the unmistakably polluted case, preserving an exact backup;
+    // small legitimate user override sets are never touched.
+    int retroarch_override_lines = 0;
+    {
+        static const char prefix[] = "global.retroarch.";
+        FILE *probe = fopen(path, "r");
+        char line[1024];
+        if (probe) {
+            while (fgets(line, sizeof line, probe))
+                if (strncmp(line, prefix, sizeof(prefix) - 1) == 0)
+                    retroarch_override_lines++;
+            fclose(probe);
+        }
+    }
+    int purge_polluted_retroarch = retroarch_override_lines > 256;
+    if (purge_polluted_retroarch) {
+        const char *backup = "/userdata/system/knulli.conf.snapfe-pre-cleanup";
+        if (access(backup, F_OK) != 0) {
+            FILE *src = fopen(path, "rb"), *dst = src ? fopen(backup, "wb") : NULL;
+            if (src && dst) {
+                char buf[8192]; size_t n;
+                while ((n = fread(buf, 1, sizeof buf, src)) > 0)
+                    if (fwrite(buf, 1, n, dst) != n) break;
+            }
+            if (dst) fclose(dst);
+            if (src) fclose(src);
+        }
+    }
+
+    // Avoid rewriting the large configuration on every launch. On exFAT that
+    // synchronous read/write was a noticeable part of the black loading gap.
+    // Rebuild only when SNAP's values, its shared RA profiles, or knulli.conf
+    // itself actually changed.
+    static int cache_valid = 0, cache_on = -1, cache_ff = -1, cache_ff_mode = -1;
+    static long cache_user_mtime = -1, cache_hotkey_mtime = -1, cache_knulli_mtime = -1;
+    long user_mtime = sn_path_mtime(ra_user_settings_path());
+    long hotkey_mtime = sn_path_mtime(ra_hotkeys_state_path());
+    long knulli_mtime = sn_path_mtime(path);
+    if (cache_valid && cache_on == !!on && cache_ff == fast_forward_idx &&
+        cache_ff_mode == fast_forward_mode && cache_user_mtime == user_mtime &&
+        cache_hotkey_mtime == hotkey_mtime && cache_knulli_mtime == knulli_mtime)
+        return;
     // Audio + speed are SNAP-owned. Hotkey values are user-owned but mirrored
     // here so configgen can rebuild RetroArch without losing them.
     static const char *OWN[] = {
@@ -1451,8 +1536,17 @@ static void game_audio_mute(int on) {
         "global.retroarch.network_cmd_port=55355",
         NULL
     };
-    static char keep[262144]; int kl = 0; keep[0] = '\0';
+    typedef struct { char *text; char key[192]; int keyed; } KnulliLine;
+    KnulliLine *keep = NULL;
+    int kl = 0, kcap = 0;
+    int source_existed = access(path, F_OK) == 0;
+    struct stat source_stat;
+    int have_source_stat = stat(path, &source_stat) == 0;
     FILE *f = fopen(path, "r");
+    // A transient read/permission error must never turn into an empty system
+    // configuration. Leave the last known-good file untouched and retry next
+    // launch instead.
+    if (!f && source_existed) return;
     if (f) {
         char line[1024];
         while (fgets(line, sizeof line, f)) {
@@ -1467,33 +1561,62 @@ static void game_audio_mute(int on) {
                     }
                 }
             }
-            if (!owned && strncmp(line, "global.retroarch.", 18) == 0) {
+            static const char RA_GLOBAL[] = "global.retroarch.";
+            if (!owned && strncmp(line, RA_GLOBAL, sizeof(RA_GLOBAL) - 1) == 0) {
                 char key[160];
-                if (ra_line_key(line + 18, key, sizeof key, NULL) &&
+                if (ra_line_key(line + sizeof(RA_GLOBAL) - 1, key, sizeof key, NULL) &&
                     ra_user_setting_allowed(key)) owned = 1;
             }
+            if (!owned && purge_polluted_retroarch &&
+                strncmp(line, RA_GLOBAL, sizeof(RA_GLOBAL) - 1) == 0)
+                owned = 1;
             if (!owned) {
                 char clean[1024]; snprintf(clean, sizeof clean, "%s", line);
                 clean[strcspn(clean, "\r\n")] = '\0';
                 for (int i = 0; LEGACY[i]; i++) if (strcmp(clean, LEGACY[i]) == 0) { owned = 1; break; }
             }
             if (owned) continue;
-            int n = (int)strlen(line);
-            if (kl + n < (int)sizeof(keep) - 256) { memcpy(keep + kl, line, n); kl += n; keep[kl] = '\0'; }
+            if (kl >= kcap) {
+                int next = kcap ? kcap * 2 : 512;
+                KnulliLine *grown = realloc(keep, (size_t)next * sizeof *grown);
+                if (!grown) continue;
+                keep = grown; kcap = next;
+            }
+            keep[kl].text = strdup(line);
+            if (!keep[kl].text) continue;
+            keep[kl].keyed = knulli_line_key(line, keep[kl].key, sizeof keep[kl].key);
+            kl++;
         }
         fclose(f);
     }
-    FILE *w = fopen(path, "w");
-    if (!w) return;
-    if (kl) fwrite(keep, 1, kl, w);
-    if (kl && keep[kl - 1] != '\n') fputc('\n', w);
+    const char *tmp_path = "/userdata/system/knulli.conf.snapfe-tmp";
+    FILE *w = fopen(tmp_path, "w");
+    if (!w) {
+        for (int i = 0; i < kl; i++) free(keep[i].text);
+        free(keep);
+        return;
+    }
+    if (have_source_stat) fchmod(fileno(w), source_stat.st_mode & 0777);
+    int wrote = 0;
+    for (int i = 0; i < kl; i++) {
+        int shadowed = 0;
+        if (keep[i].keyed) {
+            for (int j = i + 1; j < kl; j++)
+                if (keep[j].keyed && strcmp(keep[i].key, keep[j].key) == 0) {
+                    shadowed = 1; break;
+                }
+        }
+        if (!shadowed) { fputs(keep[i].text, w); wrote = 1; }
+        free(keep[i].text);
+    }
+    free(keep);
+    if (wrote) fputc('\n', w);
 
     // Always explicit -- never just "absent" -- so a crash mid-game can't leave
     // every future launch muted.
     fprintf(w, "global.retroarch.audio_mute_enable=%s\n", on ? "true" : "false");
     fprintf(w, "global.retroarch.input_joypad_driver=udev\n");
     fprintf(w, "global.retroarch.input_autodetect_enable=false\n");
-    fprintf(w, "global.retroarch.config_save_on_exit=true\n");
 
     for (int i = 0; i < RA_HOTKEY_COUNT; i++)
         if (ra_hotkeys[i].set)
@@ -1509,7 +1632,17 @@ static void game_audio_mute(int on) {
     if (ffv != 0) {
         fprintf(w, "global.retroarch.fastforward_frameskip=true\n");
     }
-    fclose(w);
+    if (fclose(w) != 0 || rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        return;
+    }
+    cache_valid = 1;
+    cache_on = !!on;
+    cache_ff = fast_forward_idx;
+    cache_ff_mode = fast_forward_mode;
+    cache_user_mtime = user_mtime;
+    cache_hotkey_mtime = hotkey_mtime;
+    cache_knulli_mtime = sn_path_mtime(path);
 }
 static void radio_stop(void) {
     if (radio_pid > 0) {
@@ -3532,11 +3665,11 @@ int is_sleeping = 0;
 int lid_closed = 0;          // clamshell state (RG34XX-SP): 0 open, 1 closed
 Uint32 lid_last_evt = 0;     // debounce for the polled hall sensor
 static int lid_evdev_fd = -1;       // raw controller event stream; survives SDL video handoff
-static int gamepad_evdev_fd = -1;   // independent reader for game-session system controls
-static int gamepad_menu_down = 0;
+static int gamepad_control_fd = -1; // Menu/Fn lives on the Anbernic controller
+static int gamepad_level_fd = -1;   // Volume keys live on the AXP system input
 static int gamepad_bri_modifier_down = 0;
 static int gamepad_volup_down = 0, gamepad_voldown_down = 0;
-static int gamepad_volume_synced = 0;
+static Uint32 gamepad_bri_modifier_until = 0;
 static int game_lid_paused = 0;     // emulator process group is SIGSTOP'd while the lid is shut
 static unsigned renderer_epoch = 1; // invalidates local/static GPU texture caches after RetroArch
 
@@ -3803,8 +3936,10 @@ void stat_line_text(int item, char *out, size_t n) {
                   format_duration(cnt > 0 ? tot / cnt : 0, d, sizeof d); snprintf(out, n, "%s Avg Session", d); break; }
         case 8: { long cnt = 0; for (int i = 0; i < activity_record_count; i++) cnt += activity_records[i].session_count;
                   snprintf(out, n, "%ld Total Session%s", cnt, cnt == 1 ? "" : "s"); break; }
-        case 9: if (ra_configured()) snprintf(out, n, "RA: %s%s", ra_username, ra_hardcore ? " (Hardcore)" : "");
-                else snprintf(out, n, "RetroAchievements: off"); break;
+        case 9:
+            if (ra_configured()) snprintf(out, n, "RA: %s%s", ra_username, ra_hardcore ? " (Hardcore)" : "");
+            else snprintf(out, n, "RetroAchievements: off");
+            break;
         case 10: format_duration(mg_play_seconds, d, sizeof d); snprintf(out, n, "%s In Mini Games", d); break;
         default: if (n) out[0] = '\0'; break;
     }
@@ -4167,7 +4302,10 @@ void load_settings() {
 }
 
 void save_settings() {
-    FILE *f = fopen(settings_path(), "w");
+    const char *dst = settings_path();
+    char tmp[640];
+    snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+    FILE *f = fopen(tmp, "w");
     if (!f) return;
     fprintf(f, "master_volume_pct=%d\n", master_volume_pct);
     fprintf(f, "os_audio_enabled=%d\n", os_audio_enabled);
@@ -4283,7 +4421,10 @@ void save_settings() {
             fprintf(f, "bg_choice_%s=%s\n", platform_dirs[i], platform_bg_choice[i]);
         }
     }
-    fclose(f);
+    // Never expose a half-written settings file if the battery dies or the SD
+    // card returns an I/O error during one of the many live setting changes.
+    // Same-directory rename is atomic on the device filesystem.
+    if (fclose(f) != 0 || rename(tmp, dst) != 0) unlink(tmp);
 }
 
 // Put the CPU governor where the user's settings say it should be. Called at
@@ -4296,15 +4437,16 @@ void cpu_apply_pref(void) {
     else                    cpu_set_governor("ondemand");
 }
 
-// Exact RG34XX-SP panel curve. The low-end hardware floor is absolute 3;
-// absolute 0 is display-off. The panel tops out at 200, so using Knulli's
+// Exact RG34XX-SP panel curve. Absolute 1 is the lowest visible panel level;
+// absolute 0 is display-off. Knulli normally clamps at 3, which is still too
+// bright in a dark room. The panel tops out at 200, so using Knulli's
 // generic 255-based helper collapses several high levels and makes the steps
 // inconsistent. Snap owns one precise 1%, 5%, 10% ... 100% sequence instead.
 int bright_pct_to_abs(int p) {
     if (p < BRIGHT_MIN_PCT) p = BRIGHT_MIN_PCT;
     if (p > 100) p = 100;
-    int v = p * 200 / 100;
-    if (v < 3) v = 3;
+    int v = (p <= BRIGHT_MIN_PCT) ? 1 : p * 200 / 100;
+    if (v < 1) v = 1;
     if (v > 200) v = 200;
     return v;
 }
@@ -4334,7 +4476,7 @@ void apply_brightness(void) {
 #ifdef SNAPOS_TARGET_KNULLI
     int v = bright_pct_to_abs(p);
     char c[192];
-    snprintf(c, sizeof c, "/usr/bin/brightness set %d >/dev/null 2>&1", v);
+    snprintf(c, sizeof c, "LCD_BRIGHTNESS_MINIMUM=1 /usr/bin/brightness set %d >/dev/null 2>&1", v);
     system(c);
     // Keep the system's persisted value in step too, so boot/loading screens
     // start at the exact same level. This must be synchronous: backgrounded
@@ -4357,27 +4499,159 @@ void apply_brightness(void) {
 // or core silently reset the panel.
 #ifdef SNAPOS_TARGET_KNULLI
 static int brightness_guard_active = 0;
-static Uint32 brightness_guard_last = 0;
+static int brightness_guard_pre_pulses = 0;
+static int brightness_guard_ready_pulses = 0;
+static int brightness_guard_emulator_ready = 0;
+static int brightness_guard_last_pct = -1;
+static Uint32 brightness_guard_started = 0;
+static Uint32 brightness_guard_ready_at = 0;
+static Uint32 brightness_guard_last_poll = 0;
+static int brightness_frontend_pulses = 0;
+static Uint32 brightness_frontend_started = 0;
 static const char *brightness_guard_path(void) { return "/userdata/system/snapos/.brightness-desired"; }
+
+static int brightness_guard_desired_pct(void) {
+    int v = brightness_pct;
+    FILE *f = fopen(brightness_guard_path(), "r");
+    if (f) {
+        int n = -1;
+        if (fscanf(f, "%d", &n) == 1 && n >= BRIGHT_MIN_PCT && n <= 100) v = n;
+        fclose(f);
+    }
+    if (power_save_mode && v > 60) v = 60;
+    if (v < BRIGHT_MIN_PCT) v = BRIGHT_MIN_PCT;
+    if (v > 100) v = 100;
+    return v;
+}
+
+static void brightness_guard_apply_pct(int pct) {
+    char cmd[192];
+    snprintf(cmd, sizeof cmd,
+             "LCD_BRIGHTNESS_MINIMUM=1 /usr/bin/brightness set %d >/dev/null 2>&1",
+             bright_pct_to_abs(pct));
+    system(cmd);
+    brightness_guard_last_pct = pct;
+}
+
+static int proc_comm_is(pid_t pid, const char *wanted) {
+    if (pid <= 0 || !wanted) return 0;
+    char path[96], comm[64] = "";
+    snprintf(path, sizeof path, "/proc/%d/comm", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int ok = fgets(comm, sizeof comm, f) != NULL;
+    fclose(f);
+    if (!ok) return 0;
+    comm[strcspn(comm, "\r\n")] = '\0';
+    return strcmp(comm, wanted) == 0;
+}
+
+static int emulator_video_process_ready(void) {
+    // Direct RetroArch launches use emu_pid itself. Knulli's Python launcher
+    // keeps RetroArch as its direct child for the whole session.
+    if (proc_comm_is(emu_pid, "retroarch") || proc_comm_is(emu_pid, "mgba")) return 1;
+    if (emu_pid <= 0) return 0;
+    char path[128];
+    snprintf(path, sizeof path, "/proc/%d/task/%d/children", (int)emu_pid, (int)emu_pid);
+    FILE *f = fopen(path, "r");
+    int child = 0, ready = 0;
+    if (f) {
+        while (fscanf(f, "%d", &child) == 1) {
+            if (proc_comm_is((pid_t)child, "retroarch") || proc_comm_is((pid_t)child, "mgba")) {
+                ready = 1;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    if (ready) return 1;
+
+    // Linux 4.9 on the H700 does not reliably expose the Popen child through
+    // task/<pid>/children. There can only be one foreground emulator while
+    // SNAP is dormant, so a bounded /proc scan is the reliable fallback. It
+    // runs only during launch and stops after the three readiness pulses.
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!isdigit((unsigned char)e->d_name[0])) continue;
+        pid_t pid = (pid_t)strtol(e->d_name, NULL, 10);
+        if (proc_comm_is(pid, "retroarch") || proc_comm_is(pid, "mgba")) {
+            ready = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return ready;
+}
+
 static void brightness_guard_start(void) {
     int v = power_save_mode && brightness_pct > 60 ? 60 : brightness_pct;
     if (v < BRIGHT_MIN_PCT) v = BRIGHT_MIN_PCT;
     FILE *f = fopen(brightness_guard_path(), "w");
     if (f) { fprintf(f, "%d\n", v); fclose(f); }
     brightness_guard_active = 1;
-    brightness_guard_last = 0;
+    brightness_guard_pre_pulses = 0;
+    brightness_guard_ready_pulses = 0;
+    brightness_guard_emulator_ready = 0;
+    brightness_guard_last_pct = v;
+    brightness_guard_started = SDL_GetTicks();
+    brightness_guard_ready_at = 0;
+    brightness_guard_last_poll = 0;
 }
 static void brightness_guard_tick(void) {
     if (!brightness_guard_active) return;
     Uint32 now = SDL_GetTicks();
-    if (brightness_guard_last && now - brightness_guard_last < 1200) return;
-    brightness_guard_last = now;
-    int v = power_save_mode && brightness_pct > 60 ? 60 : brightness_pct;
-    if (v < BRIGHT_MIN_PCT) v = BRIGHT_MIN_PCT;
-    FILE *f = fopen(brightness_guard_path(), "r");
-    if (f) { int n = -1; if (fscanf(f, "%d", &n) == 1 && n >= BRIGHT_MIN_PCT && n <= 100) v = n; fclose(f); }
-    char cmd[160]; snprintf(cmd, sizeof cmd, "/usr/bin/brightness set %d >/dev/null 2>&1", bright_pct_to_abs(v));
-    system(cmd);
+    // Once the three post-RetroArch writes are complete, the external hotkey
+    // helper owns changes directly. Do no filesystem polling during gameplay.
+    if (brightness_guard_emulator_ready && brightness_guard_ready_pulses >= 3) return;
+    if (!brightness_guard_emulator_ready && now - brightness_guard_started > 26000) return;
+    if (brightness_guard_last_poll && now - brightness_guard_last_poll < 150) return;
+    brightness_guard_last_poll = now;
+    int desired = brightness_guard_desired_pct();
+
+    // The in-game helper owns deliberate Function+Volume changes. Follow its
+    // desired-value file immediately; never overwrite it with the stale
+    // pre-launch brightness_pct value.
+    if (desired != brightness_guard_last_pct)
+        brightness_guard_apply_pct(desired);
+
+    if (!brightness_guard_emulator_ready && emulator_video_process_ready()) {
+        brightness_guard_emulator_ready = 1;
+        brightness_guard_ready_at = now;
+        brightness_guard_ready_pulses = 0;
+        // One tmpfs-only timing marker per launch. Combined with the launch
+        // handoff markers this separates SNAP teardown from configgen and
+        // RetroArch startup without adding persistent SD-card writes.
+        FILE *lf = fopen("/tmp/snapfe-launch-perf.log", "a");
+        if (lf) {
+            fprintf(lf, "%u +%u ms retroarch-process-ready\n", now,
+                    now - brightness_guard_started);
+            fclose(lf);
+        }
+    }
+
+    if (brightness_guard_emulator_ready) {
+        // Reassert relative to the moment RetroArch actually exists, not the
+        // moment the user pressed A. This survives both fast and slow configgen
+        // paths and catches the late display-init write that used to clamp 1 to 3.
+        static const Uint32 ready_due[] = { 0, 700, 2500 };
+        if (brightness_guard_ready_pulses < (int)(sizeof ready_due / sizeof ready_due[0]) &&
+            now - brightness_guard_ready_at >= ready_due[brightness_guard_ready_pulses]) {
+            brightness_guard_ready_pulses++;
+            brightness_guard_apply_pct(desired);
+        }
+        return;
+    }
+
+    // Fallback while configgen is still working. These are bounded and sparse;
+    // unlike the old permanent 1.2-second process spawn they add no in-game load.
+    static const Uint32 pre_due[] = { 1500, 5000, 10000, 18000, 24000 };
+    if (brightness_guard_pre_pulses < (int)(sizeof pre_due / sizeof pre_due[0]) &&
+        now - brightness_guard_started >= pre_due[brightness_guard_pre_pulses]) {
+        brightness_guard_pre_pulses++;
+        brightness_guard_apply_pct(desired);
+    }
 }
 static void brightness_guard_stop(void) {
     // The external Fn+Volume listener owns brightness while the emulator has
@@ -4394,11 +4668,55 @@ static void brightness_guard_stop(void) {
         }
     }
     brightness_guard_active = 0;
+    brightness_guard_pre_pulses = 0;
+    brightness_guard_ready_pulses = 0;
+    brightness_guard_emulator_ready = 0;
+    brightness_guard_last_pct = -1;
+    brightness_guard_last_poll = 0;
+}
+
+// Knulli finishes a few display services after custom.sh has already started
+// SNAP. One of those late boot jobs can restore the previous Knulli backlight
+// value after apply_brightness() has set the user's SNAP value. Reassert only
+// during this short startup window, then stop completely; this deliberately
+// adds no permanent polling or gameplay work.
+static void brightness_frontend_guard_start(void) {
+    brightness_frontend_started = SDL_GetTicks();
+    brightness_frontend_pulses = 0;
+}
+static void brightness_frontend_guard_tick(int game_active) {
+    // Some H700 images restore their stock 15% floor surprisingly late (after
+    // audio/Bluetooth settle). Keep this bounded, but cover that late writer so
+    // a saved 1% level is still the real panel value once the boot quote ends.
+    static const Uint32 due[] = { 0, 900, 2800, 7000, 12000, 22000 };
+    const int count = (int)(sizeof due / sizeof due[0]);
+    if (!brightness_frontend_started || brightness_frontend_pulses >= count) return;
+    // A launch has its own readiness-based guard. Never let two owners touch
+    // the panel, and do not postpone startup pulses until after the game.
+    if (game_active) { brightness_frontend_pulses = count; return; }
+    Uint32 now = SDL_GetTicks();
+    if (now - brightness_frontend_started < due[brightness_frontend_pulses]) return;
+    int p = power_save_mode && brightness_pct > 60 ? 60 : brightness_pct;
+    if (p < BRIGHT_MIN_PCT) p = BRIGHT_MIN_PCT;
+    if (p > 100) p = 100;
+    brightness_guard_apply_pct(p);
+    brightness_frontend_pulses++;
+    if (brightness_frontend_pulses == count) {
+        // The first persistence write can itself be superseded by the late boot
+        // service. Persist once more after the last bounded pulse so the next
+        // boot/loading screen starts at the same value too.
+        char cmd[160];
+        snprintf(cmd, sizeof cmd,
+                 "knulli-settings-set display.brightness %d >/dev/null 2>&1", p);
+        system(cmd);
+    }
 }
 #else
 static void brightness_guard_start(void) {}
 static void brightness_guard_tick(void) {}
 static void brightness_guard_stop(void) {}
+static void brightness_frontend_guard_start(void) {}
+static void brightness_frontend_guard_tick(int game_active) { (void)game_active; }
 #endif
 
 // Enter/leave Power Save: caps FPS + brightness (via power_save_mode), drops the
@@ -4891,6 +5209,7 @@ static float g_boot_stage_base = 0.0f, g_boot_stage_span = 1.0f;
 
 static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
                                const char *status, float progress) {
+    brightness_frontend_guard_tick(0);
     Theme *t = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
     if (progress < 0.0f) progress = 0.0f;
     if (progress > 1.0f) progress = 1.0f;
@@ -4958,7 +5277,8 @@ static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
 // Same, but with a real progress bar + integer % (frac 0..1). Cheap enough to
 // call inside a blocking scan loop -- one clear + present per step.
 void draw_progress(SDL_Renderer *ren, const char *msg, float frac) {
-    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
     if (g_boot_loading_mode) {
         float overall = g_boot_stage_base + g_boot_stage_span * frac;
         Uint32 elapsed = SDL_GetTicks() - g_boot_sequence_started;
@@ -4995,7 +5315,8 @@ static float g_load_base = 0.0f, g_load_span = 1.0f;
 static Uint32 g_load_last = 0;
 static void load_prog(float local) {
     if (!g_load_ren) return;
-    if (local < 0) local = 0; if (local > 1) local = 1;
+    if (local < 0) local = 0;
+    if (local > 1) local = 1;
     Uint32 now = SDL_GetTicks();
     if (local > 0.0f && local < 1.0f && now - g_load_last < 24) return;   // light throttle
     g_load_last = now;
@@ -5066,7 +5387,6 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
     // ---------------- Your Stats: its own boxed card ----------------
     if (kind == HOME_WIDGET_STATS) {
         int pad = 12;
-        int hdr_h  = TTF_FontHeight(font_small ? font_small : font_label);
         int line_h = TTF_FontHeight(font_label) + 6;
         int card_x = wx - pad;
         int card_w = WIN_W - 16 - card_x;
@@ -6073,8 +6393,10 @@ static void surface_opaque_bbox(SDL_Surface *s, unsigned char op[4]) {
         Uint8 *row = (Uint8 *)conv->pixels + y * conv->pitch;
         for (int x = 0; x < conv->w; x += sx) {
             if (row[x * 4 + 3] > 24) {
-                if (x < minx) minx = x; if (x > maxx) maxx = x;
-                if (y < miny) miny = y; if (y > maxy) maxy = y;
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
             }
         }
     }
@@ -6103,7 +6425,8 @@ static SDL_Texture *make_silhouette_shadow(SDL_Renderer *ren, SDL_Surface *src) 
     int w = c->w, h = c->h, sw = w, sh = h;
     if (w >= h && w > MAXP) { sw = MAXP; sh = h * MAXP / w; }
     else if (h > w && h > MAXP) { sh = MAXP; sw = w * MAXP / h; }
-    if (sw < 1) sw = 1; if (sh < 1) sh = 1;
+    if (sw < 1) sw = 1;
+    if (sh < 1) sh = 1;
     SDL_Surface *out = SDL_CreateRGBSurfaceWithFormat(0, sw, sh, 32, SDL_PIXELFORMAT_RGBA32);
     if (!out) { if (c != src) SDL_FreeSurface(c); return NULL; }
     SDL_LockSurface(c); SDL_LockSurface(out);
@@ -8213,19 +8536,40 @@ static int find_evdev_for(const char *name, char *out, size_t outsz) {
 }
 
 static void gamepad_evdev_open(void) {
-    if (gamepad_evdev_fd >= 0) return;
     char path[64];
-    if (find_evdev_for("Anbernic RG34XX-SP Controller", path, sizeof path))
-        gamepad_evdev_fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (gamepad_control_fd < 0 &&
+        find_evdev_for("Anbernic RG34XX-SP Controller", path, sizeof path))
+        gamepad_control_fd = open(path, O_RDONLY | O_NONBLOCK);
+
+    // The RG34XX-SP's dedicated Volume buttons are not joystick buttons. They
+    // are reported by the AXP power-management input alongside the lid switch.
+    if (gamepad_level_fd < 0 && find_evdev_for("axp2202-pek", path, sizeof path))
+        gamepad_level_fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (gamepad_level_fd < 0 && access("/dev/input/event0", R_OK) == 0)
+        gamepad_level_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
+
+    // Fallback for an alternate kernel that places the level keys on the pad.
+    if (gamepad_level_fd < 0 &&
+        find_evdev_for("Anbernic RG34XX-SP Controller", path, sizeof path))
+        gamepad_level_fd = open(path, O_RDONLY | O_NONBLOCK);
+}
+
+static void gamepad_modifier_store(int down) {
+    // This is transient inter-process state for triggerhappy, not a setting.
+    // Keep it in tmpfs so Menu presses never cause SD-card writes and a crash
+    // cannot leave ordinary volume suppressed across a reboot.
+    FILE *f = fopen("/tmp/snapfe-brightness-modifier", "w");
+    if (f) { fprintf(f, "%d\n", down ? 1 : 0); fclose(f); }
 }
 
 static void gamepad_evdev_reset(void) {
-    if (gamepad_evdev_fd >= 0) close(gamepad_evdev_fd);
-    gamepad_evdev_fd = -1;
-    gamepad_menu_down = 0;
+    if (gamepad_control_fd >= 0) close(gamepad_control_fd);
+    if (gamepad_level_fd >= 0) close(gamepad_level_fd);
+    gamepad_control_fd = gamepad_level_fd = -1;
     gamepad_bri_modifier_down = 0;
     gamepad_volup_down = gamepad_voldown_down = 0;
-    gamepad_volume_synced = 0;
+    gamepad_bri_modifier_until = 0;
+    gamepad_modifier_store(0);
 }
 
 static void gamepad_store_brightness(void) {
@@ -8233,44 +8577,53 @@ static void gamepad_store_brightness(void) {
     if (f) { fprintf(f, "%d\n", brightness_pct); fclose(f); }
 }
 
-// Snap is the single owner of the handheld's dedicated level buttons while it
-// is the active frontend. custom.sh neutralises Knulli's duplicate callback,
-// so one physical press becomes exactly one change here. This leaves every
-// user-configured RetroArch controller hotkey untouched.
+// Snap owns only Menu+Volume while a game is active. custom.sh gates Knulli's
+// normal volume callback only while Menu is down, so a chord changes brightness
+// once and Volume by itself still follows Knulli's stock path exactly once.
 //
 // Menu/Fn + Volume = panel brightness, in exact 5% transitions ending at the
 // real 1% night floor. Volume alone = system volume. Notifications are kept
 // off: queuing a RetroArch SHOW_MSG per click could replay for several minutes.
+static void gamepad_evdev_event(const struct input_event *iev) {
+    if (iev->type != EV_KEY) return;
+    if (iev->code == BTN_TL2 || iev->code == BTN_MODE || iev->code == KEY_GOTO) {
+        int down = iev->value != 0;
+        gamepad_bri_modifier_down = down;
+        gamepad_bri_modifier_until = down ? SDL_GetTicks() + 2500 : 0;
+        gamepad_modifier_store(down);
+        return;
+    }
+    if (iev->code != KEY_VOLUMEUP && iev->code != KEY_VOLUMEDOWN) return;
+    int *latched = (iev->code == KEY_VOLUMEUP) ? &gamepad_volup_down : &gamepad_voldown_down;
+    if (iev->value == 0) { *latched = 0; return; }
+    if (iev->value != 1 || *latched) return; // one exact 5% step per click
+    *latched = 1;
+    if (!gamepad_bri_modifier_down) return;  // Knulli owns ordinary volume
+    gamepad_bri_modifier_until = SDL_GetTicks() + 2500;
+    int dir = (iev->code == KEY_VOLUMEUP) ? 1 : -1;
+    hotkey_brightness(dir, BRIGHT_STEP);
+    gamepad_store_brightness();
+    save_settings();
+}
+
 static void gamepad_evdev_poll_quit(void) {
     gamepad_evdev_open();
-    if (gamepad_evdev_fd < 0 || emu_pid <= 0) return;
+    if (emu_pid <= 0) return;
     struct input_event iev;
-    while (read(gamepad_evdev_fd, &iev, sizeof iev) == (ssize_t)sizeof iev) {
-        if (iev.type != EV_KEY) continue;
-        if (iev.code == BTN_MODE || iev.code == KEY_GOTO)
-            gamepad_menu_down = iev.value != 0;
-        if (iev.code == BTN_MODE || iev.code == KEY_GOTO)
-            gamepad_bri_modifier_down = iev.value != 0;
-        if (iev.code != KEY_VOLUMEUP && iev.code != KEY_VOLUMEDOWN) continue;
-        int *latched = (iev.code == KEY_VOLUMEUP) ? &gamepad_volup_down : &gamepad_voldown_down;
-        if (iev.value == 0) { *latched = 0; continue; }
-        if (iev.value != 1 || *latched) continue; // reject repeats/bounce until release
-        *latched = 1;
-        int dir = (iev.code == KEY_VOLUMEUP) ? 1 : -1;
-        if (gamepad_bri_modifier_down) {
-            hotkey_brightness(dir, BRIGHT_STEP);
-            gamepad_store_brightness();
-            save_settings();
-        } else {
-            if (!gamepad_volume_synced) {
-                int live = sys_volume_read();
-                if (live >= 0) sys_volume_pct = live;
-                gamepad_volume_synced = 1;
-            }
-            hotkey_volume(dir, 5);
-            ingame_volume_changed = 1;
-            save_settings();
-        }
+    while (gamepad_control_fd >= 0 &&
+           read(gamepad_control_fd, &iev, sizeof iev) == (ssize_t)sizeof iev)
+        gamepad_evdev_event(&iev);
+    while (gamepad_level_fd >= 0 &&
+           read(gamepad_level_fd, &iev, sizeof iev) == (ssize_t)sizeof iev)
+        gamepad_evdev_event(&iev);
+
+    // Some kernels occasionally omit the Menu key-up. Never leave normal
+    // volume suppressed: expire the modifier unless clicks keep refreshing it.
+    if (gamepad_bri_modifier_down && gamepad_bri_modifier_until &&
+        SDL_TICKS_PASSED(SDL_GetTicks(), gamepad_bri_modifier_until)) {
+        gamepad_bri_modifier_down = 0;
+        gamepad_bri_modifier_until = 0;
+        gamepad_modifier_store(0);
     }
 }
 
@@ -8317,6 +8670,7 @@ static pid_t spawn_emulatorlauncher_ex(const char *sys, const char *rompath, con
         if (!js) continue;
         const char *nm = SDL_JoystickName(js);
         int is_anbernic = (nm && strstr(nm, "Anbernic"));
+        int selected_pad = 0;
         if (is_anbernic || (!have_pad && j == 0)) {
             snprintf(b_idx, sizeof b_idx, "%d", j);
             snprintf(p1name, sizeof p1name, "%s", nm ? nm : "Controller");
@@ -8326,8 +8680,13 @@ static pid_t spawn_emulatorlauncher_ex(const char *sys, const char *rompath, con
             snprintf(b_ax,  sizeof b_ax,  "%d", SDL_JoystickNumAxes(js));
             find_evdev_for(p1name, p1dev, sizeof p1dev);
             have_pad = 1;
-            if (is_anbernic) break;
+            selected_pad = 1;
         }
+        // SDL_JoystickOpen is reference counted. Leaking one reference on every
+        // launch kept old device handles alive and made later handoffs steadily
+        // more expensive.
+        SDL_JoystickClose(js);
+        if (selected_pad && is_anbernic) break;
     }
 
     char *av[64];
@@ -8352,6 +8711,10 @@ static pid_t spawn_emulatorlauncher_ex(const char *sys, const char *rompath, con
     if (pid == 0) {
         setsid();
         setenv("HOME", "/userdata/system", 1);
+        setenv("XDG_CONFIG_HOME", "/userdata/system/configs", 1);
+        setenv("XDG_RUNTIME_DIR", "/var/run", 1);
+        setenv("SDL_NOMOUSE", "1", 1);
+        setenv("LCD_BRIGHTNESS_MINIMUM", "1", 1);
         execv("/usr/bin/emulatorlauncher", av);
         _exit(127);
     }
@@ -8362,6 +8725,7 @@ static pid_t spawn_emulatorlauncher(const char *sys, const char *rompath, const 
 }
 #else
 static void lid_evdev_poll(void) {}
+static void gamepad_modifier_store(int down) { (void)down; }
 static void gamepad_evdev_poll_quit(void) {}
 static void gamepad_evdev_reset(void) {}
 static pid_t spawn_emulatorlauncher(const char *sys, const char *rompath, const char *force_core) {
@@ -8885,13 +9249,43 @@ static void link_write_core_opts(int is_host, const char *peer_ip) {
     fclose(w);
 }
 
-void link_launch(void) {
+static void launch_perf_mark(const char *stage, Uint32 started) {
+#ifdef SNAPOS_TARGET_KNULLI
+    FILE *f = fopen("/tmp/snapfe-launch-perf.log", "a");
+    if (f) {
+        fprintf(f, "%u +%u ms %s\n", SDL_GetTicks(), SDL_GetTicks() - started,
+                stage ? stage : "?");
+        fclose(f);
+    }
+#else
+    (void)stage; (void)started;
+#endif
+}
+
+static void launch_release_video(SDL_Window **win, SDL_Renderer **ren, int *video_released) {
+    if (!win || !ren || !video_released || *video_released) return;
+    snap_release_video(win, ren);
+    *video_released = 1;
+}
+
+static void launch_restore_after_failure(SDL_Window **win, SDL_Renderer **ren,
+                                         int *video_released) {
+    brightness_guard_stop();
+    game_audio_mute(0); // a failed fork must not leave later games globally muted
+    if (win && ren && video_released && *video_released) {
+        snap_acquire_video(win, ren);
+        *video_released = 0;
+    }
+}
+
+void link_launch(SDL_Window **win, SDL_Renderer **ren, int *video_released) {
     link_write_core_opts(link_is_host, link_peer_ip);
     game_audio_mute(0); // also enables RetroArch's local OSD command endpoint
     gamepad_evdev_reset();
     apply_brightness(); brightness_guard_start();
 
     int is_gba = (strcmp(link_my_sys, "gba") == 0);
+    launch_release_video(win, ren, video_released);
     if (is_gba) {
         // GBA: gpSP's netpacket callbacks carry emulated serial/RFU packets.
         char portbuf[8]; snprintf(portbuf, sizeof portbuf, "%d", LINK_GAME_PORT);
@@ -8905,6 +9299,15 @@ void link_launch(void) {
     } else {
         emu_pid = spawn_emulatorlauncher(link_my_sys, link_my_path, "gambatte");
     }
+    if (emu_pid < 0) {
+        launch_restore_after_failure(win, ren, video_released);
+        // link_write_core_opts() already changed the system configuration.
+        // A fork failure must roll that transaction back just like a normal
+        // game exit or the next unrelated game inherits Link Play settings.
+        link_restore_core_opts();
+        link_net_close();
+        return;
+    }
     emu_is_mgba = 0;
     game_running = 1;
     g_link_active = 1;
@@ -8913,7 +9316,10 @@ void link_launch(void) {
     link_net_close();
 }
 
-void launch_game(const char *path, const char *title, const char *platform_dir) {
+void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
+                 const char *path, const char *title, const char *platform_dir) {
+    Uint32 launch_started = SDL_GetTicks();
+    launch_perf_mark("begin", launch_started);
     int p = platform_index_for_dir(platform_dir);
     ra_score_pre_game = ra_score;   // baseline for the post-game "+N points" banner
     cpu_apply_pref();               // carry "Performance" (or Power Save) into the game
@@ -8931,6 +9337,7 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
     // explicit "mute game" behavior, while the radio option is independently
     // selectable so sound effects remain available by default.
     game_audio_mute((keep_music || (keep_radio && !radio_game_audio)) ? 1 : 0);
+    launch_perf_mark("prepared-settings", launch_started);
 
 #ifdef SNAPOS_TARGET_KNULLI
     // On Knulli we hand off to Batocera's own launcher (configgen). It builds a
@@ -8970,7 +9377,17 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
             snprintf(sysbuf, sizeof(sysbuf), "%s",
                      (p >= 0) ? platform_roms_dir(p) : (platform_dir ? platform_dir : "gba"));
 
+        // Knulli/ES releases its renderer before invoking configgen. Starting
+        // configgen first made RetroArch race SNAP's live Mali context and hit
+        // a repeatable display-acquisition timeout on every game.
+        launch_release_video(win, ren, video_released);
+        launch_perf_mark("released-video", launch_started);
         emu_pid = spawn_emulatorlauncher(sysbuf, path, NULL);
+        launch_perf_mark("spawned-emulatorlauncher", launch_started);
+        if (emu_pid < 0) {
+            launch_restore_after_failure(win, ren, video_released);
+            return;
+        }
         emu_is_mgba = 0;
         game_running = 1;
         last_autosave_time = SDL_GetTicks();
@@ -9010,6 +9427,7 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
     // entire time a game was running, fighting the emulator's own audio thread
     // for CPU and causing audible crackle/stutter. A stored PID lets us check
     // liveness with a plain non-blocking waitpid() instead.
+    launch_release_video(win, ren, video_released);
     pid_t pid = fork();
     if (pid == 0) {
         if (use_mgba) {
@@ -9026,7 +9444,11 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
         }
         _exit(127); // only reached if execl failed
     }
-    emu_pid = pid; // -1 on fork failure, which waitpid below handles as "already gone"
+    if (pid < 0) {
+        launch_restore_after_failure(win, ren, video_released);
+        return;
+    }
+    emu_pid = pid;
     emu_is_mgba = use_mgba;
     game_running = 1;
     last_autosave_time = SDL_GetTicks();
@@ -9040,7 +9462,7 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
 // same fork/exec + stored-PID model as launch_game(), so the main loop's
 // liveness check brings Snap OS back to the foreground when RetroArch quits.
 // Deliberately records no activity entry (there's no game being played).
-void launch_retroarch_menu() {
+void launch_retroarch_menu(SDL_Window **win, SDL_Renderer **ren, int *video_released) {
     char emu_path[900], ra_config[900], override_path[900];
     snprintf(emu_path, sizeof(emu_path), "%s", sn_ra_bin());
 #ifdef SNAPOS_TARGET_KNULLI
@@ -9073,6 +9495,7 @@ void launch_retroarch_menu() {
     brightness_guard_start();
     gamepad_evdev_reset();
 
+    launch_release_video(win, ren, video_released);
     pid_t pid = fork();
     if (pid == 0) {
         if (override_path[0]) {
@@ -9082,6 +9505,10 @@ void launch_retroarch_menu() {
             execl(emu_path, emu_path, "--config", ra_config, "--menu", (char*)NULL);
         }
         _exit(127);
+    }
+    if (pid < 0) {
+        launch_restore_after_failure(win, ren, video_released);
+        return;
     }
     emu_pid = pid;
     emu_is_mgba = 0;
@@ -9128,17 +9555,23 @@ static void snap_make_window(SDL_Window **win, SDL_Renderer **ren) {
 // so RetroArch gets a clean display, then rebuild on return. Every cached
 // texture pointer is nulled -- the lazy loaders repopulate them next frame.
 static void snap_release_video(SDL_Window **win, SDL_Renderer **ren) {
+    Uint32 release_started = SDL_GetTicks();
+    launch_perf_mark("video-release:start", release_started);
     // Cancel queued/finished artwork uploads before the renderer disappears.
     // Otherwise the worker can hand the main thread a surface while `ren` is
     // NULL, leaving that game's queue state stuck on a destroyed GPU object.
     art_async_reset();
+    launch_perf_mark("video-release:art-reset", release_started);
     if (*ren) { SDL_DestroyRenderer(*ren); *ren = NULL; } // destroys all its textures too
+    launch_perf_mark("video-release:renderer-destroyed", release_started);
     if (*win) { SDL_DestroyWindow(*win); *win = NULL; }
+    launch_perf_mark("video-release:window-destroyed", release_started);
     // Fully drop the video subsystem so RetroArch gets a clean DRM master AND we
     // get a fresh GLES context back. A plain window/renderer rebuild left the
     // render-to-texture path (the composed carousel cards, bookshelf, etc.)
     // broken on the mali driver -- textures came back blank until a full restart.
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    launch_perf_mark("video-release:subsystem-quit", release_started);
     renderer_epoch++;                           // local/static caches rebuild lazily
     text_cache_count = 0;                       // entries already freed by DestroyRenderer
     for (int i = 0; i < game_count; i++) {
@@ -9169,9 +9602,25 @@ static void snap_release_video(SDL_Window **win, SDL_Renderer **ren) {
 }
 static void snap_acquire_video(SDL_Window **win, SDL_Renderer **ren) {
     // Re-init video; RetroArch has already exited so the DRM master is free.
-    // Retry briefly in case the driver needs a beat to let go.
-    for (int i = 0; i < 25 && SDL_InitSubSystem(SDL_INIT_VIDEO) != 0; i++) SDL_Delay(120);
-    snap_make_window(win, ren);
+    // The old code retried SDL_Init but attempted the actual KMS window only
+    // once. A driver that released DRM between those two calls left `ren` null
+    // and the next draw crashed or produced a corrupted return screen. Retry
+    // the complete init + window + renderer transaction.
+    *win = NULL;
+    *ren = NULL;
+    for (int i = 0; i < 25; i++) {
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0) {
+            snap_make_window(win, ren);
+            if (*ren) return;
+            if (*win) { SDL_DestroyWindow(*win); *win = NULL; }
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        }
+        SDL_Delay(120);
+    }
+#ifdef SNAPOS_TARGET_KNULLI
+    FILE *f = fopen("/tmp/snapfe-video-error.log", "a");
+    if (f) { fprintf(f, "%ld acquire failed: %s\n", (long)time(NULL), SDL_GetError()); fclose(f); }
+#endif
 }
 
 // Put Snap FE away and boot back into EmulationStation. Same effect as the
@@ -9432,9 +9881,21 @@ static void hotkey_brightness(int dir, int step) {
         brightness_pct = (brightness_pct + BRIGHT_STEP / 2) / BRIGHT_STEP * BRIGHT_STEP;
     if (brightness_pct < BRIGHT_MIN_PCT) brightness_pct = BRIGHT_MIN_PCT;
     if (brightness_pct > 100) brightness_pct = 100;
+    // During a game, touch only the live panel. apply_brightness() also calls
+    // knulli-settings-set, which rewrites knulli.conf; doing that on every
+    // Function+Volume click raced configgen and let a late system write undo
+    // the player's 1% choice. brightness_guard_stop() imports the final value
+    // and the normal exit path persists it exactly once. In the frontend we
+    // still use the full path so an ordinary brightness change survives boot.
+#ifdef SNAPOS_TARGET_KNULLI
+    if (game_running) brightness_guard_apply_pct(brightness_pct);
+    else              apply_brightness();
+#else
     apply_brightness();
+#endif
     osd_show(1, brightness_pct);
     hk_mod_window_until = SDL_GetTicks() + HK_MOD_WINDOW_MS; // stay in brightness mode
+    gamepad_modifier_store(1); // suppress Knulli's simultaneous volume callback
 }
 // One step (tap or a held repeat). rep = 0 for the first press. Bigger jumps
 // the longer it's held. Persisting is left to the caller.
@@ -9495,12 +9956,47 @@ static void sh_squote(const char *in, char *out, size_t n) {
 }
 // The Realtek driver + a udev rename race can leave the wifi NIC named
 // "rename_wlan0" instead of wlan0 (harmless -- connman works by MAC), but any
-// code that assumed a "wl*" name broke. Resolve the real name every time.
+// code that assumed a "wl*" name broke. Resolve the real name from sysfs
+// without forking `ip | awk` on the UI thread.
 static void wifi_iface(char *out, size_t n) {
     out[0] = '\0';
-    FILE *p = popen("ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /wl/ {print $2; exit}'", "r");
-    if (p) { if (fgets(out, n, p)) out[strcspn(out, "\r\n")] = '\0'; pclose(p); }
+    DIR *d = opendir("/sys/class/net");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            if (strncmp(e->d_name, "wl", 2) == 0 || strstr(e->d_name, "wlan")) {
+                snprintf(out, n, "%s", e->d_name);
+                break;
+            }
+        }
+        closedir(d);
+    }
     if (!out[0]) snprintf(out, n, "wlan0");
+}
+
+// A default route on a wireless interface is enough to know ConnMan already
+// reconnected. Reading procfs is effectively free; the old `ip | awk` popen
+// caused a visible frame hitch every 45 seconds on the H700.
+static int wifi_has_route(void) {
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) return 0;
+    char line[256];
+    (void)fgets(line, sizeof line, f); // header
+    int connected = 0;
+    while (fgets(line, sizeof line, f)) {
+        char iface[64] = "";
+        unsigned long destination = 1, gateway = 0;
+        unsigned flags = 0;
+        if (sscanf(line, "%63s %lx %lx %x", iface, &destination, &gateway, &flags) == 4 &&
+            (strncmp(iface, "wl", 2) == 0 || strstr(iface, "wlan")) &&
+            destination == 0 && (flags & 0x1)) {
+            connected = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return connected;
 }
 static void wifi_scan(void) {
     wifi_ssid_count = 0;
@@ -9554,16 +10050,10 @@ static void wifi_reconnect_tick(void) {
     if (wifi_reconnect_last && now - wifi_reconnect_last < 45000) return;
     wifi_reconnect_last = now;
 
-    FILE *p = popen("ip -4 -o addr show 2>/dev/null | awk '$2 ~ /wl/ && $3==\"inet\" {print $4; exit}'", "r");
-    char ip[48] = "";
-    if (p) {
-        if (fgets(ip, sizeof ip, p)) ip[strcspn(ip, "\r\n")] = '\0';
-        pclose(p);
-    }
-    if (ip[0]) return;
+    if (wifi_has_route()) return;
 
     int enabled = 0;
-    p = popen("/usr/bin/knulli-settings-get wifi.enabled 2>/dev/null", "r");
+    FILE *p = popen("/usr/bin/knulli-settings-get wifi.enabled 2>/dev/null", "r");
     if (p) {
         char b[16] = "";
         if (fgets(b, sizeof b, p)) enabled = (atoi(b) == 1);
@@ -10043,10 +10533,16 @@ static SDL_Keycode pad_map_joybutton(int b) {
 static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
     switch (kb_purpose) {
         case KB_PURPOSE_API_KEY:  save_api_key_from_buffer(); break;
-        case KB_PURPOSE_RA_USER:  snprintf(ra_username, sizeof ra_username, "%.63s", kb_buffer); save_ra_config();
-                                  if (ra_username[0] && ra_token[0]) run_ra_check(0); break;
-        case KB_PURPOSE_RA_TOKEN: snprintf(ra_token, sizeof ra_token, "%.95s", kb_buffer); save_ra_config();
-                                  if (ra_username[0] && ra_token[0]) run_ra_check(0); break;
+        case KB_PURPOSE_RA_USER:
+            snprintf(ra_username, sizeof ra_username, "%.63s", kb_buffer);
+            save_ra_config();
+            if (ra_username[0] && ra_token[0]) run_ra_check(0);
+            break;
+        case KB_PURPOSE_RA_TOKEN:
+            snprintf(ra_token, sizeof ra_token, "%.95s", kb_buffer);
+            save_ra_config();
+            if (ra_username[0] && ra_token[0]) run_ra_check(0);
+            break;
         case KB_PURPOSE_RA_WEB_KEY: snprintf(ra_web_api_key, sizeof ra_web_api_key, "%.95s", kb_buffer);
                                     save_ra_config(); break;
         case KB_PURPOSE_LIBRARY_SEARCH:
@@ -11344,6 +11840,7 @@ int main(int argc, char *argv[]) {
     if (promo_mode && !promo_dir[0]) snprintf(promo_dir, sizeof promo_dir, "%s/promo", sn_data_root());
     if (promo_mode) mkdir(promo_dir, 0755);
     load_settings();
+    gamepad_modifier_store(0); // recover normal volume after any prior crash/restart
     // App Focused always opens on its first page after a boot; page selection
     // remains live during the session but is never inherited from stale rows.
     if (home_view_idx == HOME_VIEW_APPS) home_selected = -1;
@@ -11389,6 +11886,7 @@ int main(int argc, char *argv[]) {
     }
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
+    if (!promo_mode) brightness_frontend_guard_start();
     IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
     TTF_Init();
 
@@ -11524,6 +12022,7 @@ int main(int argc, char *argv[]) {
 
     while (running) {
         Uint32 frame_start = SDL_GetTicks();
+        brightness_frontend_guard_tick(game_running);
         if (bg_online_search_pending && state == STATE_BG_ONLINE && ren) {
             bg_online_search_pending = 0;
             bg_online_search(ren);
@@ -11593,7 +12092,10 @@ int main(int argc, char *argv[]) {
                 if (state == STATE_HOME && home_view_idx == HOME_VIEW_APPS && !home_grid_reorder &&
                     pad_map_joybutton(jb) == SDLK_s)
                     home_reorder_x_down_at = SDL_GetTicks();
-                if (jb == hk_mod_btn) hk_mod_window_until = SDL_GetTicks() + HK_MOD_WINDOW_MS;
+                if (jb == hk_mod_btn) {
+                    hk_mod_window_until = SDL_GetTicks() + HK_MOD_WINDOW_MS;
+                    gamepad_modifier_store(1);
+                }
                 // Night-mode chord: Select then X within ~1s (opt-in in Settings).
                 static Uint32 g_select_at = 0;
                 if (jb == 9) g_select_at = SDL_GetTicks();
@@ -11805,15 +12307,15 @@ int main(int argc, char *argv[]) {
                         if (rt == ROW_H_CONTINUE) {
                             ActivityRecord *r = &activity_records[row_extra[home_selected]];
                             play_click();
-                            launch_game(r->path, r->title, r->platform_dir);
+                            launch_game(&win, &ren, &game_video_released, r->path, r->title, r->platform_dir);
                         } else if (rt == ROW_H_RECENT_ITEM) {
                             ActivityRecord *r = &activity_records[recent_indices[row_extra[home_selected]]];
                             play_click();
-                            launch_game(r->path, r->title, r->platform_dir);
+                            launch_game(&win, &ren, &game_video_released, r->path, r->title, r->platform_dir);
                         } else if (rt == ROW_H_FAV_ITEM) {
                             FavoriteEntry *fv = &favorites[row_extra[home_selected]];
                             play_click();
-                            launch_game(fv->path, fv->title, fv->platform_dir);
+                            launch_game(&win, &ren, &game_video_released, fv->path, fv->title, fv->platform_dir);
                         } else if (rt == ROW_H_SURPRISE) {
                             play_click();
                             if (pick_surprise_game(ren, font_label)) {
@@ -11850,7 +12352,7 @@ int main(int argc, char *argv[]) {
                             state = STATE_MENU;
                         } else if (rt == ROW_H_QUICK_RETROARCH) {
                             play_click();
-                            launch_retroarch_menu();
+                            launch_retroarch_menu(&win, &ren, &game_video_released);
                         } else if (rt == ROW_H_QUICK_LINK) {
                             play_click();
                             link_scan_games();
@@ -11942,7 +12444,9 @@ int main(int argc, char *argv[]) {
                         if (npi >= 0) {
                             play_click();
                             flash_until = reduce_motion ? SDL_GetTicks() : SDL_GetTicks() + 250;
-                            launch_game(activity_records[npi].path, activity_records[npi].title, activity_records[npi].platform_dir);
+                            launch_game(&win, &ren, &game_video_released,
+                                        activity_records[npi].path, activity_records[npi].title,
+                                        activity_records[npi].platform_dir);
                         }
                     }
                     // X collapses / expands the Your Stats widget in whichever slot it sits.
@@ -11979,7 +12483,8 @@ int main(int argc, char *argv[]) {
                     }
                     if (e.key.keysym.sym == SDLK_RETURN) {
                         play_click();
-                        launch_game(surprise_path, surprise_title, surprise_platform);
+                        launch_game(&win, &ren, &game_video_released,
+                                    surprise_path, surprise_title, surprise_platform);
                         state = STATE_HOME;
                     }
                 }
@@ -12449,7 +12954,9 @@ int main(int argc, char *argv[]) {
                         if (e.key.keysym.sym == SDLK_RETURN) {
                             play_click();
                             flash_until = reduce_motion ? SDL_GetTicks() : SDL_GetTicks() + 250;
-                            launch_game(games[selected].path, games[selected].title, games[selected].platform_dir);
+                            launch_game(&win, &ren, &game_video_released,
+                                        games[selected].path, games[selected].title,
+                                        games[selected].platform_dir);
                         }
                     }
                 }
@@ -12470,7 +12977,9 @@ int main(int argc, char *argv[]) {
                         if (e.key.keysym.sym == SDLK_RETURN) {
                             play_click();
                             flash_until = reduce_motion ? SDL_GetTicks() : SDL_GetTicks() + 250;
-                            launch_game(games[selected].path, games[selected].title, games[selected].platform_dir);
+                            launch_game(&win, &ren, &game_video_released,
+                                        games[selected].path, games[selected].title,
+                                        games[selected].platform_dir);
                         }
                     } else if (game_count > 0) {
                         if (e.key.keysym.sym == SDLK_RIGHT || e.key.keysym.sym == SDLK_LEFT) {
@@ -12506,7 +13015,9 @@ int main(int argc, char *argv[]) {
                         if (e.key.keysym.sym == SDLK_RETURN) {
                             play_click();
                             flash_until = reduce_motion ? SDL_GetTicks() : SDL_GetTicks() + 250;
-                            launch_game(games[selected].path, games[selected].title, games[selected].platform_dir);
+                            launch_game(&win, &ren, &game_video_released,
+                                        games[selected].path, games[selected].title,
+                                        games[selected].platform_dir);
                         }
                     }
                 }
@@ -13543,6 +14054,10 @@ int main(int argc, char *argv[]) {
                     if (kb_cursor < 0) kb_cursor = 0;
                     if (kb_cursor > kb_len) kb_cursor = kb_len;
                 }
+                // A launch releases SDL video inside the action handler. Do
+                // not dispatch any queued UI events against the now-null
+                // renderer before the dormant game path takes over.
+                if (game_running) break;
             }
         }
 
@@ -13575,7 +14090,12 @@ int main(int argc, char *argv[]) {
                 game_lid_paused = 0;
                 lid_log("game-resumed");
 #ifdef SNAPOS_TARGET_KNULLI
-                brightness_guard_last = 0;
+                brightness_guard_pre_pulses = 0;
+                brightness_guard_ready_pulses = 0;
+                brightness_guard_emulator_ready = 0;
+                brightness_guard_ready_at = 0;
+                brightness_guard_last_poll = 0;
+                brightness_guard_started = SDL_GetTicks();
 #endif
                 last_input_time = SDL_GetTicks();
             }
@@ -13603,7 +14123,6 @@ int main(int argc, char *argv[]) {
             pid_t r = (emu_pid > 0) ? waitpid(emu_pid, &status, WNOHANG) : emu_pid;
             if (r != 0) {
                 game_running = 0; emu_pid = -1;
-                gamepad_menu_down = 0;
                 game_lid_paused = 0;
                 brightness_guard_stop();   // import the final in-game brightness before anything saves
                 gamepad_evdev_reset();     // discard queued UI events before the next emulator session
@@ -13651,7 +14170,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (light_rest_active) { system("knulli-brightness dispon >/dev/null 2>&1"); light_rest_active = 0; }
-        if (deep_rest_active) { deep_rest_exit(); deep_rest_active = 0; }
+        if (deep_rest_active) { deep_rest_exit(); deep_rest_active = 0; apply_brightness(); }
 
         // Self-heal a saved Wi-Fi connection when the device comes back into
         // range. This is intentionally skipped while the lid/deep-rest path is
@@ -13679,6 +14198,10 @@ int main(int argc, char *argv[]) {
 
         // (game-running liveness is handled in the dormant fast-path above)
 
+        if (hk_mod_window_until && SDL_TICKS_PASSED(SDL_GetTicks(), hk_mod_window_until)) {
+            hk_mod_window_until = 0;
+            gamepad_modifier_store(0);
+        }
         hotkey_poll_held();      // hold a volume key -> keep stepping, accelerating
         if (!promo_mode) poll_scrape_status(ren, font_label, platform_selected);
         poll_ra_check();
@@ -13738,8 +14261,13 @@ int main(int argc, char *argv[]) {
         // Link Play: pump discovery + pairing; launch when both sides are ready.
         if (state == STATE_LINK && link_phase >= LP_LOBBY) {
             if (link_tick()) {
-                link_launch();
+                link_launch(&win, &ren, &game_video_released);
                 state = STATE_HOME;   // where we return when the linked game exits
+                // Link Play launches later in the frame than the normal
+                // game-running fast path. Its handoff has already destroyed
+                // the renderer, so restart the loop before any UI service or
+                // draw call can touch the null renderer.
+                if (game_running) continue;
             }
         }
 

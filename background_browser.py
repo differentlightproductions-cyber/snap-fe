@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 API = "https://wallhaven.cc/api/v1/search"
 INFO_API = "https://wallhaven.cc/api/v1/w/"
-UA = "SnapFE/1.1.9 (background-browser; https://github.com/differentlightproductions-cyber/snap-fe)"
+UA = "SnapFE/1.2.0 (background-browser; https://github.com/differentlightproductions-cyber/snap-fe)"
 
 
 def api_key():

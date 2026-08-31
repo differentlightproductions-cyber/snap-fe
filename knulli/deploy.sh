@@ -25,6 +25,8 @@ EXTRA=""
 [ -f ra_achievements.py ] && EXTRA="$EXTRA ra_achievements.py"
 [ -f brightness-hotkey.sh ] || { echo "missing brightness-hotkey.sh" >&2; exit 1; }
 EXTRA="$EXTRA brightness-hotkey.sh"
+[ -f volume-gate.sh ] || { echo "missing volume-gate.sh" >&2; exit 1; }
+EXTRA="$EXTRA volume-gate.sh"
 for core in gpsp_libretro.so gambatte_libretro.so; do
   [ -s "vendor/link-cores/$core" ] || {
     echo "missing vendor/link-cores/$core -- run ./knulli/setup-link-cores.sh" >&2
@@ -57,13 +59,9 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
     echo "   seeded es_input.cfg"
   fi
   cd /userdata/system/snapos
-  # Clear the old asset FILES first (keep the dirs -- fuse-exfat throws a bogus
-  # "Directory not empty" on rm -rf). Otherwise a renamed/reformatted asset
-  # (e.g. foo.jpg -> foo.png) leaves BOTH on the device, and the "first image in
-  # the folder wins" loaders (bookshelf / list / carousel / home icons) may keep
-  # showing the stale one. The tar below repopulates everything immediately.
-  [ -d assets ] && find assets -type f -delete 2>/dev/null || true
-  # extract straight over the top (tar replaces each file).
+  # Extract over the top (tar replaces each bundled file). Never clear the
+  # whole assets tree: bookshelf spines, list icons and backgrounds are user-
+  # extensible, and an update must not erase artwork placed there by the owner.
   # --no-same-owner/-perms because /userdata is FAT-ish.
   tar xzf - --no-same-owner --no-same-permissions
   mkdir -p cores core-backup
@@ -92,6 +90,11 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
   mv -f custom.sh /userdata/system/custom.sh
   chmod 0755 snapos_ui *.py *.sh cores/*.so /usr/lib/libretro/gpsp_libretro.so \
     /usr/lib/libretro/gambatte_libretro.so /userdata/system/custom.sh 2>/dev/null || true
+  # A large asset transfer can outlast the one-second custom.sh restart delay,
+  # allowing the old binary to relaunch while files are still arriving. Stop
+  # that stale process once more now that snapos_ui has been atomically replaced;
+  # the persistent custom.sh loop will immediately start the new build.
+  killall -9 snapos_ui 2>/dev/null || true
   echo "   installed to /userdata/system/snapos/"
   if [ -x snapos_ui ]; then echo "   exec bit: OK"; else
     echo "   NOTE: no exec bit (FAT /userdata). custom.sh runs it as: sh -c ./snapos_ui"
