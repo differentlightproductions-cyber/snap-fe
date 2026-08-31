@@ -3,7 +3,7 @@
 A frontend (menu / game launcher) for **Knulli** CFW on Anbernic handhelds,
 developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
-controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
+controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
 **Current release: Alpha 1.2.0.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
