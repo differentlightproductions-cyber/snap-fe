@@ -41,6 +41,7 @@ cp "$BIN" "$DEST/snapos_ui"
 cp scrape_boxart.py "$DEST/"
 cp background_browser.py "$DEST/"
 cp ra_achievements.py "$DEST/"
+cp volume-button-snapfe.sh "$DEST/"
 cp knulli/custom.sh "$DEST/snapos-custom.sh"          # staged; 'Set As Default' installs it
 cp knulli/port-restore-es.sh "$DEST/snapos-uninstall.sh"
 printf 'Snap FE Alpha Build %s\nbuilt %s\n' "$RELEASE" "$(date -u +%FT%TZ)" > "$DEST/VERSION"
@@ -131,8 +132,12 @@ with zipfile.ZipFile(sys.argv[1]) as z:
     required = {
         'system/snapos/snapos_ui',
         'system/snapos/snapos-custom.sh',
+        'system/snapos/volume-button-snapfe.sh',
+        'system/snapos/background_browser.py',
+        'system/snapos/ra_achievements.py',
         'roms/ports/Snap FE.sh',
         'roms/ports/Snap FE (Set As Default).sh',
+        'roms/ports/Snap FE (Restore EmulationStation).sh',
         'INSTALL.txt',
     }
     missing = sorted(required - names)

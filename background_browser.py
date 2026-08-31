@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, dependency-free Wikimedia Commons background browser for Snap FE."""
+"""Small, dependency-free Wallhaven background browser for Snap FE."""
 
 import argparse
 import html
@@ -10,9 +10,27 @@ import sys
 import urllib.parse
 import urllib.request
 
-API = "https://commons.wikimedia.org/w/api.php"
-UA = "SnapFE/1.1.6 (free-background-browser; https://github.com/differentlightproductions-cyber/snap-fe)"
-FREE_LICENSES = ("cc0", "public domain", "cc by", "cc-by", "cc by-sa", "cc-by-sa")
+API = "https://wallhaven.cc/api/v1/search"
+UA = "SnapFE/1.1.9 (background-browser; https://github.com/differentlightproductions-cyber/snap-fe)"
+
+
+def api_key():
+    """Load a private key without ever embedding it in a command or package."""
+    key = os.environ.get("WALLHAVEN_API_KEY", "").strip()
+    if key:
+        return key
+    key_file = os.environ.get(
+        "SNAPFE_WALLHAVEN_KEY_FILE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "wallhaven.key"),
+    )
+    try:
+        with open(key_file, encoding="utf-8") as fh:
+            key = fh.readline().strip()
+    except OSError:
+        return ""
+    # Wallhaven keys are simple URL-safe tokens. Refuse malformed file content
+    # rather than accidentally putting arbitrary text into a request URL.
+    return key if re.fullmatch(r"[A-Za-z0-9_-]{20,128}", key) else ""
 
 
 def clean(value, limit=120):
@@ -29,36 +47,21 @@ def request_json(params):
 
 
 def search(query, output):
-    data = request_json({
-        "action": "query",
-        "format": "json",
-        "formatversion": "2",
-        "generator": "search",
-        "gsrnamespace": "6",
-        "gsrlimit": "24",
-        "gsrsearch": query,
-        "prop": "imageinfo",
-        "iiprop": "url|mime|extmetadata",
-        "iiurlwidth": "1280",
-        "iiextmetadatafilter": "LicenseShortName|Artist|Credit",
-    })
+    params = {"q": query, "categories": "111", "purity": "100", "sorting": "relevance", "atleast": "640x480"}
+    key = api_key()
+    if key:
+        params["apikey"] = key
+    data = request_json(params)
     rows = []
-    for page in data.get("query", {}).get("pages", []):
-        info = (page.get("imageinfo") or [{}])[0]
-        mime = info.get("mime", "")
-        if mime not in ("image/jpeg", "image/png"):
-            continue
-        meta = info.get("extmetadata") or {}
-        license_name = clean((meta.get("LicenseShortName") or {}).get("value"), 60)
-        if not any(tag in license_name.lower() for tag in FREE_LICENSES):
-            continue
-        url = info.get("thumburl") or info.get("url") or ""
+    for page in data.get("data", []):
+        url = page.get("path") or ""
         if not url:
             continue
-        title = clean(page.get("title", "").removeprefix("File:"), 96)
-        artist = clean((meta.get("Artist") or meta.get("Credit") or {}).get("value"), 80)
-        source = info.get("descriptionurl") or page.get("canonicalurl") or "https://commons.wikimedia.org/"
-        rows.append((title, url, license_name, artist or "Wikimedia Commons contributor", source))
+        wid = clean(page.get("id", "wallpaper"), 24)
+        title = f"Wallhaven {wid} ({page.get('resolution', 'wallpaper')})"
+        artist = clean(page.get("uploader", {}).get("username") or "Wallhaven contributor", 80)
+        source = page.get("url") or ("https://wallhaven.cc/w/" + wid)
+        rows.append((title, url, "Wallhaven", artist, source))
         if len(rows) >= 12:
             break
     os.makedirs(os.path.dirname(output), exist_ok=True)

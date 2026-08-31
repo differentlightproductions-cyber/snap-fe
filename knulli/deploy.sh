@@ -23,6 +23,8 @@ EXTRA=""
 [ -f scrape_boxart.py ] && EXTRA="$EXTRA scrape_boxart.py"
 [ -f background_browser.py ] && EXTRA="$EXTRA background_browser.py"
 [ -f ra_achievements.py ] && EXTRA="$EXTRA ra_achievements.py"
+[ -f volume-button-snapfe.sh ] || { echo "missing volume-button-snapfe.sh" >&2; exit 1; }
+EXTRA="$EXTRA volume-button-snapfe.sh"
 for core in gpsp_libretro.so gambatte_libretro.so; do
   [ -s "vendor/link-cores/$core" ] || {
     echo "missing vendor/link-cores/$core -- run ./knulli/setup-link-cores.sh" >&2
@@ -88,7 +90,7 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
     echo "   saved old custom.sh -> custom.sh.pre-snapos"
   fi
   mv -f custom.sh /userdata/system/custom.sh
-  chmod 0755 snapos_ui *.py cores/*.so /usr/lib/libretro/gpsp_libretro.so \
+  chmod 0755 snapos_ui *.py *.sh cores/*.so /usr/lib/libretro/gpsp_libretro.so \
     /usr/lib/libretro/gambatte_libretro.so /userdata/system/custom.sh 2>/dev/null || true
   echo "   installed to /userdata/system/snapos/"
   if [ -x snapos_ui ]; then echo "   exec bit: OK"; else

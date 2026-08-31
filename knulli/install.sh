@@ -29,6 +29,8 @@ chmod +x "$DEST/snapos_ui"
 for helper in scrape_boxart.py background_browser.py ra_achievements.py; do
   [[ -f "../$helper" ]] && cp "../$helper" "$DEST/$helper"
 done
+[[ -f ../volume-button-snapfe.sh ]] || { echo "missing ../volume-button-snapfe.sh" >&2; exit 1; }
+cp ../volume-button-snapfe.sh "$DEST/volume-button-snapfe.sh"
 
 for core in gpsp_libretro.so gambatte_libretro.so; do
   [[ -s "../vendor/link-cores/$core" ]] || {
@@ -49,7 +51,7 @@ if [[ -f "$HOOK" && ! -f "$HOOK.pre-snapos" ]] && ! grep -q "Snap FE frontend ho
   echo ">> backed up existing custom.sh -> custom.sh.pre-snapos"
 fi
 cp ./custom.sh "$HOOK"
-chmod +x "$HOOK"
+chmod +x "$HOOK" "$DEST/volume-button-snapfe.sh" 2>/dev/null || true
 
 echo
 echo "Installed to $DEST"

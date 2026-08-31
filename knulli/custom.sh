@@ -14,6 +14,10 @@ LOADER=/lib/ld-linux-aarch64.so.1
 SNAPOS_CORES=/userdata/system/snapos/cores
 SYSTEM_CORES=/usr/lib/libretro
 CORE_BACKUP=/userdata/system/snapos/core-backup
+VOLUME_STUB=/userdata/system/snapos/volume-button-snapfe.sh
+VOLUME_TARGET=/usr/bin/volume-button
+TRIGGER_CFG=/etc/triggerhappy/triggers.d/multimedia_keys.conf
+TRIGGER_BACKUP=/userdata/system/snapos/triggerhappy-multimedia_keys.stock
 
 # Link Play needs newer gpSP/Gambatte serial transports than the stock cores on
 # some Knulli images. Keep the shipped copies on /userdata (persistent), back
@@ -106,47 +110,44 @@ run_snapos() {
   if [ -x "$SNAPOS" ]; then "$SNAPOS"; else "$LOADER" "$SNAPOS"; fi
 }
 
-# In-game hardware-key handler. Snap FE handles the volume/menu keys itself in
-# its own UI, but once a game runs its loop is parked -- so this watches the
-# controller's evdev node directly and, ONLY while an emulator is running,
-# turns  Fn + Volume  into a brightness change (like EmulationStation did).
-# Volume keys alone are left to whatever the emulator/OS does with them.
-snapfe_hotkeys() {
-  command -v evtest >/dev/null 2>&1 || return 0
-  # Pick the controller node by name (the power-button node also carries the
-  # volume keycodes, so an evtest capability probe is ambiguous here).
-  DEV=$(awk '/Name=.*Controller/{f=1} f&&/Handlers=/{for(i=1;i<=NF;i++)if($i ~ /^event/){print "/dev/input/"$i; exit}}' /proc/bus/input/devices 2>/dev/null)
-  [ -n "$DEV" ] || DEV=/dev/input/event1
-  # The RG34XX-SP's dedicated Fn/Menu button emits KEY_GOTO (354) on this node.
-  # gpio-keys-polled re-sends "value 1" on every poll while a key is held (no
-  # "value 2" autorepeat), so a held Fn + tapped Volume keeps stepping.
-  local fn=0
-  in_game() { pgrep -x retroarch >/dev/null 2>&1 || pgrep -x retroarch32 >/dev/null 2>&1 || pgrep -x mgba >/dev/null 2>&1; }
-  game_brightness_step() {
-    local delta="$1" desired=/userdata/system/snapos/.brightness-desired cfg=/userdata/system/snapos/settings.cfg
-    local v=200 pct tmp
-    [ -r "$desired" ] && read -r v < "$desired"
-    case "$v" in ''|*[!0-9]*) v=200 ;; esac
-    v=$((v + delta * 2))       # UI and hotkeys both move in exact 5% steps (10/200)
-    [ "$v" -lt 0 ] && v=0
-    [ "$v" -gt 200 ] && v=200
-    printf '%s\n' "$v" > "$desired"
-    /usr/bin/brightness set "$v" >/dev/null 2>&1
-    pct=$((v * 100 / 200))
-    knulli-settings-set display.brightness "$pct" >/dev/null 2>&1
-    if [ -f "$cfg" ]; then
-      tmp="${cfg}.brightness.$$"
-      awk -v p="$pct" 'BEGIN{done=0} /^brightness_pct=/{print "brightness_pct=" p; done=1; next} {print} END{if(!done) print "brightness_pct=" p}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+# Knulli's triggerhappy service normally runs /usr/bin/volume-button for the
+# same physical keys that Snap watches. Letting both handlers act caused large
+# jumps, a wrap from minimum to maximum, and mismatched values. Bind a tiny
+# no-op over that one callback while Snap is active; all unrelated power/lid
+# triggerhappy actions remain untouched. If file bind mounts are unavailable,
+# fall back to filtering only the four volume/brightness trigger lines.
+install_input_routing() {
+  if [ -s "$VOLUME_STUB" ] && [ -e "$VOLUME_TARGET" ]; then
+    chmod 0755 "$VOLUME_STUB" 2>/dev/null || true
+    if ! grep -q " $VOLUME_TARGET " /proc/mounts 2>/dev/null; then
+      mount --bind "$VOLUME_STUB" "$VOLUME_TARGET" >/dev/null 2>&1 || true
     fi
-  }
-  while read -r ln; do
-    case "$ln" in
-      *"(KEY_GOTO)"*" value 1"*) fn=1 ;;
-      *"(KEY_GOTO)"*" value 0"*) fn=0 ;;
-      *"(KEY_VOLUMEUP)"*" value 1"*)   [ "$fn" = 1 ] && in_game && game_brightness_step 5 ;;
-      *"(KEY_VOLUMEDOWN)"*" value 1"*) [ "$fn" = 1 ] && in_game && game_brightness_step -5 ;;
-    esac
-  done < <(evtest "$DEV" 2>/dev/null)
+    grep -q " $VOLUME_TARGET " /proc/mounts 2>/dev/null && return 0
+  fi
+
+  [ -r "$TRIGGER_CFG" ] || return 0
+  grep -q '^# SNAP_FE_VOLUME_OWNER$' "$TRIGGER_CFG" 2>/dev/null && return 0
+  [ -s "$TRIGGER_BACKUP" ] || cp -p "$TRIGGER_CFG" "$TRIGGER_BACKUP" 2>/dev/null || true
+  tmp=/tmp/snapfe-triggerhappy.$$
+  awk 'BEGIN{print "# SNAP_FE_VOLUME_OWNER"}
+       $1 ~ /^KEY_VOLUMEUP($|\+)/ || $1 ~ /^KEY_VOLUMEDOWN($|\+)/ {next}
+       {print}' "$TRIGGER_CFG" > "$tmp" || { rm -f "$tmp"; return 0; }
+  if cp -f "$tmp" "$TRIGGER_CFG" 2>/dev/null; then
+    for svc in /etc/init.d/S*triggerhappy; do
+      [ -x "$svc" ] && { "$svc" restart >/dev/null 2>&1 || true; break; }
+    done
+  fi
+  rm -f "$tmp"
+}
+
+restore_input_routing() {
+  umount "$VOLUME_TARGET" >/dev/null 2>&1 || true
+  if [ -s "$TRIGGER_BACKUP" ] && grep -q '^# SNAP_FE_VOLUME_OWNER$' "$TRIGGER_CFG" 2>/dev/null; then
+    cp -f "$TRIGGER_BACKUP" "$TRIGGER_CFG" 2>/dev/null || true
+    for svc in /etc/init.d/S*triggerhappy; do
+      [ -x "$svc" ] && { "$svc" restart >/dev/null 2>&1 || true; break; }
+    done
+  fi
 }
 
 case "$1" in
@@ -159,11 +160,11 @@ case "$1" in
       hide_screen
       blank_fb
       install_link_cores
+      install_input_routing
       ( for i in $(seq 1 40); do kill_es; sleep 0.05; done
         for i in $(seq 1 40); do kill_es; sleep 0.25; done ) &
       init_lid
       init_bluetooth &      # opt-in; runs in parallel, not on the critical path
-      snapfe_hotkeys &      # Fn+Volume -> brightness while a game is running
       init_audio            # sequential -- audio must be routed before Snap FE
       while true; do
         kill_es
@@ -172,5 +173,5 @@ case "$1" in
       done
     ) &
     ;;
-  stop) ;;
+  stop) restore_input_routing ;;
 esac

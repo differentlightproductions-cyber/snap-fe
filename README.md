@@ -5,8 +5,29 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
 
-**Current release: Alpha 1.1.8.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.1.9.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.1.9 highlights
+
+- Brightness and volume now stay under Snap FE control while a RetroArch game
+  is running. Brightness moves in exact 5% steps down to a true 1% night floor,
+  never wraps back to maximum, and both controls show native RetroArch notices.
+- RetroArch's in-game menu defaults to **Menu + Select** and **Menu + Start**
+  still exits to Snap FE. If a user changes the menu hotkey in RetroArch, Snap
+  FE records and preserves that choice instead of overwriting it next launch.
+- Syncthing controls live under System settings, and the Accounts area now has
+  cleaner Scraping, RetroAchievements, and WallHaven groups. Successful
+  RetroAchievements login reports `ON + Linked` and Achievements Book is an app.
+- Surprise Me is centered and pre-cached for faster browsing. App Focused Home
+  keeps its 4x2 page/row position across boots, moves apps between pages, and
+  uses simpler monochrome placeholder icons.
+- New RGSPink and Yellow/Gold themes, improved charging feedback, faster first
+  pass through Carousel, correct Bookshelf game counts, expanded Breakout, and
+  the new Connect 4 mini game are included.
+- Boot now preloads libraries and artwork behind the themed particle intro;
+  shutdown has a matching short animation. WallHaven provides optional SFW
+  wallpaper search and downloads with an API key stored only on the device.
 
 ### 1.1.8 highlights
 
@@ -83,12 +104,12 @@ now — not every emulator or system Knulli supports. Expect alpha rough edges.
   | Internet radio | `*.api.radio-browser.info` |
   | RetroAchievements | `retroachievements.org` |
 | Box-art scraping (`scrape_boxart.py`) | `api.screenscraper.fr`, `api.thegamesdb.net` |
-| Free background browser | GitHub-hosted Snap FE background catalogs/files |
+| Free background browser | `wallhaven.cc` (SFW-only search; optional personal API key) |
 | Link Play | Other Snap FE devices on the same local network only |
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.1.8.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.1.9.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
@@ -117,6 +138,7 @@ It's a single C translation unit — [`main.c`](main.c) (~14k lines) — plus:
 | [`scrape_boxart.py`](scrape_boxart.py) | Optional box-art / metadata scraper (ScreenScraper / TheGamesDB). Needs your own API key/account. |
 | [`background_browser.py`](background_browser.py) | Downloads optional system backgrounds selected in the on-device browser. |
 | [`ra_achievements.py`](ra_achievements.py) | Fetches the signed-in user's unlocked RetroAchievements for the achievements book. |
+| [`volume-button-snapfe.sh`](volume-button-snapfe.sh) | Prevents Knulli's second media-key handler from fighting Snap FE while Snap is active. |
 | [`assets/`](assets/) | Open-licensed fonts, sounds, and Snap FE's generated Home placeholder icons. Other wallpaper/console-art slots are documented by the included README files. |
 
 See **[BUILD.md](BUILD.md)** for exact build + install steps.

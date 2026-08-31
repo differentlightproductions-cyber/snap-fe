@@ -3,6 +3,17 @@
 HOOK=/userdata/system/custom.sh
 BAK="$HOOK.pre-snapos"
 
+# Return Knulli's stock media-key handler before removing the Snap frontend.
+umount /usr/bin/volume-button >/dev/null 2>&1 || true
+TRIGGER_CFG=/etc/triggerhappy/triggers.d/multimedia_keys.conf
+TRIGGER_BACKUP=/userdata/system/snapos/triggerhappy-multimedia_keys.stock
+if [ -s "$TRIGGER_BACKUP" ] && grep -q '^# SNAP_FE_VOLUME_OWNER$' "$TRIGGER_CFG" 2>/dev/null; then
+  cp -f "$TRIGGER_BACKUP" "$TRIGGER_CFG"
+  for service in /etc/init.d/S*triggerhappy; do
+    [ -x "$service" ] && { "$service" restart >/dev/null 2>&1 || true; break; }
+  done
+fi
+
 is_snap() { grep -q "Snap FE frontend hook" "$1" 2>/dev/null || grep -q "Snap OS frontend hook" "$1" 2>/dev/null; }
 
 if [ -f "$BAK" ] && ! is_snap "$BAK"; then
