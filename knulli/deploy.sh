@@ -23,8 +23,8 @@ EXTRA=""
 [ -f scrape_boxart.py ] && EXTRA="$EXTRA scrape_boxart.py"
 [ -f background_browser.py ] && EXTRA="$EXTRA background_browser.py"
 [ -f ra_achievements.py ] && EXTRA="$EXTRA ra_achievements.py"
-[ -f volume-button-snapfe.sh ] || { echo "missing volume-button-snapfe.sh" >&2; exit 1; }
-EXTRA="$EXTRA volume-button-snapfe.sh"
+[ -f brightness-hotkey.sh ] || { echo "missing brightness-hotkey.sh" >&2; exit 1; }
+EXTRA="$EXTRA brightness-hotkey.sh"
 for core in gpsp_libretro.so gambatte_libretro.so; do
   [ -s "vendor/link-cores/$core" ] || {
     echo "missing vendor/link-cores/$core -- run ./knulli/setup-link-cores.sh" >&2

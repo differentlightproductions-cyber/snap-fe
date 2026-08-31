@@ -15,7 +15,8 @@ Paths (Snap OS passes these; sensible ~/snapos-ui defaults otherwise):
   --data=<dir>   Snap OS data root   (config/, boxart/, scrape_status.txt)
   --roms=<dir>   ROM library root
 
-Other flags: --types=a,b,c   --description=0|1   --only-missing=0|1
+Other flags: --types=a,b,c   --systems=gba,gbc,...
+             --description=0|1   --only-missing=0|1
 """
 
 import os
@@ -61,12 +62,28 @@ PLATFORMS = {
     "nes":     ("Nintendo Entertainment System (NES)", 3),
     "snes":    ("Super Nintendo (SNES)", 4),
     "genesis": ("Sega Genesis", 1),
+    "n64":     ("Nintendo 64", 14),
+    "psx":     ("Sony Playstation", 57),
+    "mastersystem": ("Sega Master System", 2),
+    "gamegear": ("Sega Game Gear", 21),
+    "pcengine": ("TurboGrafx 16", 31),
+    "neogeo":  ("Neo Geo", 142),
+    "atari2600": ("Atari 2600", 26),
+    "fbneo":   ("Arcade", 75),
 }
 # extra on-disk folder names that map to the same short name
-DIR_ALIASES = {"megadrive": "genesis"}
+DIR_ALIASES = {
+    "megadrive": "genesis", "playstation": "psx", "sms": "mastersystem",
+    "tg16": "pcengine", "arcade": "fbneo",
+}
 
 ROM_EXTENSIONS = (".gba", ".gbc", ".gb", ".nes", ".fds", ".sfc", ".smc",
-                  ".md", ".gen", ".bin", ".smd", ".zip", ".7z")
+                  ".md", ".gen", ".bin", ".smd", ".68k", ".sgd", ".n64",
+                  ".z64", ".v64", ".cue", ".chd", ".pbp", ".m3u", ".iso",
+                  ".img", ".mdf", ".ecm", ".sms", ".gg", ".pce", ".sgx",
+                  ".neo", ".a26", ".zip", ".7z")
+
+SYSTEM_FILTER = {s.strip() for s in (_arg("systems", "") or "").split(",") if s.strip()}
 
 # slug -> TheGamesDB image "type" (+ side for box art)
 TGDB_MAP = {
@@ -261,6 +278,8 @@ def iter_roms():
     seen_dirs = list(PLATFORMS) + list(DIR_ALIASES)
     for d in seen_dirs:
         short = DIR_ALIASES.get(d, d)
+        if SYSTEM_FILTER and short not in SYSTEM_FILTER:
+            continue
         rom_dir = os.path.join(ROMS_BASE, d)
         if not os.path.isdir(rom_dir):
             continue

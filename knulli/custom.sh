@@ -14,10 +14,10 @@ LOADER=/lib/ld-linux-aarch64.so.1
 SNAPOS_CORES=/userdata/system/snapos/cores
 SYSTEM_CORES=/usr/lib/libretro
 CORE_BACKUP=/userdata/system/snapos/core-backup
-VOLUME_STUB=/userdata/system/snapos/volume-button-snapfe.sh
-VOLUME_TARGET=/usr/bin/volume-button
+BRIGHTNESS_HOTKEY=/userdata/system/snapos/brightness-hotkey.sh
 TRIGGER_CFG=/etc/triggerhappy/triggers.d/multimedia_keys.conf
 TRIGGER_BACKUP=/userdata/system/snapos/triggerhappy-multimedia_keys.stock
+TRIGGER_OVERLAY=/userdata/system/snapos/triggerhappy-multimedia_keys.snapfe
 
 # Link Play needs newer gpSP/Gambatte serial transports than the stock cores on
 # some Knulli images. Keep the shipped copies on /userdata (persistent), back
@@ -110,44 +110,31 @@ run_snapos() {
   if [ -x "$SNAPOS" ]; then "$SNAPOS"; else "$LOADER" "$SNAPOS"; fi
 }
 
-# Knulli's triggerhappy service normally runs /usr/bin/volume-button for the
-# same physical keys that Snap watches. Letting both handlers act caused large
-# jumps, a wrap from minimum to maximum, and mismatched values. Bind a tiny
-# no-op over that one callback while Snap is active; all unrelated power/lid
-# triggerhappy actions remain untouched. If file bind mounts are unavailable,
-# fall back to filtering only the four volume/brightness trigger lines.
+# Keep Knulli's normal Volume controls intact and add the standard
+# Function(Menu)+Volume brightness pair at triggerhappy level. This runs
+# outside RetroArch, so a game's hotkey changes cannot steal screen brightness.
 install_input_routing() {
-  if [ -s "$VOLUME_STUB" ] && [ -e "$VOLUME_TARGET" ]; then
-    chmod 0755 "$VOLUME_STUB" 2>/dev/null || true
-    if ! grep -q " $VOLUME_TARGET " /proc/mounts 2>/dev/null; then
-      mount --bind "$VOLUME_STUB" "$VOLUME_TARGET" >/dev/null 2>&1 || true
-    fi
-    grep -q " $VOLUME_TARGET " /proc/mounts 2>/dev/null && return 0
-  fi
-
   [ -r "$TRIGGER_CFG" ] || return 0
-  grep -q '^# SNAP_FE_VOLUME_OWNER$' "$TRIGGER_CFG" 2>/dev/null && return 0
-  [ -s "$TRIGGER_BACKUP" ] || cp -p "$TRIGGER_CFG" "$TRIGGER_BACKUP" 2>/dev/null || true
-  tmp=/tmp/snapfe-triggerhappy.$$
-  awk 'BEGIN{print "# SNAP_FE_VOLUME_OWNER"}
-       $1 ~ /^KEY_VOLUMEUP($|\+)/ || $1 ~ /^KEY_VOLUMEDOWN($|\+)/ {next}
-       {print}' "$TRIGGER_CFG" > "$tmp" || { rm -f "$tmp"; return 0; }
-  if cp -f "$tmp" "$TRIGGER_CFG" 2>/dev/null; then
-    for svc in /etc/init.d/S*triggerhappy; do
-      [ -x "$svc" ] && { "$svc" restart >/dev/null 2>&1 || true; break; }
-    done
-  fi
-  rm -f "$tmp"
+  [ -x "$BRIGHTNESS_HOTKEY" ] || return 0
+  [ -s "$TRIGGER_BACKUP" ] || cp -p "$TRIGGER_CFG" "$TRIGGER_BACKUP" 2>/dev/null || return 0
+  awk -v helper="$BRIGHTNESS_HOTKEY" '
+       $1 ~ /^KEY_VOLUMEUP\+BTN_TL2$/ || $1 ~ /^KEY_VOLUMEDOWN\+BTN_TL2$/ {next}
+       {print}
+       END {
+         print "KEY_VOLUMEUP+BTN_MODE 1 " helper " up"
+         print "KEY_VOLUMEDOWN+BTN_MODE 1 " helper " down"
+         print "KEY_VOLUMEUP+KEY_GOTO 1 " helper " up"
+         print "KEY_VOLUMEDOWN+KEY_GOTO 1 " helper " down"
+       }' "$TRIGGER_BACKUP" > "$TRIGGER_OVERLAY" || return 0
+  mount --bind "$TRIGGER_OVERLAY" "$TRIGGER_CFG" >/dev/null 2>&1 || return 0
+  for svc in /etc/init.d/S*triggerhappy; do
+    [ -x "$svc" ] && { "$svc" restart >/dev/null 2>&1 || true; break; }
+  done
 }
 
 restore_input_routing() {
-  umount "$VOLUME_TARGET" >/dev/null 2>&1 || true
-  if [ -s "$TRIGGER_BACKUP" ] && grep -q '^# SNAP_FE_VOLUME_OWNER$' "$TRIGGER_CFG" 2>/dev/null; then
-    cp -f "$TRIGGER_BACKUP" "$TRIGGER_CFG" 2>/dev/null || true
-    for svc in /etc/init.d/S*triggerhappy; do
-      [ -x "$svc" ] && { "$svc" restart >/dev/null 2>&1 || true; break; }
-    done
-  fi
+  umount "$TRIGGER_CFG" >/dev/null 2>&1 || true
+  rm -f "$TRIGGER_OVERLAY"
 }
 
 case "$1" in

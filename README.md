@@ -5,8 +5,21 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`).
 
-**Current release: Alpha 1.1.9.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.1.9 Hotfix 2.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.1.9 Hotfix 2
+
+- Restores Knulli's `udev` controller map for both games and the Home RetroArch
+  app, eliminating the false “RG34XX-SP Controller not configured” message.
+- Menu is again the RetroArch hotkey starter: **Menu + Select** opens the menu,
+  **Menu + Start** exits, and **Menu + R2** remains fast-forward by default.
+- Function + Volume brightness is now handled by Knulli's system key service,
+  not RetroArch. It stays available in games, moves in exact 5% steps down to
+  a true 1% floor, and cannot be broken by a RetroArch hotkey edit.
+- Only portable RetroArch menu and notification preferences are shared between
+  the Home app and games; controller, driver, path, and protected hotkey values
+  are deliberately kept out of that bridge.
 
 ### 1.1.9 highlights
 
@@ -122,11 +135,11 @@ If a launcher returns to EmulationStation, send the files named
 
 ## Development
 
-Snap FE is written and maintained by one person (**NICK.OFFICIAL**), with
-AI-assisted tooling — the same way a lot of software is written now. Every line
-is reviewed and understood by a human, and the point of publishing the source
-is that you don't have to take that on faith: read it, build it, check what it
-does. Issues and PRs welcome.
+Snap FE is written and maintained by **NICK.OFFICIAL**, in collaboration with
+AI-assisted coding tools. NICK.OFFICIAL directs the project and understands a
+great deal of its code, while using AI to help research, implement, and review
+areas that are still being learned. The source is published so anyone can read,
+build, and check what it does. Issues and PRs welcome.
 
 It's a single C translation unit — [`main.c`](main.c) (~14k lines) — plus:
 
@@ -138,7 +151,7 @@ It's a single C translation unit — [`main.c`](main.c) (~14k lines) — plus:
 | [`scrape_boxart.py`](scrape_boxart.py) | Optional box-art / metadata scraper (ScreenScraper / TheGamesDB). Needs your own API key/account. |
 | [`background_browser.py`](background_browser.py) | Downloads optional system backgrounds selected in the on-device browser. |
 | [`ra_achievements.py`](ra_achievements.py) | Fetches the signed-in user's unlocked RetroAchievements for the achievements book. |
-| [`volume-button-snapfe.sh`](volume-button-snapfe.sh) | Prevents Knulli's second media-key handler from fighting Snap FE while Snap is active. |
+| [`brightness-hotkey.sh`](brightness-hotkey.sh) | Gives Function + Volume a reliable 5% panel-brightness step in every app and game without modifying RetroArch bindings. |
 | [`assets/`](assets/) | Open-licensed fonts, sounds, and Snap FE's generated Home placeholder icons. Other wallpaper/console-art slots are documented by the included README files. |
 
 See **[BUILD.md](BUILD.md)** for exact build + install steps.

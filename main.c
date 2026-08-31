@@ -121,6 +121,7 @@ char games_loaded_search[64] = "";
 // poll_scrape_status() when a background scrape finishes.
 void scan_games(SDL_Renderer *ren, TTF_Font *font_label, int platform);
 void free_games(SDL_Renderer *ren);
+int wrap_text(TTF_Font *font, const char *text, int max_width, char lines[MAX_LINES][128]);
 
 const char *platform_names[] = {
     "GAME BOY ADVANCE", "GAME BOY COLOR", "GAME BOY", "NINTENDO ENTERTAINMENT SYSTEM",
@@ -981,8 +982,8 @@ int    radio_playing_idx = -1;
 int    radio_pid = 0;              // mpv pid, 0 = stopped
 int    radio_loading = 0;
 int    radio_persist = 1;         // keep playing while browsing (persisted)
-int    radio_over_games = 0;      // persisted: at game launch, mute the game and
-                                 // keep the radio playing instead of stopping it
+int    radio_over_games = 0;      // persisted: keep radio alive during a game
+int    radio_game_audio = 1;      // persisted: retain game effects under radio
 int    radio_volume_pct = 100;    // persisted; applied when a station starts (0..150)
 char   radio_place[80] = "";      // "City, Region" for the header
 char   radio_now[80] = "";        // station name currently playing
@@ -1080,23 +1081,82 @@ static void radio_parse(void) {
 }
 
 #ifdef SNAPOS_TARGET_KNULLI
-// RetroArch hotkey defaults, then user ownership. Knulli regenerates
-// retroarchcustom.cfg before every game, so a setting changed inside RetroArch
-// would normally disappear at the next launch. Keep only the two menu-combo
-// values in a Snap state file: seed Menu(11) + Select(9) once, capture any
-// later value saved by RetroArch on exit, and feed that value back to configgen.
-static char ra_hotkey_enable_btn[16] = "11";
-static char ra_hotkey_menu_btn[16] = "9";
+// Knulli regenerates retroarchcustom.cfg before every game.  Preserve each
+// RetroArch hotkey independently so changing one binding in RetroArch cannot
+// reset the others on the next launch.  Snap owns the one-time defaults only;
+// after migration, RetroArch/the user owns every stored value.
+typedef struct {
+    const char *key;
+    char value[24];
+    int set;
+} RaHotkey;
+
+static RaHotkey ra_hotkeys[] = {
+    { "input_enable_hotkey_btn",          "", 0 },
+    { "input_menu_toggle_btn",            "", 0 },
+    { "input_exit_emulator_btn",          "", 0 },
+    { "input_hold_fast_forward_btn",      "", 0 },
+    { "input_toggle_fast_forward_btn",    "", 0 },
+    { "input_shader_next_btn",            "", 0 },
+    { "input_shader_prev_btn",            "", 0 },
+    { "input_save_state_btn",             "", 0 },
+    { "input_load_state_btn",             "", 0 },
+    { "input_state_slot_increase_btn",    "", 0 },
+    { "input_state_slot_decrease_btn",    "", 0 },
+    { "input_rewind_btn",                 "", 0 },
+    { "input_pause_toggle_btn",           "", 0 },
+    { "input_reset_btn",                  "", 0 },
+    { "input_screenshot_btn",             "", 0 },
+    { "input_frame_advance_btn",          "", 0 },
+    { "input_audio_mute_btn",             "", 0 },
+    { "input_ai_service_btn",             "", 0 },
+    { "input_recording_toggle_btn",       "", 0 },
+    { "input_streaming_toggle_btn",       "", 0 },
+    { "input_cheat_index_plus_btn",       "", 0 },
+    { "input_cheat_index_minus_btn",      "", 0 },
+    { "input_cheat_toggle_btn",           "", 0 },
+    { "input_netplay_game_watch_btn",     "", 0 },
+    { "input_disk_eject_toggle_btn",      "", 0 },
+    { "input_disk_next_btn",              "", 0 },
+    { "input_disk_prev_btn",              "", 0 },
+    { "input_grab_mouse_toggle_btn",      "", 0 },
+    { "input_game_focus_toggle_btn",      "", 0 },
+    { "input_desktop_menu_toggle_btn",    "", 0 },
+    { "input_fps_toggle_btn",             "", 0 },
+    { "input_send_debug_info_btn",        "", 0 },
+    { "input_close_content_btn",          "", 0 },
+    { "input_overlay_next_btn",           "", 0 },
+    { "input_volume_up_btn",              "", 0 },
+    { "input_volume_down_btn",            "", 0 },
+    { "input_hotkey_block_delay",         "", 0 }
+};
+#define RA_HOTKEY_COUNT ((int)(sizeof(ra_hotkeys) / sizeof(ra_hotkeys[0])))
 static int ra_hotkeys_loaded = 0;
+static void ra_hotkeys_load(void);
 
 static int ra_hotkey_value_valid(const char *v) {
     if (!v || !*v) return 0;
-    if (strcmp(v, "nul") == 0) return 1;
-    const char *p = v;
-    if (*p == '-') p++;
-    if (!*p) return 0;
-    for (; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
+    // RetroArch uses numeric buttons, signed axes, and hat values such as
+    // h0up.  Keep the full normal token set so a user remap made in RetroArch
+    // can round-trip through SNAP instead of being quietly dropped.
+    for (const char *p = v; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '+' || *p == '-'))
+            return 0;
+    }
     return 1;
+}
+
+static int ra_hotkey_index(const char *key) {
+    for (int i = 0; i < RA_HOTKEY_COUNT; i++)
+        if (strcmp(ra_hotkeys[i].key, key) == 0) return i;
+    return -1;
+}
+
+static void ra_hotkey_set(const char *key, const char *value) {
+    int i = ra_hotkey_index(key);
+    if (i < 0 || !ra_hotkey_value_valid(value)) return;
+    snprintf(ra_hotkeys[i].value, sizeof ra_hotkeys[i].value, "%s", value);
+    ra_hotkeys[i].set = 1;
 }
 
 static int ra_cfg_read_value(const char *path, const char *key, char *out, size_t outsz) {
@@ -1129,32 +1189,81 @@ static const char *ra_hotkeys_state_path(void) {
 static void ra_hotkeys_save(void) {
     FILE *f = fopen(ra_hotkeys_state_path(), "w");
     if (!f) return;
-    fprintf(f, "input_enable_hotkey_btn=%s\n", ra_hotkey_enable_btn);
-    fprintf(f, "input_menu_toggle_btn=%s\n", ra_hotkey_menu_btn);
+    fprintf(f, "format_version=3\n");
+    for (int i = 0; i < RA_HOTKEY_COUNT; i++)
+        if (ra_hotkeys[i].set)
+            fprintf(f, "%s=%s\n", ra_hotkeys[i].key, ra_hotkeys[i].value);
     fclose(f);
+}
+
+// Called only when the user changes SNAP's fast-forward controls.  Normal game
+// launches never call this, so a custom RetroArch binding remains untouched.
+static void ra_hotkeys_set_snap_fastforward(void) {
+    ra_hotkeys_load();
+    int ffi = (fast_forward_idx >= 0 && fast_forward_idx < FASTFORWARD_COUNT) ? fast_forward_idx : 1;
+    if (fast_forward_values[ffi] == 0) {
+        ra_hotkey_set("input_hold_fast_forward_btn", "nul");
+        ra_hotkey_set("input_toggle_fast_forward_btn", "nul");
+    } else if (fast_forward_mode) {
+        ra_hotkey_set("input_hold_fast_forward_btn", "nul");
+        ra_hotkey_set("input_toggle_fast_forward_btn", "14");
+    } else {
+        ra_hotkey_set("input_hold_fast_forward_btn", "14");
+        ra_hotkey_set("input_toggle_fast_forward_btn", "nul");
+    }
+    // R2 cannot be both fast-forward and shader-next.
+    int sn = ra_hotkey_index("input_shader_next_btn");
+    int sp = ra_hotkey_index("input_shader_prev_btn");
+    if (sn >= 0 && ra_hotkeys[sn].set && strcmp(ra_hotkeys[sn].value, "14") == 0)
+        ra_hotkey_set("input_shader_next_btn", "nul");
+    if (sp >= 0 && ra_hotkeys[sp].set && strcmp(ra_hotkeys[sp].value, "14") == 0)
+        ra_hotkey_set("input_shader_prev_btn", "nul");
+    ra_hotkeys_save();
 }
 
 static void ra_hotkeys_load(void) {
     if (ra_hotkeys_loaded) return;
     ra_hotkeys_loaded = 1;
-    char en[16] = "", menu[16] = "";
-    int have_en = ra_cfg_read_value(ra_hotkeys_state_path(), "input_enable_hotkey_btn", en, sizeof en);
-    int have_menu = ra_cfg_read_value(ra_hotkeys_state_path(), "input_menu_toggle_btn", menu, sizeof menu);
-    if (have_en && have_menu) {
-        snprintf(ra_hotkey_enable_btn, sizeof ra_hotkey_enable_btn, "%s", en);
-        snprintf(ra_hotkey_menu_btn, sizeof ra_hotkey_menu_btn, "%s", menu);
+    char value[24] = "", version[24] = "";
+    int v3 = ra_cfg_read_value(ra_hotkeys_state_path(), "format_version", version, sizeof version) &&
+             strcmp(version, "3") == 0;
+    if (v3) {
+        for (int i = 0; i < RA_HOTKEY_COUNT; i++)
+            if (ra_cfg_read_value(ra_hotkeys_state_path(), ra_hotkeys[i].key,
+                                  value, sizeof value))
+                ra_hotkey_set(ra_hotkeys[i].key, value);
         return;
     }
 
-    // Respect a pre-existing custom pair unless it is Knulli's generated
-    // RG34XX-SP default (11 + face-button 4), which is the inaccessible combo
-    // this migration is fixing.
+    // Migration: import existing user bindings, then repair the two invalid
+    // SNAP defaults shipped in the previous bridge.  Version 3 is written on
+    // exit, after which a user's own RetroArch changes remain untouched.
     const char *cfg = "/userdata/system/configs/retroarch/retroarchcustom.cfg";
-    have_en = ra_cfg_read_value(cfg, "input_enable_hotkey_btn", en, sizeof en);
-    have_menu = ra_cfg_read_value(cfg, "input_menu_toggle_btn", menu, sizeof menu);
-    if (have_en && have_menu && !(strcmp(en, "11") == 0 && strcmp(menu, "4") == 0)) {
-        snprintf(ra_hotkey_enable_btn, sizeof ra_hotkey_enable_btn, "%s", en);
-        snprintf(ra_hotkey_menu_btn, sizeof ra_hotkey_menu_btn, "%s", menu);
+    for (int i = 0; i < RA_HOTKEY_COUNT; i++)
+        if (ra_cfg_read_value(cfg, ra_hotkeys[i].key, value, sizeof value))
+            ra_hotkey_set(ra_hotkeys[i].key, value);
+    if (ra_cfg_read_value(ra_hotkeys_state_path(), "input_enable_hotkey_btn", value, sizeof value))
+        ra_hotkey_set("input_enable_hotkey_btn", value);
+
+    // Knulli's standard H700 layout: Menu is the hotkey modifier, Menu+Select
+    // opens RetroArch, Menu+Start exits, and Menu+R2 fast-forwards.
+    ra_hotkey_set("input_enable_hotkey_btn", "11");
+    ra_hotkey_set("input_menu_toggle_btn", "9");
+    ra_hotkey_set("input_exit_emulator_btn", "10");
+    ra_hotkey_set("input_hotkey_block_delay", "6");
+    ra_hotkey_set("input_shader_next_btn", "nul");
+    ra_hotkey_set("input_shader_prev_btn", "nul");
+    ra_hotkey_set("input_volume_up_btn", "nul");
+    ra_hotkey_set("input_volume_down_btn", "nul");
+    if (fast_forward_values[(fast_forward_idx >= 0 && fast_forward_idx < FASTFORWARD_COUNT) ? fast_forward_idx : 1] == 0) {
+        ra_hotkey_set("input_hold_fast_forward_btn", "nul");
+        ra_hotkey_set("input_toggle_fast_forward_btn", "nul");
+    } else if (fast_forward_mode) {
+        ra_hotkey_set("input_hold_fast_forward_btn", "nul");
+        ra_hotkey_set("input_toggle_fast_forward_btn", "14");
+    } else {
+        ra_hotkey_set("input_hold_fast_forward_btn", "14");
+        ra_hotkey_set("input_toggle_fast_forward_btn", "nul");
     }
     ra_hotkeys_save();
 }
@@ -1162,36 +1271,169 @@ static void ra_hotkeys_load(void) {
 static void ra_hotkeys_capture(void) {
     ra_hotkeys_load();
     const char *cfg = "/userdata/system/configs/retroarch/retroarchcustom.cfg";
-    char en[16] = "", menu[16] = "";
-    if (!ra_cfg_read_value(cfg, "input_enable_hotkey_btn", en, sizeof en) ||
-        !ra_cfg_read_value(cfg, "input_menu_toggle_btn", menu, sizeof menu)) return;
-    if (strcmp(en, ra_hotkey_enable_btn) == 0 && strcmp(menu, ra_hotkey_menu_btn) == 0) return;
-    snprintf(ra_hotkey_enable_btn, sizeof ra_hotkey_enable_btn, "%s", en);
-    snprintf(ra_hotkey_menu_btn, sizeof ra_hotkey_menu_btn, "%s", menu);
-    ra_hotkeys_save();
+    char value[24]; int changed = 0;
+    for (int i = 0; i < RA_HOTKEY_COUNT; i++) {
+        if (!ra_cfg_read_value(cfg, ra_hotkeys[i].key, value, sizeof value)) continue;
+        if (!ra_hotkeys[i].set || strcmp(value, ra_hotkeys[i].value) != 0) {
+            ra_hotkey_set(ra_hotkeys[i].key, value);
+            changed = 1;
+        }
+    }
+    if (changed) ra_hotkeys_save();
+}
+
+// RetroArch's bare menu and Knulli's per-game configgen start from different
+// configuration files.  Keep user-selected global options in a small SNAP
+// profile, then layer that profile into both entry points.  Hotkeys remain in
+// their dedicated file above because SNAP must reserve Menu+Volume for panel
+// brightness even when the rest of RetroArch is user-owned.
+static const char *ra_user_settings_path(void) {
+    return "/userdata/system/snapos/config/retroarch-user.cfg";
+}
+
+static int ra_line_key(const char *line, char *key, size_t key_sz, const char **value) {
+    const char *p = line;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p || *p == '#') return 0;
+    const char *start = p;
+    while (*p && (isalnum((unsigned char)*p) || *p == '_')) p++;
+    size_t n = (size_t)(p - start);
+    if (!n || n >= key_sz) return 0;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p++ != '=') return 0;
+    while (*p && isspace((unsigned char)*p)) p++;
+    memcpy(key, start, n); key[n] = '\0';
+    if (value) *value = p;
+    return 1;
+}
+
+static int ra_hotkey_key(const char *key) {
+    return ra_hotkey_index(key) >= 0;
+}
+
+static int ra_user_setting_allowed(const char *key) {
+    // This is deliberately a small allow-list, not "everything except input".
+    // configgen regenerates controller, driver and path values every launch;
+    // copying any one of those between the standalone menu and a game can
+    // break the RG34XX-SP's direct controller map.  The list below contains
+    // only portable user preferences which are useful in both entry points.
+    static const char *exact[] = {
+        "config_save_on_exit", "video_font_enable", "menu_enable_widgets",
+        "menu_widget_enable", "audio_volume", "audio_latency", "video_smooth",
+        "video_vsync", "video_hard_sync", "video_frame_delay_auto",
+        "rewind_enable", "run_ahead_enabled", "run_ahead_frames",
+        "preemptive_frames_enable", "preemptive_frames", "savestate_auto_save",
+        "savestate_auto_load", "savestate_auto_index", "autosave_interval",
+        "state_slot", "quit_press_twice", "rgui_extended_ascii",
+        "rgui_show_start_screen", NULL
+    };
+    static const char *prefix[] = {
+        "notification_", "video_message_", "ozone_", "rgui_", "xmb_",
+        "materialui_", "menu_show_", "content_show_", NULL
+    };
+    if (!key || !*key || ra_hotkey_key(key)) return 0;
+    for (int i = 0; exact[i]; i++) if (strcmp(key, exact[i]) == 0) return 1;
+    for (int i = 0; prefix[i]; i++)
+        if (strncmp(key, prefix[i], strlen(prefix[i])) == 0) return 1;
+    return 0;
+}
+
+static void ra_user_settings_capture(void) {
+    const char *src = "/userdata/system/configs/retroarch/retroarchcustom.cfg";
+    FILE *in = fopen(src, "r");
+    if (!in) return;
+    // /userdata is an exFAT/FUSE volume on many H700 installs. Its atomic
+    // rename behavior is not reliable across every mount configuration, so
+    // write the tiny portable-preferences profile directly.
+    FILE *out = fopen(ra_user_settings_path(), "w");
+    if (!out) { fclose(in); return; }
+    char line[1024], key[160];
+    while (fgets(line, sizeof line, in)) {
+        if (!ra_line_key(line, key, sizeof key, NULL) || !ra_user_setting_allowed(key)) continue;
+        char *p = line; while (*p && isspace((unsigned char)*p)) p++;
+        p[strcspn(p, "\r\n")] = '\0';
+        fprintf(out, "%s\n", p);
+    }
+    fclose(in); fclose(out);
+}
+
+static void ra_user_settings_append(FILE *out, int knulli_format) {
+    FILE *in = fopen(ra_user_settings_path(), "r");
+    if (!in) return;
+    char line[1024], key[160]; const char *value;
+    while (fgets(line, sizeof line, in)) {
+        if (!ra_line_key(line, key, sizeof key, &value) || !ra_user_setting_allowed(key)) continue;
+        char clean[1024]; snprintf(clean, sizeof clean, "%s", value);
+        clean[strcspn(clean, "\r\n")] = '\0';
+        if (knulli_format) fprintf(out, "global.retroarch.%s=%s\n", key, clean);
+        else fprintf(out, "%s = %s\n", key, clean);
+    }
+    fclose(in);
+}
+
+// Put the persisted user options and bindings into RetroArch's menu
+// configuration before the standalone Home app launches. Games receive the
+// same options through configgen/knulli.conf below.
+static void ra_hotkeys_apply_to_cfg(const char *path) {
+    ra_hotkeys_load();
+    // First open seeds the profile from Knulli's generated configuration.
+    // Later calls merely apply the user profile captured when RetroArch exits.
+    if (access(ra_user_settings_path(), R_OK) != 0) ra_user_settings_capture();
+    char tmp[1024]; snprintf(tmp, sizeof tmp, "%s.snapos-new", path);
+    FILE *in = fopen(path, "r");
+    FILE *out = fopen(tmp, "w");
+    if (!out) { if (in) fclose(in); return; }
+    if (in) {
+        char line[1024];
+        while (fgets(line, sizeof line, in)) {
+            char *p = line;
+            while (*p && isspace((unsigned char)*p)) p++;
+            char key[160];
+            int owned = ra_line_key(p, key, sizeof key, NULL) &&
+                        (ra_hotkey_key(key) || ra_user_setting_allowed(key) ||
+                         strcmp(key, "input_autodetect_enable") == 0 ||
+                         strcmp(key, "input_joypad_driver") == 0 ||
+                         strcmp(key, "joypad_autoconfig_dir") == 0);
+            if (!owned) fputs(line, out);
+        }
+        fclose(in);
+    }
+    ra_user_settings_append(out, 0);
+    for (int i = 0; i < RA_HOTKEY_COUNT; i++)
+        if (ra_hotkeys[i].set)
+            fprintf(out, "%s = \"%s\"\n", ra_hotkeys[i].key, ra_hotkeys[i].value);
+    // Knulli/configgen writes the RG34XX-SP's direct controller mapping.  Do
+    // not ask RetroArch to search for an extra autoconfig profile here: it
+    // produces the false "controller not configured" notice on game launch.
+    fprintf(out, "input_joypad_driver = udev\n");
+    fprintf(out, "input_autodetect_enable = \"false\"\n");
+    // A clean RetroArch exit is a second safety net if the user adjusts a
+    // setting and leaves through Menu+Start rather than pressing Save.
+    fprintf(out, "config_save_on_exit = \"true\"\n");
+    fclose(out);
+    rename(tmp, path);
 }
 
 // Push Snap's per-launch RetroArch settings into Knulli's batocera.conf --
 // configgen bakes any global.* / global.retroarch.* key straight into the
-// generated retroarchcustom.cfg for the next launch. We fully OWN these keys:
-// every line is rewritten each time so nothing (e.g. a stale mute) can stick.
+// generated retroarchcustom.cfg for the next launch. SNAP owns only its audio,
+// speed, and protected-button values; the user's general RetroArch settings
+// are merged from the shared profile below.
 //   on != 0 -> mute the game's own audio (radio/music plays over it instead)
 static void game_audio_mute(int on) {
     const char *path = "/userdata/system/knulli.conf";
     ra_hotkeys_load();
-    // Only audio + speed are Snap-owned. Hotkeys belong to RetroArch/the user.
-    // Exact legacy lines from <=1.1.8 are removed once encountered, but a user
-    // value that differs from those old forced defaults is deliberately kept.
+    if (access(ra_user_settings_path(), R_OK) != 0) ra_user_settings_capture();
+    // Audio + speed are SNAP-owned. Hotkey values are user-owned but mirrored
+    // here so configgen can rebuild RetroArch without losing them.
     static const char *OWN[] = {
         "global.retroarch.audio_mute_enable",
         "global.retroarch.fastforward_ratio",
         "global.retroarch.fastforward_frameskip",
-        "global.retroarch.network_cmd_enable",
-        "global.retroarch.network_cmd_port",
-        "global.retroarch.video_font_enable",
-        "global.retroarch.menu_widget_enable",
-        "global.retroarch.input_enable_hotkey_btn",
-        "global.retroarch.input_menu_toggle_btn",
+        "global.retroarch.input_autodetect_enable",
+        "global.retroarch.input_joypad_driver",
+        "global.retroarch.joypad_autoconfig_dir",
+        "global.retroarch.config_save_on_exit",
         NULL
     };
     static const char *LEGACY[] = {
@@ -1205,6 +1447,8 @@ static void game_audio_mute(int on) {
         "global.retroarch.input_volume_up_btn=nul",
         "global.retroarch.input_volume_down_btn=nul",
         "global.toggle_fast_forward=14",
+        "global.retroarch.network_cmd_enable=true",
+        "global.retroarch.network_cmd_port=55355",
         NULL
     };
     static char keep[262144]; int kl = 0; keep[0] = '\0';
@@ -1214,6 +1458,20 @@ static void game_audio_mute(int on) {
         while (fgets(line, sizeof line, f)) {
             int owned = 0;
             for (int i = 0; OWN[i]; i++) if (strncmp(line, OWN[i], strlen(OWN[i])) == 0) { owned = 1; break; }
+            if (!owned) {
+                for (int i = 0; i < RA_HOTKEY_COUNT; i++) {
+                    char full[96]; snprintf(full, sizeof full, "global.retroarch.%s", ra_hotkeys[i].key);
+                    size_t n = strlen(full);
+                    if (strncmp(line, full, n) == 0 && (line[n] == '=' || isspace((unsigned char)line[n]))) {
+                        owned = 1; break;
+                    }
+                }
+            }
+            if (!owned && strncmp(line, "global.retroarch.", 18) == 0) {
+                char key[160];
+                if (ra_line_key(line + 18, key, sizeof key, NULL) &&
+                    ra_user_setting_allowed(key)) owned = 1;
+            }
             if (!owned) {
                 char clean[1024]; snprintf(clean, sizeof clean, "%s", line);
                 clean[strcspn(clean, "\r\n")] = '\0';
@@ -1233,16 +1491,15 @@ static void game_audio_mute(int on) {
     // Always explicit -- never just "absent" -- so a crash mid-game can't leave
     // every future launch muted.
     fprintf(w, "global.retroarch.audio_mute_enable=%s\n", on ? "true" : "false");
+    fprintf(w, "global.retroarch.input_joypad_driver=udev\n");
+    fprintf(w, "global.retroarch.input_autodetect_enable=false\n");
+    fprintf(w, "global.retroarch.config_save_on_exit=true\n");
 
-    // Snap's hardware level controls run outside RetroArch so they keep the
-    // exact same 5% scale as the frontend. RetroArch's local command socket is
-    // used only to draw the familiar in-game percentage notification.
-    fprintf(w, "global.retroarch.network_cmd_enable=true\n");
-    fprintf(w, "global.retroarch.network_cmd_port=55355\n");
-    fprintf(w, "global.retroarch.video_font_enable=true\n");
-    fprintf(w, "global.retroarch.menu_widget_enable=true\n");
-    fprintf(w, "global.retroarch.input_enable_hotkey_btn=%s\n", ra_hotkey_enable_btn);
-    fprintf(w, "global.retroarch.input_menu_toggle_btn=%s\n", ra_hotkey_menu_btn);
+    for (int i = 0; i < RA_HOTKEY_COUNT; i++)
+        if (ra_hotkeys[i].set)
+            fprintf(w, "global.retroarch.%s=%s\n", ra_hotkeys[i].key, ra_hotkeys[i].value);
+    ra_user_settings_append(w, 1);
+    fprintf(w, "global.retroarch.config_save_on_exit=true\n");
 
     // Fast-forward speed is safe to own; the button that triggers it is not.
     int ffi = (fast_forward_idx >= 0 && fast_forward_idx < FASTFORWARD_COUNT) ? fast_forward_idx : 1;
@@ -1377,7 +1634,10 @@ static void radio_poll(void) {
 #else
 static void radio_stop(void) { radio_pid = 0; radio_now[0] = 0; radio_playing_idx = -1; }
 static void game_audio_mute(int on) { (void)on; }
+static void ra_user_settings_capture(void) {}
 static void ra_hotkeys_capture(void) {}
+static void ra_hotkeys_set_snap_fastforward(void) {}
+static void ra_hotkeys_apply_to_cfg(const char *path) { (void)path; }
 static void radio_play(int idx) { (void)idx; snprintf(radio_status, sizeof radio_status, "Radio runs on the device build"); }
 static void radio_apply_volume(void) {}
 static void radio_refresh(const char *s) { (void)s; snprintf(radio_status, sizeof radio_status, "Radio runs on the device build"); }
@@ -1731,6 +1991,9 @@ char ra_web_api_key[96] = "";       // public Web API key; separate from the emu
 int ra_dropdown_open = 0;
 int scrape_dropdown_open = 0;
 int wallhaven_dropdown_open = 0;
+int scrape_service_open = 0;
+int scrape_systems_open = 0;
+int scrape_extras_open = 0;
 
 // RetroAchievements sign-in check + session points feedback.
 char   ra_signin_status[128] = "";   // shown under the RA rows in Settings
@@ -2520,6 +2783,7 @@ const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", 
 // visible while all new downloads use the unified slugs above.
 const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL };
 int scrape_art_enabled[ART_TYPE_COUNT] = {1, 0, 0, 0, 0, 0, 0}; // 2D Box Art on by default
+int scrape_system_enabled[PLATFORM_COUNT] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
 int art_dropdown_open = 0;
 int display_dropdown_open = 0;
@@ -2666,24 +2930,39 @@ int DEVICE_COUNT = 2;
 #define ROW_WALLHAVEN_NOTE 26
 #define ROW_WALLHAVEN_KEY 27
 #define ROW_WALLHAVEN_SEARCH 28
-#define MAX_ACCOUNT_ROWS 40
+#define ROW_SCRAPE_SERVICE_HEADER 29
+#define ROW_SCRAPE_SYSTEM_HEADER 30
+#define ROW_SCRAPE_SYSTEM_ITEM 31
+#define ROW_ART_EXTRAS_HEADER 32
+#define MAX_ACCOUNT_ROWS 64
 
 int build_account_rows(int *row_type, int *row_extra) {
     int idx = 0;
     row_type[idx] = ROW_SCRAPE_HEADER; row_extra[idx] = 0; idx++;
     if (scrape_dropdown_open) {
-        row_type[idx] = ROW_SCRAPE_SOURCE; row_extra[idx] = 0; idx++;
-        if (scrape_source == 0) {
-            row_type[idx] = ROW_KEY; row_extra[idx] = 0; idx++;
-        } else {
-            row_type[idx] = ROW_SCRAPE_SS_USER; row_extra[idx] = 0; idx++;
-            row_type[idx] = ROW_SCRAPE_SS_PASS; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_SCRAPE_SERVICE_HEADER; row_extra[idx] = 0; idx++;
+        if (scrape_service_open) {
+            row_type[idx] = ROW_SCRAPE_SOURCE; row_extra[idx] = 0; idx++;
+            if (scrape_source == 0) {
+                row_type[idx] = ROW_KEY; row_extra[idx] = 0; idx++;
+            } else {
+                row_type[idx] = ROW_SCRAPE_SS_USER; row_extra[idx] = 0; idx++;
+                row_type[idx] = ROW_SCRAPE_SS_PASS; row_extra[idx] = 0; idx++;
+            }
         }
+        row_type[idx] = ROW_SCRAPE_SYSTEM_HEADER; row_extra[idx] = 0; idx++;
+        if (scrape_systems_open)
+            for (int i = 0; i < PLATFORM_COUNT; i++) {
+                row_type[idx] = ROW_SCRAPE_SYSTEM_ITEM; row_extra[idx] = i; idx++;
+            }
         row_type[idx] = ROW_ART_HEADER; row_extra[idx] = 0; idx++;
         if (art_dropdown_open) {
-            for (int i = 0; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++; }
+            row_type[idx] = ROW_SCRAPE_DESC; row_extra[idx] = 0; idx++;
+            for (int i = 0; i < 4; i++) { row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++; }
+            row_type[idx] = ROW_ART_EXTRAS_HEADER; row_extra[idx] = 0; idx++;
+            if (scrape_extras_open)
+                for (int i = 4; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++; }
         }
-        row_type[idx] = ROW_SCRAPE_DESC; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_ONLY_MISSING; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_SCRAPE_NOW; row_extra[idx] = 0; idx++;
     }
@@ -2740,6 +3019,7 @@ int build_account_rows(int *row_type, int *row_extra) {
 #define ROW_G_BG_MAKER 26
 #define ROW_G_BG_ITEM 27
 #define ROW_G_BG_RESTORE 28
+#define ROW_G_FAVORITES_VIEW 29
 #define MAX_GAME_ROWS 64
 static const char *bg_maker_names[] = { "NINTENDO", "SONY", "SEGA", "NEC", "SNK", "ATARI", "ARCADE" };
 #define BG_MAKER_COUNT 7
@@ -2760,6 +3040,7 @@ int build_game_rows(int *row_type, int *row_extra) {
     row_type[idx] = ROW_G_VIEW_HEADER; row_extra[idx] = 0; idx++;
     if (disp_grp_view_open) {
         row_type[idx] = ROW_G_CONSOLE_VIEW; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_G_FAVORITES_VIEW; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_G_SHOW_EMPTY; row_extra[idx] = 0; idx++;
         if (platform_view_style == 1) { row_type[idx] = ROW_G_CAROUSEL_TITLES; row_extra[idx] = 0; idx++; }
         if (platform_view_style == 2) {
@@ -2826,6 +3107,7 @@ int build_game_rows(int *row_type, int *row_extra) {
 #define ROW_SND_GRP_MUSIC 14
 #define ROW_SND_MUSIC_PERSIST 15   // keep SD-card music playing while browsing the OS
 #define ROW_SND_MUSIC_OVERGAME 16  // keep music playing during a game (mutes the game)
+#define ROW_SND_RADIO_GAME_AUDIO 17
 #define MAX_SOUND_ROWS 20
 int snd_grp_osui_open = 0, snd_grp_boot_open = 0, snd_grp_radio_open = 0, snd_grp_music_open = 0;
 
@@ -2854,6 +3136,7 @@ int build_sound_rows(int *row_type, int *row_extra) {
     if (snd_grp_radio_open) {
         SND_ADD(ROW_SND_RADIO_PERSIST);
         SND_ADD(ROW_SND_RADIO_OVERGAME);
+        if (radio_over_games) SND_ADD(ROW_SND_RADIO_GAME_AUDIO);
         SND_ADD(ROW_SND_RADIO_VOLUME);
     }
     SND_ADD(ROW_SND_GRP_MUSIC);
@@ -2911,13 +3194,15 @@ static void syncthing_apply(void) {
 
 int build_device_rows(int *row_type, int *row_extra) {
     int idx = 0;
-    row_type[idx] = ROW_DEV_POWERSAVE; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_DEV_CPU_PERF; row_extra[idx] = 0; idx++;
+    // Start with the actual device, then keep all battery behavior together.
+    row_type[idx] = ROW_DEV_DEVICE; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_GRP_BATT; row_extra[idx] = 0; idx++;
     if (dev_grp_batt_open) {
+        row_type[idx] = ROW_DEV_POWERSAVE; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_AUTOPS; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_BATTERY_ICON; row_extra[idx] = 0; idx++;
     }
+    row_type[idx] = ROW_DEV_CPU_PERF; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_GRP_NIGHT; row_extra[idx] = 0; idx++;
     if (dev_grp_night_open) {
         row_type[idx] = ROW_DEV_NIGHT; row_extra[idx] = 0; idx++;
@@ -2928,7 +3213,6 @@ int build_device_rows(int *row_type, int *row_extra) {
         if (night_mode != 0) { row_type[idx] = ROW_DEV_NIGHT_BRIGHT; row_extra[idx] = 0; idx++; }
         if (night_mode != 0) { row_type[idx] = ROW_DEV_NIGHT_HOTKEY; row_extra[idx] = 0; idx++; }
     }
-    row_type[idx] = ROW_DEV_DEVICE; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_TEST_KEYBOARD; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_SYSCFG; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_WIFI; row_extra[idx] = 0; idx++;
@@ -3006,9 +3290,11 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_ART_HEADER 55     // legacy row id retained for settings compatibility; Game now owns this control
 #define ROW_DISP_ART_ITEM 56       // row_extra = art type index
 #define ROW_DISP_FAVORITES_VIEW 57 // independent layout for the Favorites library
+#define ROW_DISP_GRP_WIDGETS 58
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
+int disp_grp_widgets_open = 0;
 
 #define FAVORITES_VIEW_COUNT 5
 const char *favorite_view_names[FAVORITES_VIEW_COUNT] = {
@@ -3175,25 +3461,27 @@ int build_display_rows(int *row_type, int *row_extra) {
     D_ADD(ROW_DISP_GRP_HOME, 0);
     if (disp_grp_home_open) {
         D_ADD(ROW_DISP_HOME_VIEW, 0);
-        D_ADD(ROW_DISP_FAVORITES_VIEW, 0);
         D_ADD(ROW_DISP_GREETING, 0);
         if (greeting_enabled) D_ADD(ROW_DISP_PLAYER_NAME, 0);
-        D_ADD(ROW_DISP_HOME_WIDGET, 0);
-        D_ADD(ROW_DISP_HOME_WIDGET2, 0);
-        int _wx_on = (home_widget_idx  == HOME_WIDGET_WEATHER || home_widget_idx  == HOME_WIDGET_DATEWX ||
-                      home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX);
-        if (_wx_on) D_ADD(ROW_DISP_WEATHER_UNIT, 0);
-        int _stats_on = (home_widget_idx == HOME_WIDGET_STATS || home_widget2_idx == HOME_WIDGET_STATS);
-        if (_stats_on) {
-            D_ADD(ROW_DISP_GRP_STATS, 0);
-            if (disp_grp_stats_open)
-                for (int _g = 0; _g < STAT_GRP_COUNT; _g++) {
-                    D_ADD(ROW_DISP_STAT_GRP, _g);
-                    if (stat_grp_open[_g])
-                        for (int _k = 0; _k < 6 && stat_grp_items[_g][_k] >= 0; _k++) {
-                            row_type[idx] = ROW_DISP_STAT_ITEM; row_extra[idx] = stat_grp_items[_g][_k]; idx++;
-                        }
-                }
+        D_ADD(ROW_DISP_GRP_WIDGETS, 0);
+        if (disp_grp_widgets_open) {
+            D_ADD(ROW_DISP_HOME_WIDGET, 0);
+            D_ADD(ROW_DISP_HOME_WIDGET2, 0);
+            int _wx_on = (home_widget_idx  == HOME_WIDGET_WEATHER || home_widget_idx  == HOME_WIDGET_DATEWX ||
+                          home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX);
+            if (_wx_on) D_ADD(ROW_DISP_WEATHER_UNIT, 0);
+            int _stats_on = (home_widget_idx == HOME_WIDGET_STATS || home_widget2_idx == HOME_WIDGET_STATS);
+            if (_stats_on) {
+                D_ADD(ROW_DISP_GRP_STATS, 0);
+                if (disp_grp_stats_open)
+                    for (int _g = 0; _g < STAT_GRP_COUNT; _g++) {
+                        D_ADD(ROW_DISP_STAT_GRP, _g);
+                        if (stat_grp_open[_g])
+                            for (int _k = 0; _k < 6 && stat_grp_items[_g][_k] >= 0; _k++) {
+                                row_type[idx] = ROW_DISP_STAT_ITEM; row_extra[idx] = stat_grp_items[_g][_k]; idx++;
+                            }
+                    }
+            }
         }
         D_ADD(ROW_DISP_GRP_APPS, 0);
         if (disp_grp_apps_open)
@@ -3245,7 +3533,7 @@ int lid_closed = 0;          // clamshell state (RG34XX-SP): 0 open, 1 closed
 Uint32 lid_last_evt = 0;     // debounce for the polled hall sensor
 static int lid_evdev_fd = -1;       // raw controller event stream; survives SDL video handoff
 static int gamepad_evdev_fd = -1;   // independent reader for game-session system controls
-static int gamepad_menu_down = 0, gamepad_start_down = 0;
+static int gamepad_menu_down = 0;
 static int gamepad_bri_modifier_down = 0;
 static int gamepad_volup_down = 0, gamepad_voldown_down = 0;
 static int gamepad_volume_synced = 0;
@@ -3751,6 +4039,7 @@ void load_settings() {
         else if (strcmp(key, "theme_music_enabled") == 0) theme_music_enabled = val;
         else if (strcmp(key, "radio_persist") == 0) radio_persist = val;
         else if (strcmp(key, "radio_over_games") == 0) radio_over_games = val;
+        else if (strcmp(key, "radio_game_audio") == 0) radio_game_audio = val ? 1 : 0;
         else if (strcmp(key, "music_persist") == 0) music_persist = val;
         else if (strcmp(key, "music_over_games") == 0) music_over_games = val;
         else if (strcmp(key, "radio_volume_pct") == 0) radio_volume_pct = val;
@@ -3856,6 +4145,11 @@ void load_settings() {
                 snprintf(artkey, sizeof(artkey), "scrape_art_%d", i);
                 if (strcmp(key, artkey) == 0) { scrape_art_enabled[i] = val; matched = 1; }
             }
+            for (int i = 0; i < PLATFORM_COUNT; i++) {
+                char syskey[48];
+                snprintf(syskey, sizeof(syskey), "scrape_system_%s", platform_dirs[i]);
+                if (strcmp(key, syskey) == 0) { scrape_system_enabled[i] = val ? 1 : 0; matched = 1; }
+            }
             if (!matched) {
                 for (int i = 0; i < PLATFORM_COUNT; i++) {
                     char bgkey[32];
@@ -3885,6 +4179,7 @@ void save_settings() {
     fprintf(f, "theme_music_enabled=%d\n", theme_music_enabled);
     fprintf(f, "radio_persist=%d\n", radio_persist);
     fprintf(f, "radio_over_games=%d\n", radio_over_games);
+    fprintf(f, "radio_game_audio=%d\n", radio_game_audio);
     fprintf(f, "music_persist=%d\n", music_persist);
     fprintf(f, "music_over_games=%d\n", music_over_games);
     fprintf(f, "radio_volume_pct=%d\n", radio_volume_pct);
@@ -3981,6 +4276,8 @@ void save_settings() {
     for (int i = 0; i < ART_TYPE_COUNT; i++) {
         fprintf(f, "scrape_art_%d=%d\n", i, scrape_art_enabled[i]);
     }
+    for (int i = 0; i < PLATFORM_COUNT; i++)
+        fprintf(f, "scrape_system_%s=%d\n", platform_dirs[i], scrape_system_enabled[i]);
     for (int i = 0; i < PLATFORM_COUNT; i++) {
         if (platform_bg_choice[i][0] != '\0') {
             fprintf(f, "bg_choice_%s=%s\n", platform_dirs[i], platform_bg_choice[i]);
@@ -4568,34 +4865,25 @@ void splash_now(SDL_Renderer *ren, const char *msg) {
 // Boot is a useful preload phase, not a fixed splash delay.  These are kept
 // outside STATE_BOOT so blocking library/art work can redraw the same branded
 // screen and leave one quote readable for several seconds.
-#define BOOT_MIN_VISIBLE_MS 7000
-static const char *boot_quotes[25] = {
-    "The game is never over while there is one life left. - Shigeru Miyamoto",
-    "A delayed game can become good; a rushed game stays unfinished. - Shigeru Miyamoto",
-    "Games give us unnecessary obstacles that we volunteer to tackle. - Jane McGonigal",
-    "The right level of challenge turns play into discovery. - Sid Meier",
-    "Good design teaches without a manual. - Satoru Iwata",
-    "Play is how we test the edges of possibility. - Will Wright",
-    "Every great game begins with one clear idea. - Gunpei Yokoi",
-    "The player completes the design. - Hideo Kojima",
-    "Simple rules can create endless stories. - John Carmack",
-    "Fun is learning in a context where you want to learn. - Raph Koster",
-    "A world feels alive when it reacts to the player. - Warren Spector",
-    "Games are a conversation between creator and player. - Amy Hennig",
-    "Movement should feel good before anything else. - Masahiro Sakurai",
-    "Constraints are where memorable ideas begin. - Koji Kondo",
-    "A game should invite curiosity, then reward it. - Tim Schafer",
-    "The smallest detail can sell an entire world. - Yoko Taro",
-    "Difficulty is meaningful when success teaches mastery. - Hidetaka Miyazaki",
-    "Great controls disappear beneath intention. - Yu Suzuki",
-    "Music gives a game its emotional memory. - Nobuo Uematsu",
-    "Players remember feelings longer than features. - Jenova Chen",
-    "A good puzzle makes the answer feel inevitable. - Jonathan Blow",
-    "Technology serves imagination, not the other way around. - John Romero",
-    "A character is strongest when play reveals personality. - Sam Lake",
-    "Discovery is its own reward. - Roberta Williams",
-    "Press start; make a memory. - SNAP FE"
+#define BOOT_MIN_VISIBLE_MS 9000
+static const char *boot_quotes[] = {
+    "Fun is just another word for learning. - Raph Koster",
+    "I believe that ideas are limitless. - Shigeru Miyamoto",
+    "You can't just throw every good idea you have into a game. - Shigeru Miyamoto",
+    "I think limits are important. - Takashi Tezuka",
+    "Work is fun when feedback comes fast. - Satoru Iwata",
+    "A developer's happiness is reflected in the games he or she makes. - Yosuke Hayashi",
+    "It's very important that even little kids can have fun blasting away. - Takaya Imamura",
+    "I always think about how the music will make someone feel while they're actually playing. - Hitoshi Sakimoto",
+    "We tried to make that beginning easy on purpose. - Toshiaki Saegusa",
+    "Give the player an engaging and interesting experience. - Hirokazu Yasuhara",
+    "The fine-tuning stage is important in game development. - Takeshi Tezuka",
+    "If it's fun, it's a game. - Shigeru Miyamoto",
+    "We wanted to come up with the play structure from scratch. - Hisashi Nogami",
+    "That kind of puzzle-solving was a big part of making Super Mario Bros. games. - Satoru Iwata",
+    "Every project starts with something from the past that needs to be improved. - Yosuke Hayashi"
 };
+#define BOOT_QUOTE_COUNT ((int)(sizeof(boot_quotes) / sizeof(boot_quotes[0])))
 static Uint32 g_boot_sequence_started = 0;
 static int g_boot_quote_seed = 0;
 static int g_boot_loading_mode = 0;
@@ -4609,7 +4897,7 @@ static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
     SDL_SetRenderDrawColor(ren, t->bg.r, t->bg.g, t->bg.b, 255);
     SDL_RenderClear(ren);
 
-    int fade_ms = reduce_motion ? 1 : 900;
+    int fade_ms = reduce_motion ? 1 : 1200;
     int alpha = elapsed < (Uint32)fade_ms ? (int)(elapsed * 255 / fade_ms) : 255;
     if (alpha > 255) alpha = 255;
     SDL_Texture *logo = render_text(ren, font_big, "SNAP FE", t->text);
@@ -4619,13 +4907,14 @@ static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
         SDL_Rect dst = { WIN_W/2 - tw/2, WIN_H/2 - tht/2 - 56, tw, tht };
         if (!reduce_motion && elapsed < (Uint32)fade_ms) {
             float u = elapsed / (float)fade_ms;
-            for (int i = 0; i < 52; i++) {
+            u = u * u * (3.0f - 2.0f * u); // smoothstep: no abrupt start/stop
+            for (int i = 0; i < 36; i++) {
                 int tx = dst.x + (i * 37) % tw, ty = dst.y + (i * 19) % tht;
                 int sx = (i * 83) % WIN_W, sy = WIN_H + 20 + (i % 7) * 12;
                 int px = (int)(sx + (tx - sx) * u), py = (int)(sy + (ty - sy) * u);
                 SDL_Color pc = (i % 3 == 0) ? t->accent1 : (i % 3 == 1) ? t->accent2 : t->accent3;
                 SDL_SetRenderDrawColor(ren, pc.r, pc.g, pc.b, (Uint8)(220 * (1.0f - u)));
-                SDL_RenderFillRect(ren, &(SDL_Rect){ px, py, 3, 3 });
+                SDL_RenderFillRect(ren, &(SDL_Rect){ px, py, 2, 2 });
             }
         }
         SDL_RenderCopy(ren, logo, NULL, &dst);
@@ -4638,27 +4927,32 @@ static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
         SDL_RenderFillRect(ren, &(SDL_Rect){ dst.x + seg * 2, sy, tw - seg * 2, 5 });
     }
 
-    // One quote remains still for seven seconds; only unusually long boots
-    // advance to another. This is far easier to read than the old ticker.
-    int qi = (g_boot_quote_seed + (int)(elapsed / 7000)) % 25;
-    SDL_Texture *qt = render_text_fit(ren, font_label, boot_quotes[qi], t->dim, WIN_W - 70);
-    if (qt) {
+    // The quote is the visual focus: full text colour, centered and wrapped.
+    // It stays still for the entire normal boot; only a long scan advances it.
+    int qi = (g_boot_quote_seed + (int)(elapsed / BOOT_MIN_VISIBLE_MS)) % BOOT_QUOTE_COUNT;
+    char qlines[MAX_LINES][128];
+    int qn = wrap_text(font_label, boot_quotes[qi], WIN_W - 90, qlines);
+    int qy = WIN_H - 142 - (qn - 1) * (TTF_FontHeight(font_label) + 3) / 2;
+    for (int i = 0; i < qn; i++) {
+        SDL_Texture *qt = render_text(ren, font_label, qlines[i], t->text);
+        if (!qt) continue;
         int qw, qh; SDL_QueryTexture(qt, NULL, NULL, &qw, &qh);
-        SDL_RenderCopy(ren, qt, NULL, &(SDL_Rect){ WIN_W/2 - qw/2, WIN_H - 92, qw, qh });
+        SDL_RenderCopy(ren, qt, NULL, &(SDL_Rect){ WIN_W/2 - qw/2, qy, qw, qh });
+        qy += qh + 3;
     }
 
     char label[128];
     snprintf(label, sizeof label, "%s  %d%%", status && status[0] ? status : "Getting ready", (int)(progress * 100.0f + 0.5f));
-    SDL_Texture *st = render_text_fit(ren, font_small ? font_small : font_label, label, t->text, WIN_W - 80);
+    SDL_Texture *st = render_text_fit(ren, font_small ? font_small : font_label, label, t->dim, WIN_W - 80);
     if (st) {
         int sw, sh; SDL_QueryTexture(st, NULL, NULL, &sw, &sh);
-        SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ WIN_W/2 - sw/2, WIN_H - 55, sw, sh });
+        SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ WIN_W/2 - sw/2, WIN_H - 45, sw, sh });
     }
-    int bw = WIN_W - 120, bx = 60, by = WIN_H - 22;
+    int bw = WIN_W - 160, bx = 80, by = WIN_H - 15;
     SDL_SetRenderDrawColor(ren, t->dim.r, t->dim.g, t->dim.b, 90);
-    SDL_RenderFillRect(ren, &(SDL_Rect){ bx, by, bw, 6 });
+    SDL_RenderFillRect(ren, &(SDL_Rect){ bx, by, bw, 3 });
     SDL_SetRenderDrawColor(ren, t->accent2.r, t->accent2.g, t->accent2.b, 255);
-    SDL_RenderFillRect(ren, &(SDL_Rect){ bx, by, (int)(bw * progress), 6 });
+    SDL_RenderFillRect(ren, &(SDL_Rect){ bx, by, (int)(bw * progress), 3 });
 }
 
 // Same, but with a real progress bar + integer % (frac 0..1). Cheap enough to
@@ -6202,6 +6496,21 @@ void run_scrape() {
     }
     if (first && !scrape_description) return; // nothing selected at all, nothing to do
 
+    char systems_arg[256] = "";
+    first = 1;
+    for (int i = 0; i < PLATFORM_COUNT; i++) {
+        if (!scrape_system_enabled[i]) continue;
+        if (!first) strncat(systems_arg, ",", sizeof(systems_arg) - strlen(systems_arg) - 1);
+        strncat(systems_arg, platform_dirs[i], sizeof(systems_arg) - strlen(systems_arg) - 1);
+        first = 0;
+    }
+    if (first) {
+        scrape_error = 1;
+        scrape_error_until = SDL_GetTicks() + 6000;
+        snprintf(scrape_label, sizeof scrape_label, "Choose at least one system");
+        return;
+    }
+
     char home[256];
     snprintf(home, sizeof(home), "%s", sn_data_root());
 
@@ -6221,14 +6530,14 @@ void run_scrape() {
     // The frontend's launch environment (via custom.sh) often has a bare PATH
     // with no python3, so `sh -c "python3 ..."` silently fails. Resolve an
     // absolute interpreter, and tee all output to scrape.log for diagnosis.
-    char cmd[1400];
+    char cmd[1600];
     snprintf(cmd, sizeof(cmd),
              "{ PY=$(command -v python3 || echo /usr/bin/python3); export PYTHONUNBUFFERED=1; "
              "\"$PY\" \"%s/scrape_boxart.py\" --source=%s --data=\"%s\" --roms=\"%s\" "
-             "--types=%s --description=%d --only-missing=%d ; } "
+             "--types=%s --systems=%s --description=%d --only-missing=%d ; } "
              ">\"%s/scrape.log\" 2>&1 &",
              home, scrape_source ? "screenscraper" : "gamesdb", home, sn_roms_root(),
-             types_arg, scrape_description, only_scrape_missing, home);
+             types_arg, systems_arg, scrape_description, only_scrape_missing, home);
     system(cmd);
 
     scrape_in_progress = 1;
@@ -7840,15 +8149,8 @@ static const char *write_retroarch_override(int p) {
     if (rot < 0 || rot >= GAME_ROTATION_COUNT) rot = 0;
     fprintf(f, "video_rotation = \"%d\"\n", rot);
 
-    // Allow Snap's hardware-key observer to display the same percentage toast
-    // over the standalone RetroArch app and over direct (non-configgen) games.
-    fprintf(f, "network_cmd_enable = \"true\"\n");
-    fprintf(f, "network_cmd_port = \"55355\"\n");
-    fprintf(f, "video_font_enable = \"true\"\n");
-    fprintf(f, "menu_widget_enable = \"true\"\n");
-
-    // Hotkeys are intentionally absent. RetroArch owns and persists them; Snap's
-    // independent evdev monitor handles the frontend-only Menu+Start exit chord.
+    // Hotkeys are intentionally absent. RetroArch owns and persists them;
+    // SNAP's evdev monitor is limited to the dedicated level buttons.
 
     // Force the SDL2 joypad driver and hand RetroArch our own autoconfig dir --
     // without this the Anbernic pad is unrecognised and no in-game button works.
@@ -7920,27 +8222,10 @@ static void gamepad_evdev_open(void) {
 static void gamepad_evdev_reset(void) {
     if (gamepad_evdev_fd >= 0) close(gamepad_evdev_fd);
     gamepad_evdev_fd = -1;
-    gamepad_menu_down = gamepad_start_down = 0;
+    gamepad_menu_down = 0;
     gamepad_bri_modifier_down = 0;
     gamepad_volup_down = gamepad_voldown_down = 0;
     gamepad_volume_synced = 0;
-}
-
-// RetroArch's network-command endpoint puts a message into its own OSD queue.
-// Since RetroArch owns DRM while a game is running, this is the only overlay
-// that can reliably appear above every core without stealing video.
-static void retroarch_level_osd(const char *label, int value) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return;
-    struct sockaddr_in to;
-    memset(&to, 0, sizeof to);
-    to.sin_family = AF_INET;
-    to.sin_port = htons(55355);
-    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    char msg[96];
-    int n = snprintf(msg, sizeof msg, "SHOW_MSG %s: %d%%", label, value);
-    if (n > 0) (void)sendto(fd, msg, (size_t)n, 0, (struct sockaddr *)&to, sizeof to);
-    close(fd);
 }
 
 static void gamepad_store_brightness(void) {
@@ -7954,7 +8239,8 @@ static void gamepad_store_brightness(void) {
 // user-configured RetroArch controller hotkey untouched.
 //
 // Menu/Fn + Volume = panel brightness, in exact 5% transitions ending at the
-// real 1% night floor. Volume alone = system volume. Both use RetroArch's OSD.
+// real 1% night floor. Volume alone = system volume. Notifications are kept
+// off: queuing a RetroArch SHOW_MSG per click could replay for several minutes.
 static void gamepad_evdev_poll_quit(void) {
     gamepad_evdev_open();
     if (gamepad_evdev_fd < 0 || emu_pid <= 0) return;
@@ -7963,16 +8249,8 @@ static void gamepad_evdev_poll_quit(void) {
         if (iev.type != EV_KEY) continue;
         if (iev.code == BTN_MODE || iev.code == KEY_GOTO)
             gamepad_menu_down = iev.value != 0;
-        if (iev.code == BTN_MODE || iev.code == BTN_TL2 || iev.code == KEY_GOTO)
+        if (iev.code == BTN_MODE || iev.code == KEY_GOTO)
             gamepad_bri_modifier_down = iev.value != 0;
-        if (iev.code == BTN_START) gamepad_start_down = iev.value != 0;
-        if (gamepad_menu_down && gamepad_start_down) {
-            kill(-emu_pid, SIGTERM);
-            kill(emu_pid, SIGTERM);
-            gamepad_menu_down = gamepad_start_down = 0;
-            break;
-        }
-
         if (iev.code != KEY_VOLUMEUP && iev.code != KEY_VOLUMEDOWN) continue;
         int *latched = (iev.code == KEY_VOLUMEUP) ? &gamepad_volup_down : &gamepad_voldown_down;
         if (iev.value == 0) { *latched = 0; continue; }
@@ -7983,7 +8261,6 @@ static void gamepad_evdev_poll_quit(void) {
             hotkey_brightness(dir, BRIGHT_STEP);
             gamepad_store_brightness();
             save_settings();
-            retroarch_level_osd("Brightness", brightness_pct);
         } else {
             if (!gamepad_volume_synced) {
                 int live = sys_volume_read();
@@ -7993,7 +8270,6 @@ static void gamepad_evdev_poll_quit(void) {
             hotkey_volume(dir, 5);
             ingame_volume_changed = 1;
             save_settings();
-            retroarch_level_osd("Volume", sys_volume_pct);
         }
     }
 }
@@ -8651,7 +8927,10 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
     int keep_music = (music_pid > 0 && music_over_games);
     if (!keep_radio) radio_stop();
     if (!keep_music && music_pid > 0) { music_user_stop = 1; music_stop(); music_user_stop = 0; }
-    game_audio_mute((keep_radio || keep_music) ? 1 : 0);
+    // Radio can now coexist with game sound.  SD-card music keeps its existing
+    // explicit "mute game" behavior, while the radio option is independently
+    // selectable so sound effects remain available by default.
+    game_audio_mute((keep_music || (keep_radio && !radio_game_audio)) ? 1 : 0);
 
 #ifdef SNAPOS_TARGET_KNULLI
     // On Knulli we hand off to Batocera's own launcher (configgen). It builds a
@@ -8764,9 +9043,31 @@ void launch_game(const char *path, const char *title, const char *platform_dir) 
 void launch_retroarch_menu() {
     char emu_path[900], ra_config[900], override_path[900];
     snprintf(emu_path, sizeof(emu_path), "%s", sn_ra_bin());
+#ifdef SNAPOS_TARGET_KNULLI
+    // Use the same generated configuration games use, then layer only SNAP's
+    // display options. This makes the Home app and in-game menu one settings
+    // world instead of two unrelated RetroArch profiles.
+    const char *shared_cfg = "/userdata/system/configs/retroarch/retroarchcustom.cfg";
+    game_audio_mute(0);
+    if (access(shared_cfg, R_OK) == 0) {
+        ra_hotkeys_apply_to_cfg(shared_cfg);
+        snprintf(ra_config, sizeof(ra_config), "%s", shared_cfg);
+    } else {
+        snprintf(ra_config, sizeof(ra_config), "%s", sn_ra_basecfg());
+    }
+#else
     snprintf(ra_config, sizeof(ra_config), "%s", sn_ra_basecfg());
+#endif
+#ifdef SNAPOS_TARGET_KNULLI
+    // The Home RetroArch app deliberately launches the same Knulli-generated
+    // configuration as a game.  Appending SNAP's SDL autoconfig here used to
+    // get saved into retroarchcustom.cfg and made the next game claim that the
+    // handheld controller was not configured.
+    override_path[0] = '\0';
+#else
     const char *ovr = write_retroarch_override(-1);
     snprintf(override_path, sizeof(override_path), "%s", ovr ? ovr : "");
+#endif
 
     apply_brightness();
     brightness_guard_start();
@@ -8885,9 +9186,9 @@ int restore_emulationstation(void) {
     // Otherwise just remove custom.sh entirely -- with the Snap hook gone,
     // Knulli's S31emulationstation runs EmulationStation on the next boot.
     system(
-        "umount /usr/bin/volume-button >/dev/null 2>&1 || true; "
-        "TRIG=/etc/triggerhappy/triggers.d/multimedia_keys.conf; TBAK=/userdata/system/snapos/triggerhappy-multimedia_keys.stock; "
-        "if [ -s \"$TBAK\" ]; then cp -f \"$TBAK\" \"$TRIG\" >/dev/null 2>&1 || true; for SVC in /etc/init.d/S*triggerhappy; do [ -x \"$SVC\" ] && { \"$SVC\" restart >/dev/null 2>&1 || true; break; }; done; fi; "
+        "TRIG=/etc/triggerhappy/triggers.d/multimedia_keys.conf; "
+        "umount \"$TRIG\" >/dev/null 2>&1 || true; rm -f /userdata/system/snapos/triggerhappy-multimedia_keys.snapfe; "
+        "for SVC in /etc/init.d/S*triggerhappy; do [ -x \"$SVC\" ] && { \"$SVC\" restart >/dev/null 2>&1 || true; break; }; done; "
         "HOOK=/userdata/system/custom.sh; BAK=\"$HOOK.pre-snapos\"; "
         "is_snap() { grep -q 'Snap FE frontend hook' \"$1\" 2>/dev/null || grep -q 'Snap OS frontend hook' \"$1\" 2>/dev/null; }; "
         "if [ -f \"$BAK\" ] && ! is_snap \"$BAK\"; then mv -f \"$BAK\" \"$HOOK\"; "
@@ -8921,11 +9222,12 @@ void factory_reset() {
     art_dropdown_open = 0; display_dropdown_open = 0; game_art_dropdown_open = 0;
     bg_dropdown_open = 0; disp_grp_home_open = 0; disp_grp_text_open = 0;
     disp_grp_view_open = 0; disp_grp_hud_open = 0; disp_grp_screen_open = 0;
-    disp_grp_stats_open = 0; stats_mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5);
+    disp_grp_stats_open = 0; disp_grp_widgets_open = 0; stats_mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5);
     for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
     disp_grp_apps_open = 0; home_apps_mask = (1 << APP_COUNT) - 1;
     home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
     for (int i = 0; i < ART_TYPE_COUNT; i++) scrape_art_enabled[i] = (i == 0) ? 1 : 0;
+    for (int i = 0; i < PLATFORM_COUNT; i++) scrape_system_enabled[i] = 1;
     font_choice_idx = 5;
     font_size_idx = 1;
     font_bold = 0;
@@ -8990,7 +9292,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         chime_enabled = 1; ui_sounds_enabled = 1; theme_music_enabled = 0;
         ui_volume_pct = 70; boot_volume_pct = 100; theme_volume_pct = 35;
         boot_sound_idx = 0; theme_sound_idx = 0; build_chime_sound(); build_theme_music();
-        radio_persist = 1; radio_over_games = 0; radio_volume_pct = 100;
+        radio_persist = 1; radio_over_games = 0; radio_game_audio = 1; radio_volume_pct = 100;
         music_persist = 1; music_over_games = 0;
         snd_grp_osui_open = snd_grp_boot_open = snd_grp_radio_open = snd_grp_music_open = 0;
     } else if (tab == TAB_DISPLAY) {
@@ -9010,7 +9312,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         home_apps_mask = (1 << APP_COUNT) - 1;
         for (int i = 0; i < HOME_ORDER_COUNT; i++) home_tile_order[i] = i;
         bg_dropdown_open = 0; disp_grp_home_open = 0; disp_grp_text_open = 0;
-        disp_grp_hud_open = 0; disp_grp_screen_open = 0; disp_grp_stats_open = 0; disp_grp_apps_open = 0;
+        disp_grp_hud_open = 0; disp_grp_screen_open = 0; disp_grp_stats_open = 0; disp_grp_apps_open = 0; disp_grp_widgets_open = 0;
         for (int i = 0; i < PLATFORM_COUNT; i++) platform_bg_choice[i][0] = '\0';
         platform_bg_mode = 0; platform_bg_color_idx = 1;
         platform_assets_loaded_for = -1; reload_fonts();
@@ -9031,8 +9333,9 @@ void restore_current_settings_tab(SettingsTab tab) {
         // they describe the hardware, not a preference.
     } else if (tab == TAB_ACCOUNT) {
         scrape_description = 0; show_description = 0; only_scrape_missing = 1; scrape_source = 0;
-        art_dropdown_open = 0;
+        art_dropdown_open = 0; scrape_service_open = 0; scrape_systems_open = 0; scrape_extras_open = 0;
         for (int i = 0; i < ART_TYPE_COUNT; i++) scrape_art_enabled[i] = (i == 0);
+        for (int i = 0; i < PLATFORM_COUNT; i++) scrape_system_enabled[i] = 1;
     }
     apply_brightness();
     settings_dirty = 1;
@@ -11187,7 +11490,7 @@ int main(int argc, char *argv[]) {
     // The quote remains visible throughout and first visits to Consoles / Game
     // Library can reuse the populated indexes and texture caches below.
     g_boot_sequence_started = SDL_GetTicks();
-    g_boot_quote_seed = rand() % 25;
+    g_boot_quote_seed = rand() % BOOT_QUOTE_COUNT;
     g_boot_loading_mode = 1;
     play_chime();
     g_boot_stage_base = 0.00f; g_boot_stage_span = 0.38f;
@@ -11406,14 +11709,17 @@ int main(int argc, char *argv[]) {
                     continue;
                 }
 
+                // B/Back is deliberately inert on the root Home page. It used
+                // to terminate SNAP and trigger the service's goodbye/restart
+                // path, which made an accidental press look like a reboot.
+                if (e.key.keysym.sym == SDLK_ESCAPE && state == STATE_HOME &&
+                    !flashlight_pending && !home_grid_reorder) continue;
+
                 if (state != STATE_BOOT && (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN ||
                     e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT || e.key.keysym.sym == SDLK_RETURN ||
                     e.key.keysym.sym == SDLK_ESCAPE || e.key.keysym.sym == SDLK_PAGEUP || e.key.keysym.sym == SDLK_PAGEDOWN ||
                     e.key.keysym.sym == SDLK_q || e.key.keysym.sym == SDLK_e)) play_click();
 
-                if (e.key.keysym.sym == SDLK_ESCAPE && state == STATE_HOME && !flashlight_pending && !home_grid_reorder) {
-                    running = 0;
-                }
                 if (state == STATE_HOME) {
                     // Flashlight confirm gate: the row is armed, waiting for a
                     // deliberate second press so nobody blinds themselves.
@@ -12472,6 +12778,7 @@ int main(int argc, char *argv[]) {
                             else if (rt == ROW_SND_UI_VOLUME) { ui_volume_pct += dir; if (ui_volume_pct < 0) ui_volume_pct = 0; if (ui_volume_pct > 100) ui_volume_pct = 100; }
                             else if (rt == ROW_SND_RADIO_PERSIST) radio_persist = !radio_persist;
                             else if (rt == ROW_SND_RADIO_OVERGAME) radio_over_games = !radio_over_games;
+                            else if (rt == ROW_SND_RADIO_GAME_AUDIO) radio_game_audio = !radio_game_audio;
                             else if (rt == ROW_SND_MUSIC_PERSIST) music_persist = !music_persist;
                             else if (rt == ROW_SND_MUSIC_OVERGAME) music_over_games = !music_over_games;
                             else if (rt == ROW_SND_RADIO_VOLUME) {
@@ -12604,14 +12911,18 @@ int main(int argc, char *argv[]) {
                             int rt = game_row_type[settings_selected];
                             if (rt == ROW_G_FASTFORWARD) {
                                 fast_forward_idx = (fast_forward_idx + dir + FASTFORWARD_COUNT) % FASTFORWARD_COUNT;
+                                ra_hotkeys_set_snap_fastforward();
                                 game_audio_mute(0);   // push ratio/mode into knulli.conf now
                             } else if (rt == ROW_G_FASTFWD_MODE) {
                                 fast_forward_mode = !fast_forward_mode;
+                                ra_hotkeys_set_snap_fastforward();
                                 game_audio_mute(0);
                             } else if (rt == ROW_G_AUTOSAVE) {
                                 auto_save_games = !auto_save_games;
                             } else if (rt == ROW_G_CONSOLE_VIEW) {
                                 platform_view_style = (platform_view_style + dir + VIEW_STYLE_COUNT) % VIEW_STYLE_COUNT;
+                            } else if (rt == ROW_G_FAVORITES_VIEW) {
+                                favorites_view_idx = (favorites_view_idx + dir + FAVORITES_VIEW_COUNT) % FAVORITES_VIEW_COUNT;
                             } else if (rt == ROW_G_SHOW_EMPTY) {
                                 show_empty_systems = !show_empty_systems;
                                 rebuild_visible_platforms_ex(0);
@@ -12698,9 +13009,18 @@ int main(int argc, char *argv[]) {
                             int rt = acct_row_type[settings_selected];
                             if (rt == ROW_SCRAPE_HEADER) {
                                 scrape_dropdown_open = !scrape_dropdown_open;
+                            } else if (rt == ROW_SCRAPE_SERVICE_HEADER) {
+                                scrape_service_open = !scrape_service_open;
+                            } else if (rt == ROW_SCRAPE_SYSTEM_HEADER) {
+                                scrape_systems_open = !scrape_systems_open;
+                            } else if (rt == ROW_ART_EXTRAS_HEADER) {
+                                scrape_extras_open = !scrape_extras_open;
                             } else if (rt == ROW_SCRAPE_SOURCE) {
                                 scrape_source = (scrape_source + dir + 2) % 2;
                                 save_settings();
+                            } else if (rt == ROW_SCRAPE_SYSTEM_ITEM) {
+                                int p = acct_row_extra[settings_selected];
+                                if (p >= 0 && p < PLATFORM_COUNT) scrape_system_enabled[p] = !scrape_system_enabled[p];
                             } else if (rt == ROW_ART_ITEM) {
                                 scrape_art_enabled[acct_row_extra[settings_selected]] = !scrape_art_enabled[acct_row_extra[settings_selected]];
                             } else if (rt == ROW_SCRAPE_DESC) {
@@ -12723,8 +13043,11 @@ int main(int argc, char *argv[]) {
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_BOOT)  { play_click(); snd_grp_boot_open  = !snd_grp_boot_open; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_RADIO) { play_click(); snd_grp_radio_open = !snd_grp_radio_open; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_MUSIC) { play_click(); snd_grp_music_open = !snd_grp_music_open; }
+                        else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_RADIO_PERSIST) { play_click(); radio_persist = !radio_persist; save_settings(); settings_dirty = 0; }
+                        else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_RADIO_OVERGAME) { play_click(); radio_over_games = !radio_over_games; save_settings(); settings_dirty = 0; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_MUSIC_PERSIST) { play_click(); music_persist = !music_persist; save_settings(); settings_dirty = 0; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_MUSIC_OVERGAME) { play_click(); music_over_games = !music_over_games; save_settings(); settings_dirty = 0; }
+                        else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_RADIO_GAME_AUDIO) { play_click(); radio_game_audio = !radio_game_audio; save_settings(); settings_dirty = 0; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_RESTORE) {
                             restore_current_settings_tab(TAB_SOUND);
                         } else if (current_tab == TAB_DISPLAY && disp_row_type[settings_selected] == ROW_DISP_RESTORE) {
@@ -12902,6 +13225,8 @@ int main(int argc, char *argv[]) {
                                 save_settings(); settings_dirty = 0;
                             } else if (rt == ROW_DISP_GRP_HOME) {
                                 disp_grp_home_open = !disp_grp_home_open;
+                            } else if (rt == ROW_DISP_GRP_WIDGETS) {
+                                disp_grp_widgets_open = !disp_grp_widgets_open;
                             } else if (rt == ROW_DISP_GRP_STATS) {
                                 disp_grp_stats_open = !disp_grp_stats_open;
                             } else if (rt == ROW_DISP_STAT_GRP) {
@@ -12957,6 +13282,16 @@ int main(int argc, char *argv[]) {
                             int rt = acct_row_type[settings_selected];
                             if (rt == ROW_SCRAPE_HEADER) {
                                 scrape_dropdown_open = !scrape_dropdown_open;
+                            } else if (rt == ROW_SCRAPE_SERVICE_HEADER) {
+                                scrape_service_open = !scrape_service_open;
+                            } else if (rt == ROW_SCRAPE_SYSTEM_HEADER) {
+                                scrape_systems_open = !scrape_systems_open;
+                            } else if (rt == ROW_SCRAPE_SYSTEM_ITEM) {
+                                int p = acct_row_extra[settings_selected];
+                                if (p >= 0 && p < PLATFORM_COUNT) scrape_system_enabled[p] = !scrape_system_enabled[p];
+                                save_settings(); settings_dirty = 0;
+                            } else if (rt == ROW_ART_EXTRAS_HEADER) {
+                                scrape_extras_open = !scrape_extras_open;
                             } else if (rt == ROW_WALLHAVEN_HEADER) {
                                 wallhaven_dropdown_open = !wallhaven_dropdown_open;
                             } else if (rt == ROW_WALLHAVEN_KEY) {
@@ -13003,6 +13338,18 @@ int main(int argc, char *argv[]) {
                                 state = STATE_KEYBOARD;
                             } else if (rt == ROW_ART_HEADER) {
                                 art_dropdown_open = !art_dropdown_open;
+                            } else if (rt == ROW_ART_EXTRAS_HEADER) {
+                                scrape_extras_open = !scrape_extras_open;
+                            } else if (rt == ROW_ART_ITEM) {
+                                int a = acct_row_extra[settings_selected];
+                                if (a >= 0 && a < ART_TYPE_COUNT) scrape_art_enabled[a] = !scrape_art_enabled[a];
+                                save_settings(); settings_dirty = 0;
+                            } else if (rt == ROW_SCRAPE_DESC) {
+                                scrape_description = !scrape_description;
+                                save_settings(); settings_dirty = 0;
+                            } else if (rt == ROW_ONLY_MISSING) {
+                                only_scrape_missing = !only_scrape_missing;
+                                save_settings(); settings_dirty = 0;
                             } else if (rt == ROW_SCRAPE_NOW) {
                                 if (scrape_in_progress) stop_scrape(ren, font_label, platform_selected);
                                 else run_scrape(); // non-blocking -- poll_scrape_status() refreshes art once actually done
@@ -13256,12 +13603,13 @@ int main(int argc, char *argv[]) {
             pid_t r = (emu_pid > 0) ? waitpid(emu_pid, &status, WNOHANG) : emu_pid;
             if (r != 0) {
                 game_running = 0; emu_pid = -1;
-                gamepad_menu_down = gamepad_start_down = 0;
+                gamepad_menu_down = 0;
                 game_lid_paused = 0;
                 brightness_guard_stop();   // import the final in-game brightness before anything saves
                 gamepad_evdev_reset();     // discard queued UI events before the next emulator session
                 if (ingame_volume_changed) { save_settings(); ingame_volume_changed = 0; } // persist volume nudged mid-game
                 if (g_link_active) { link_restore_core_opts(); g_link_active = 0; } // undo network-link core options
+                ra_user_settings_capture(); // sync global menu/OSD options from either RA entry point
                 ra_hotkeys_capture(); // retain a menu combo the user saved inside RetroArch
                 game_audio_mute(0);   // clear the "radio over games" mute, if set
                 cpu_apply_pref();     // re-assert the governor in case the emulator changed it
@@ -14892,17 +15240,18 @@ int main(int argc, char *argv[]) {
                     else if (rt == ROW_SND_UI_ENABLED) { snprintf(text, sizeof(text), "UI Elements: %s", ui_sounds_enabled ? "ON" : "OFF"); indent = 1; }
                     else if (rt == ROW_SND_UI_VOLUME) { snprintf(text, sizeof(text), "UI Elements Volume: %d%%", ui_volume_pct); indent = 1; }
                     else if (rt == ROW_SND_RADIO_PERSIST) { snprintf(text, sizeof(text), "Keep Playing While Browsing: %s", radio_persist ? "ON" : "OFF"); indent = 1; }
-                    else if (rt == ROW_SND_RADIO_OVERGAME) { snprintf(text, sizeof(text), "Play Over Games (mutes game): %s", radio_over_games ? "ON" : "OFF"); indent = 1; }
+                    else if (rt == ROW_SND_RADIO_OVERGAME) { snprintf(text, sizeof(text), "Radio During Games: %s", radio_over_games ? "ON" : "OFF"); indent = 1; }
+                    else if (rt == ROW_SND_RADIO_GAME_AUDIO) { snprintf(text, sizeof(text), "Game Audio With Radio: %s", radio_game_audio ? "ON" : "OFF"); indent = 2; }
                     else if (rt == ROW_SND_RADIO_VOLUME) { snprintf(text, sizeof(text), "Radio Volume: %d%%", radio_volume_pct); indent = 1; }
                     else if (rt == ROW_SND_RESTORE) snprintf(text, sizeof(text), "Restore to Default (Sound)");
                 } else if (current_tab == TAB_DISPLAY) {
                     switch (rt) {
                         case ROW_DISP_GRP_HOME: snprintf(text, sizeof(text), "%c Home", disp_grp_home_open ? 'v' : '>'); break;
                         case ROW_DISP_HOME_VIEW: snprintf(text, sizeof(text), "Home Layout: %s", home_view_names[(home_view_idx >= 0 && home_view_idx < HOME_VIEW_COUNT) ? home_view_idx : 0]); indent = 1; break;
-                        case ROW_DISP_FAVORITES_VIEW: snprintf(text, sizeof(text), "Favorites View: %s", favorite_view_names[(favorites_view_idx >= 0 && favorites_view_idx < FAVORITES_VIEW_COUNT) ? favorites_view_idx : 0]); indent = 1; break;
-                        case ROW_DISP_HOME_WIDGET: snprintf(text, sizeof(text), "Home Widget 1 (Top): %s", home_widget_names[(home_widget_idx >= 0 && home_widget_idx < HOME_WIDGET_COUNT) ? home_widget_idx : 0]); indent = 1; break;
-                        case ROW_DISP_HOME_WIDGET2: snprintf(text, sizeof(text), "Home Widget 2 (Bottom): %s", home_widget_names[(home_widget2_idx >= 0 && home_widget2_idx < HOME_WIDGET_COUNT) ? home_widget2_idx : 0]); indent = 1; break;
-                        case ROW_DISP_WEATHER_UNIT: snprintf(text, sizeof(text), "Weather Units: %s", weather_unit ? "Celsius" : "Fahrenheit"); indent = 1; break;
+                        case ROW_DISP_GRP_WIDGETS: snprintf(text, sizeof(text), "%c Widgets", disp_grp_widgets_open ? 'v' : '>'); indent = 1; break;
+                        case ROW_DISP_HOME_WIDGET: snprintf(text, sizeof(text), "#1: %s", home_widget_names[(home_widget_idx >= 0 && home_widget_idx < HOME_WIDGET_COUNT) ? home_widget_idx : 0]); indent = 2; break;
+                        case ROW_DISP_HOME_WIDGET2: snprintf(text, sizeof(text), "#2: %s", home_widget_names[(home_widget2_idx >= 0 && home_widget2_idx < HOME_WIDGET_COUNT) ? home_widget2_idx : 0]); indent = 2; break;
+                        case ROW_DISP_WEATHER_UNIT: snprintf(text, sizeof(text), "Weather Units: %s", weather_unit ? "Celsius" : "Fahrenheit"); indent = 2; break;
                         case ROW_DISP_SURPRISE: snprintf(text, sizeof(text), "Surprise Me (Home): %s", surprise_me_enabled ? "ON" : "OFF"); indent = 1; break;
                         case ROW_DISP_GRP_STATS: snprintf(text, sizeof(text), "%c Your Stats Items (%d/%d)", disp_grp_stats_open ? 'v' : '>', stats_count(), STATS_PICK_MAX); indent = 1; break;
                         case ROW_DISP_STAT_GRP: { int g = row_extra[i]; snprintf(text, sizeof(text), "%c %s (%d)", stat_grp_open[g] ? 'v' : '>', stat_grp_names[g], stat_grp_on_count(g)); indent = 2; } break;
@@ -14986,6 +15335,7 @@ int main(int argc, char *argv[]) {
                         case ROW_G_AUTOSAVE: snprintf(text, sizeof(text), "Auto-Save Games (60s): %s", auto_save_games ? "ON" : "OFF"); break;
                         case ROW_G_VIEW_HEADER: snprintf(text, sizeof(text), "%c Console View", disp_grp_view_open ? 'v' : '>'); break;
                         case ROW_G_CONSOLE_VIEW: snprintf(text, sizeof(text), "Console View: %s", view_style_names[platform_view_style]); indent = 1; break;
+                        case ROW_G_FAVORITES_VIEW: snprintf(text, sizeof(text), "Favorites View: %s", favorite_view_names[(favorites_view_idx >= 0 && favorites_view_idx < FAVORITES_VIEW_COUNT) ? favorites_view_idx : 0]); indent = 1; break;
                         case ROW_G_SHOW_EMPTY: snprintf(text, sizeof(text), "Show Systems Without Games: %s", show_empty_systems ? "ON" : "OFF"); indent = 1; break;
                         case ROW_G_CAROUSEL_TITLES: snprintf(text, sizeof(text), "System Titles: %s", carousel_titles_on ? "ON" : "OFF"); indent = 1; break;
                         case ROW_G_PGRID_COLS: snprintf(text, sizeof(text), "Console Grid Columns: %d", platform_grid_cols); indent = 1; break;
@@ -15040,15 +15390,19 @@ int main(int argc, char *argv[]) {
                 } else if (current_tab == TAB_ACCOUNT) {
                     switch (rt) {
                         case ROW_SCRAPE_HEADER: snprintf(text, sizeof(text), "%c Scraping", scrape_dropdown_open ? 'v' : '>'); break;
-                        case ROW_SCRAPE_SOURCE: snprintf(text, sizeof(text), "< Scrape Source: %s >", scrape_source_names[scrape_source ? 1 : 0]); break;
-                        case ROW_SCRAPE_SS_USER: snprintf(text, sizeof(text), "ScreenScraper User: %s", ss_user[0] ? ss_user : "Not Set (Press A)"); indent = 1; break;
-                        case ROW_SCRAPE_SS_PASS: snprintf(text, sizeof(text), "ScreenScraper Pass: %s", ss_pass[0] ? "Set (Press A to change)" : "Not Set (Press A)"); indent = 1; break;
-                        case ROW_KEY: snprintf(text, sizeof(text), "TheGamesDB Key: %s", api_key_exists() ? "Configured" : "Not Set (Press A)"); indent = 1; break;
-                        case ROW_ART_HEADER: snprintf(text, sizeof(text), "%c Scrape Art Types", art_dropdown_open ? 'v' : '>'); break;
-                        case ROW_ART_ITEM: snprintf(text, sizeof(text), "%s: %s", art_type_names[row_extra[i]], scrape_art_enabled[row_extra[i]] ? "ON" : "OFF"); indent = 1; break;
-                        case ROW_SCRAPE_DESC: snprintf(text, sizeof(text), "Scrape Descriptions: %s", scrape_description ? "ON" : "OFF"); break;
-                        case ROW_ONLY_MISSING: snprintf(text, sizeof(text), "Only Scrape Missing: %s", only_scrape_missing ? "ON" : "OFF"); break;
-                        case ROW_SCRAPE_NOW: snprintf(text, sizeof(text), "%s", scrape_in_progress ? "Stop Scraping Now (Press A)" : scrape_error ? "Scrape Now (last run failed)" : "Scrape Now"); break;
+                        case ROW_SCRAPE_SERVICE_HEADER: snprintf(text, sizeof(text), "%c Source & Sign-In", scrape_service_open ? 'v' : '>'); indent = 1; break;
+                        case ROW_SCRAPE_SOURCE: snprintf(text, sizeof(text), "< Source: %s >", scrape_source_names[scrape_source ? 1 : 0]); indent = 2; break;
+                        case ROW_SCRAPE_SS_USER: snprintf(text, sizeof(text), "ScreenScraper User: %s", ss_user[0] ? ss_user : "Not Set (Press A)"); indent = 2; break;
+                        case ROW_SCRAPE_SS_PASS: snprintf(text, sizeof(text), "ScreenScraper Password: %s", ss_pass[0] ? "Set (Press A to change)" : "Not Set (Press A)"); indent = 2; break;
+                        case ROW_KEY: snprintf(text, sizeof(text), "TheGamesDB Key: %s", api_key_exists() ? "Configured" : "Not Set (Press A)"); indent = 2; break;
+                        case ROW_SCRAPE_SYSTEM_HEADER: { int n = 0; for (int p = 0; p < PLATFORM_COUNT; p++) n += scrape_system_enabled[p] ? 1 : 0; snprintf(text, sizeof(text), "%c Systems (%d/%d)", scrape_systems_open ? 'v' : '>', n, PLATFORM_COUNT); indent = 1; } break;
+                        case ROW_SCRAPE_SYSTEM_ITEM: snprintf(text, sizeof(text), "%s: %s", platform_names[row_extra[i]], scrape_system_enabled[row_extra[i]] ? "ON" : "OFF"); indent = 2; break;
+                        case ROW_ART_HEADER: snprintf(text, sizeof(text), "%c Scrape Art Types", art_dropdown_open ? 'v' : '>'); indent = 1; break;
+                        case ROW_ART_ITEM: snprintf(text, sizeof(text), "%s: %s", art_type_names[row_extra[i]], scrape_art_enabled[row_extra[i]] ? "ON" : "OFF"); indent = row_extra[i] >= 4 ? 3 : 2; break;
+                        case ROW_ART_EXTRAS_HEADER: snprintf(text, sizeof(text), "%c Extras", scrape_extras_open ? 'v' : '>'); indent = 2; break;
+                        case ROW_SCRAPE_DESC: snprintf(text, sizeof(text), "Descriptions: %s", scrape_description ? "ON" : "OFF"); indent = 2; break;
+                        case ROW_ONLY_MISSING: snprintf(text, sizeof(text), "Only Scrape Missing: %s", only_scrape_missing ? "ON" : "OFF"); indent = 1; break;
+                        case ROW_SCRAPE_NOW: snprintf(text, sizeof(text), "%s", scrape_in_progress ? "Stop Scraping Now (Press A)" : scrape_error ? "Scrape Now (last run failed)" : "Scrape Now"); indent = 1; break;
                         case ROW_RA_HEADER: snprintf(text, sizeof(text), "%c RetroAchievements%s", ra_dropdown_open ? 'v' : '>', ra_configured() ? "  (active)" : ""); break;
                         case ROW_RA_ENABLED: snprintf(text, sizeof(text), "Enabled: %s", !ra_enabled ? "OFF" : ra_linked ? "ON + Linked" : "ON"); indent = 1; break;
                         case ROW_RA_USER: snprintf(text, sizeof(text), "Username: %s", ra_username[0] ? ra_username : "Not Set (Press A)"); indent = 1; break;
