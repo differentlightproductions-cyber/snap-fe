@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.2"
+#define SNAPFE_VERSION "Alpha Build 1.2.3"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -12110,13 +12110,17 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         } else if (slug) {
             SDL_Texture *icon = hgrid_icon(ren, slug);
             if (icon) {
-                SDL_Rect d = fit_rect_for_texture(icon, (SDL_Rect){box.x + 2, box.y + 2, box.w - 4, box.h - 4});
-                // The supplied icons already contain their own rounded tile.
-                // A tight three-pixel accent behind that exact fitted image is
-                // enough to show focus without adding a second bulky border.
+                // Home icons are transparent artwork. Supply the rounded tile
+                // in code so it follows every active colour theme instead of
+                // baking one fixed background into the PNG. The only border is
+                // the tight three-pixel focus outline requested for navigation.
                 if (is_sel)
-                    fill_rounded(ren, (SDL_Rect){ d.x - 3, d.y - 3, d.w + 6, d.h + 6 }, 13,
+                    fill_rounded(ren, (SDL_Rect){ box.x - 3, box.y - 3, box.w + 6, box.h + 6 }, 14,
                                  th->accent2.r, th->accent2.g, th->accent2.b, 245);
+                fill_rounded(ren, box, 12,
+                             th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                SDL_Rect d = fit_rect_for_texture(icon,
+                    (SDL_Rect){ box.x + 9, box.y + 9, box.w - 18, box.h - 18 });
                 SDL_RenderCopy(ren, icon, NULL, &d);
             } else {
                 if (is_sel)

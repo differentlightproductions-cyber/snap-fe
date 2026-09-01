@@ -5,8 +5,18 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.2.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.2.3.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.2.3 App Focused icon refresh
+
+- App Focused Home now draws each transparent icon on a rounded tile generated
+  from the active color theme, so the same artwork fits every theme.
+- The selected app uses a tight three-pixel accent outline with no extra border
+  baked into the artwork.
+- The complete transparent icon set is refreshed, including Favorites,
+  RetroArch, Radio, Mini Games, Achievements, Calculator, Library, Link Play,
+  Music, Settings, Consoles, Flashlight, and Surprise Me.
 
 ### 1.2.2 Home widgets and launch-time update
 
@@ -189,7 +199,7 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.2.2.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.2.3.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
