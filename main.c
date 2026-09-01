@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.1"
+#define SNAPFE_VERSION "Alpha Build 1.2.2"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -85,7 +85,7 @@ int WIN_H = 480;
 #define MAX_LINES 4
 #define MAX_GAMES 4000
 
-typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS, STATE_ROMFOLDERS } AppState;
+typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS, STATE_ROMFOLDERS, STATE_CALENDAR, STATE_CALCULATOR } AppState;
 typedef enum { TAB_SOUND, TAB_DISPLAY, TAB_GAME, TAB_DEVICE, TAB_ACCOUNT, TAB_COUNT } SettingsTab;
 
 // Points at main()'s `state` so pre-main helpers (e.g. play_click) can tell
@@ -701,6 +701,7 @@ int auto_save_games = 0; // OFF by default -- exact save keybind not yet confirm
 int power_save_mode = 0;
 int power_save_auto = 0;         // 1 = Power Save was turned on automatically by the low-battery trigger
 int cpu_perf_mode = 0;          // 1 = pin the CPU governor to "performance" (persists into games)
+int launch_cpu_boost_active = 0; // short configgen-only boost; restored once RetroArch exists
 int auto_ps_pct = 0;            // persisted: 0 = off, else auto-enable Power Save at/below this %
 int battery_icon_enabled = 1;   // draw a real fill/deplete battery beside the percentage
 int syncthing_enabled = 0;
@@ -830,10 +831,10 @@ int home_view_idx = 0;
 //   slot 2 (bottom) -- home_widget2_idx, grows upward
 // Any widget can sit in either slot; "Your Stats" is just one more choice and
 // keeps its collapse/expand (X on Home) behaviour, expanding away from its edge.
-#define HOME_WIDGET_COUNT 11
+#define HOME_WIDGET_COUNT 13
 const char *home_widget_names[HOME_WIDGET_COUNT] = {
     "None", "Clock", "Date", "Now Playing", "Favorite System", "Weather", "Date & Weather", "Your Stats",
-    "Music Player", "Radio Tuner", "Recently Played"
+    "Music Player", "Radio Tuner", "Recently Played", "Battery Health", "Calendar"
 };
 int home_widget_idx  = 1;         // slot 1 (top)    -- Clock out of the box
 int home_widget2_idx = 7;         // slot 2 (bottom) -- Your Stats out of the box
@@ -848,6 +849,281 @@ int home_widget2_idx = 7;         // slot 2 (bottom) -- Your Stats out of the bo
 #define HOME_WIDGET_MUSIC      8
 #define HOME_WIDGET_RADIO      9
 #define HOME_WIDGET_RECENT     10
+#define HOME_WIDGET_BATTERY    11
+#define HOME_WIDGET_CALENDAR   12
+
+// App Focused owns a separate, phone-style two-cell widget. Switching Home
+// layouts never leaks either layout's widget choices into the other one.
+#define APP_WIDGET_NONE     0
+#define APP_WIDGET_WEATHER  1
+#define APP_WIDGET_CLOCK    2
+#define APP_WIDGET_BATTERY  3
+#define APP_WIDGET_CALENDAR 4
+#define APP_WIDGET_COUNT    5
+const char *app_widget_names[APP_WIDGET_COUNT] = {
+    "None", "Weather", "Clock", "Battery Health", "Calendar"
+};
+int app_widget_kind = APP_WIDGET_NONE;
+int app_widget_slot = 0;             // physical 4x2 grid cell; widget spans two columns
+int app_widget_picker = 0;
+int app_widget_picker_sel = 0;
+int app_widget_moving = 0;
+int app_widget_slot_backup = 0;
+time_t calendar_selected_date = 0;  // always reset to today on Calendar entry/exit
+#define CALENDAR_REMINDER_MAX 128
+typedef struct {
+    int ymd;
+    int minute_of_day;  // -1 = all day; otherwise 0..1439
+    char text[160];
+} CalendarReminder;
+CalendarReminder calendar_reminders[CALENDAR_REMINDER_MAX];
+int calendar_reminder_count = 0;
+int calendar_reminder_last_shown = 0;
+int calendar_reminder_popup = 0;
+int calendar_reminder_delete_confirm = 0;
+int calendar_reminder_time_picker = 0;
+int calendar_reminder_time_choice = 0; // 0 = all day, 1 = specific time
+int calendar_reminder_edit_minutes = 9 * 60;
+char calendar_reminder_pending_text[160] = "";
+
+static int calendar_ymd_from_tm(const struct tm *d) {
+    return d ? (d->tm_year + 1900) * 10000 + (d->tm_mon + 1) * 100 + d->tm_mday : 0;
+}
+
+static void calendar_set_today(void) {
+    time_t now = time(NULL); struct tm d = *localtime(&now);
+    d.tm_hour = 12; d.tm_min = 0; d.tm_sec = 0;
+    calendar_selected_date = mktime(&d);
+    calendar_reminder_delete_confirm = 0;
+    calendar_reminder_time_picker = 0;
+    calendar_reminder_pending_text[0] = '\0';
+}
+
+static struct tm calendar_selected_tm(void) {
+    if (!calendar_selected_date) calendar_set_today();
+    return *localtime(&calendar_selected_date);
+}
+
+static int calendar_reminder_find(int ymd) {
+    for (int i = 0; i < calendar_reminder_count; i++)
+        if (calendar_reminders[i].ymd == ymd) return i;
+    return -1;
+}
+
+static void calendar_reminders_path(char *out, size_t cap) {
+    snprintf(out, cap, "%s/calendar-reminders.tsv", sn_data_root());
+}
+
+static void calendar_reminders_save(void) {
+    char path[640], tmp[680]; calendar_reminders_path(path, sizeof path);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w"); if (!f) return;
+    fprintf(f, "last_shown\t%d\n", calendar_reminder_last_shown);
+    for (int i = 0; i < calendar_reminder_count; i++) {
+        char clean[160]; snprintf(clean, sizeof clean, "%s", calendar_reminders[i].text);
+        for (char *p = clean; *p; p++) if (*p == '\t' || *p == '\n' || *p == '\r') *p = ' ';
+        fprintf(f, "%d\t%d\t%s\n", calendar_reminders[i].ymd,
+                calendar_reminders[i].minute_of_day, clean);
+    }
+    fclose(f); rename(tmp, path);
+}
+
+static void calendar_reminders_load(void) {
+    calendar_reminder_count = 0; calendar_reminder_last_shown = 0;
+    char path[640]; calendar_reminders_path(path, sizeof path);
+    FILE *f = fopen(path, "r"); if (!f) return;
+    char line[420];
+    while (fgets(line, sizeof line, f)) {
+        char *tab = strchr(line, '\t'); if (!tab) continue;
+        *tab++ = '\0'; char *nl = strpbrk(tab, "\r\n"); if (nl) *nl = '\0';
+        if (strcmp(line, "last_shown") == 0) { calendar_reminder_last_shown = atoi(tab); continue; }
+        int ymd = atoi(line), minute = -1;
+        char *text = tab;
+        char *second_tab = strchr(tab, '\t');
+        if (second_tab) {
+            *second_tab++ = '\0';
+            minute = atoi(tab);
+            if (minute < -1 || minute > 1439) minute = -1;
+            text = second_tab;
+        }
+        if (ymd > 0 && text[0] && calendar_reminder_count < CALENDAR_REMINDER_MAX) {
+            calendar_reminders[calendar_reminder_count].ymd = ymd;
+            calendar_reminders[calendar_reminder_count].minute_of_day = minute;
+            snprintf(calendar_reminders[calendar_reminder_count].text,
+                     sizeof calendar_reminders[calendar_reminder_count].text, "%.159s", text);
+            calendar_reminder_count++;
+        }
+    }
+    fclose(f);
+}
+
+static void calendar_reminder_set(int ymd, const char *text, int minute_of_day) {
+    if (ymd <= 0 || !text || !text[0]) return;
+    if (minute_of_day < -1 || minute_of_day > 1439) minute_of_day = -1;
+    int i = calendar_reminder_find(ymd);
+    if (i < 0) {
+        if (calendar_reminder_count >= CALENDAR_REMINDER_MAX) return;
+        i = calendar_reminder_count++;
+        calendar_reminders[i].ymd = ymd;
+    }
+    calendar_reminders[i].minute_of_day = minute_of_day;
+    snprintf(calendar_reminders[i].text, sizeof calendar_reminders[i].text, "%.159s", text);
+    // Editing today's reminder creates a new due event, even if an earlier
+    // version of that reminder was already dismissed today.
+    if (ymd == calendar_reminder_last_shown) calendar_reminder_last_shown = 0;
+    calendar_reminders_save();
+}
+
+static void calendar_format_time(int minutes, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    if (minutes < 0) { snprintf(out, cap, "All Day"); return; }
+    int hour24 = (minutes / 60) % 24, minute = minutes % 60;
+    int hour12 = hour24 % 12; if (!hour12) hour12 = 12;
+    snprintf(out, cap, "%d:%02d %s", hour12, minute, hour24 >= 12 ? "PM" : "AM");
+}
+
+static void calendar_reminder_remove(int ymd) {
+    int i = calendar_reminder_find(ymd); if (i < 0) return;
+    memmove(&calendar_reminders[i], &calendar_reminders[i + 1],
+            (size_t)(calendar_reminder_count - i - 1) * sizeof calendar_reminders[0]);
+    calendar_reminder_count--; calendar_reminders_save();
+}
+
+static void calendar_move_days(int days) {
+    struct tm d = calendar_selected_tm(); d.tm_mday += days; d.tm_hour = 12;
+    calendar_selected_date = mktime(&d);
+}
+
+static void calendar_move_month(int months) {
+    struct tm d = calendar_selected_tm(); int wanted = d.tm_mday;
+    d.tm_mday = 1; d.tm_mon += months; d.tm_hour = 12; mktime(&d);
+    struct tm last = d; last.tm_mon += 1; last.tm_mday = 0; mktime(&last);
+    d.tm_mday = wanted > last.tm_mday ? last.tm_mday : wanted;
+    calendar_selected_date = mktime(&d);
+}
+
+static int calendar_widget_active(void) {
+    if (home_view_idx == HOME_VIEW_APPS) return app_widget_kind == APP_WIDGET_CALENDAR;
+    return home_widget_idx == HOME_WIDGET_CALENDAR || home_widget2_idx == HOME_WIDGET_CALENDAR;
+}
+
+static void calendar_reminder_check_today(void) {
+    if (calendar_reminder_popup || !calendar_widget_active()) return;
+    time_t now = time(NULL); struct tm today = *localtime(&now);
+    int ymd = calendar_ymd_from_tm(&today);
+    int i = calendar_reminder_find(ymd);
+    if (ymd != calendar_reminder_last_shown && i >= 0) {
+        int current_minute = today.tm_hour * 60 + today.tm_min;
+        if (calendar_reminders[i].minute_of_day < 0 ||
+            current_minute >= calendar_reminders[i].minute_of_day)
+            calendar_reminder_popup = 1;
+    }
+}
+
+static void calendar_reminder_dismiss(void) {
+    time_t now = time(NULL); struct tm today = *localtime(&now);
+    calendar_reminder_last_shown = calendar_ymd_from_tm(&today);
+    calendar_reminder_popup = 0;
+    calendar_reminders_save();
+}
+
+// The calculator keeps its working value while the app is open (and between
+// quick trips Home), just like a pocket calculator. X clears and Y backspaces.
+char calculator_display[40] = "0";
+double calculator_accumulator = 0.0;
+char calculator_pending_op = '\0';
+int calculator_new_entry = 1;
+int calculator_error = 0;
+int calculator_selected = 0;
+
+static void calculator_reset(void) {
+    snprintf(calculator_display, sizeof calculator_display, "0");
+    calculator_accumulator = 0.0;
+    calculator_pending_op = '\0';
+    calculator_new_entry = 1;
+    calculator_error = 0;
+}
+
+static void calculator_set_value(double value) {
+    if (!isfinite(value)) {
+        snprintf(calculator_display, sizeof calculator_display, "Error");
+        calculator_error = 1;
+        calculator_new_entry = 1;
+        return;
+    }
+    if (fabs(value) < 1e-12) value = 0.0;
+    snprintf(calculator_display, sizeof calculator_display, "%.10g", value);
+}
+
+static int calculator_apply_pending(double rhs) {
+    if (!calculator_pending_op) {
+        calculator_accumulator = rhs;
+        return 1;
+    }
+    switch (calculator_pending_op) {
+        case '+': calculator_accumulator += rhs; break;
+        case '-': calculator_accumulator -= rhs; break;
+        case '*': calculator_accumulator *= rhs; break;
+        case '/':
+            if (fabs(rhs) < 1e-12) {
+                snprintf(calculator_display, sizeof calculator_display, "Error");
+                calculator_error = 1;
+                calculator_pending_op = '\0';
+                calculator_new_entry = 1;
+                return 0;
+            }
+            calculator_accumulator /= rhs;
+            break;
+    }
+    calculator_set_value(calculator_accumulator);
+    return !calculator_error;
+}
+
+static void calculator_press(const char *key) {
+    if (!key || !key[0]) return;
+    if (calculator_error) calculator_reset();
+    if ((key[0] >= '0' && key[0] <= '9') || key[0] == '.') {
+        if (calculator_new_entry) {
+            snprintf(calculator_display, sizeof calculator_display, key[0] == '.' ? "0." : "%c", key[0]);
+            calculator_new_entry = 0;
+        } else if (key[0] == '.') {
+            if (!strchr(calculator_display, '.') && strlen(calculator_display) + 1 < sizeof calculator_display)
+                strcat(calculator_display, ".");
+        } else if (!(strcmp(calculator_display, "0") == 0 && key[0] == '0')) {
+            size_t n = strlen(calculator_display);
+            if (n + 1 < sizeof calculator_display) {
+                if (strcmp(calculator_display, "0") == 0) calculator_display[0] = '\0';
+                n = strlen(calculator_display);
+                calculator_display[n] = key[0]; calculator_display[n + 1] = '\0';
+            }
+        }
+        return;
+    }
+    double shown = strtod(calculator_display, NULL);
+    if (key[0] == '=') {
+        if (!calculator_new_entry || calculator_pending_op) calculator_apply_pending(shown);
+        calculator_pending_op = '\0';
+        calculator_new_entry = 1;
+        return;
+    }
+    if (key[0] == '+' || key[0] == '-' || key[0] == '*' || key[0] == '/') {
+        if (!calculator_new_entry || !calculator_pending_op) {
+            if (!calculator_apply_pending(shown)) return;
+        }
+        calculator_pending_op = key[0];
+        calculator_new_entry = 1;
+    }
+}
+
+static void calculator_backspace(void) {
+    if (calculator_error) { calculator_reset(); return; }
+    if (calculator_new_entry) return;
+    size_t n = strlen(calculator_display);
+    if (n <= 1 || (n == 2 && calculator_display[0] == '-')) {
+        snprintf(calculator_display, sizeof calculator_display, "0");
+        calculator_new_entry = 1;
+    } else calculator_display[n - 1] = '\0';
+}
 
 // A combined time/weather card is mutually exclusive with each of its
 // component cards. This helper is shared by settings, boot repair and the
@@ -1537,7 +1813,8 @@ static void ra_hotkeys_apply_to_cfg(const char *path) {
 // speed, and protected-button values; the user's general RetroArch settings
 // are merged from the shared profile below.
 //   on != 0 -> mute the game's own audio (radio/music plays over it instead)
-static void game_audio_mute(int on) {
+// aspect/rotation are resolved SNAP indices for the game about to launch.
+static void game_audio_mute(int on, int aspect, int rotation) {
     const char *path = "/userdata/system/knulli.conf";
     ra_hotkeys_load();
     if (access(ra_user_settings_path(), R_OK) != 0) ra_user_settings_capture();
@@ -1579,13 +1856,17 @@ static void game_audio_mute(int on) {
     // synchronous read/write was a noticeable part of the black loading gap.
     // Rebuild only when SNAP's values, its shared RA profiles, or knulli.conf
     // itself actually changed.
+    if (aspect < 0 || aspect > 4) aspect = 0;
+    if (rotation < 0 || rotation > 3) rotation = 0;
     static int cache_valid = 0, cache_on = -1, cache_ff = -1, cache_ff_mode = -1;
+    static int cache_aspect = -1, cache_rotation = -1;
     static long cache_user_mtime = -1, cache_hotkey_mtime = -1, cache_knulli_mtime = -1;
     long user_mtime = sn_path_mtime(ra_user_settings_path());
     long hotkey_mtime = sn_path_mtime(ra_hotkeys_state_path());
     long knulli_mtime = sn_path_mtime(path);
     if (cache_valid && cache_on == !!on && cache_ff == fast_forward_idx &&
-        cache_ff_mode == fast_forward_mode && cache_user_mtime == user_mtime &&
+        cache_ff_mode == fast_forward_mode && cache_aspect == aspect && cache_rotation == rotation &&
+        cache_user_mtime == user_mtime &&
         cache_hotkey_mtime == hotkey_mtime && cache_knulli_mtime == knulli_mtime)
         return;
     // Audio + speed are SNAP-owned. Hotkey values are user-owned but mirrored
@@ -1598,6 +1879,12 @@ static void game_audio_mute(int on) {
         "global.retroarch.input_joypad_driver",
         "global.retroarch.joypad_autoconfig_dir",
         "global.retroarch.config_save_on_exit",
+        "global.retroarch.aspect_ratio_index",
+        "global.retroarch.video_aspect_ratio",
+        "global.retroarch.video_aspect_ratio_auto",
+        "global.retroarch.video_scale_integer",
+        "global.retroarch.video_force_aspect",
+        "global.retroarch.video_rotation",
         NULL
     };
     static const char *LEGACY[] = {
@@ -1711,6 +1998,23 @@ static void game_audio_mute(int on) {
     if (ffv != 0) {
         fprintf(w, "global.retroarch.fastforward_frameskip=true\n");
     }
+
+    // Knulli launches games through configgen, so the desktop append-config
+    // file is never read on this device. Put the selected geometry into the
+    // source configgen actually consumes. Core Default deliberately leaves the
+    // aspect keys absent; every explicit choice is forced for predictable
+    // results across native 3:2 and 4:3 panels.
+    if (aspect != 0) {
+        static const int ra_index[5] = { 22, 0, 7, 1, 21 };
+        static const double ratio[5] = { 1.3333, 1.3333, 1.5, 1.7778, 1.3333 };
+        fprintf(w, "global.retroarch.aspect_ratio_index=%d\n", ra_index[aspect]);
+        fprintf(w, "global.retroarch.video_aspect_ratio=%.4f\n", ratio[aspect]);
+        fprintf(w, "global.retroarch.video_aspect_ratio_auto=false\n");
+        fprintf(w, "global.retroarch.video_scale_integer=%s\n", aspect == 4 ? "true" : "false");
+        fprintf(w, "global.retroarch.video_force_aspect=true\n");
+    }
+    if (rotation != 0)
+        fprintf(w, "global.retroarch.video_rotation=%d\n", rotation);
     if (fclose(w) != 0 || rename(tmp_path, path) != 0) {
         unlink(tmp_path);
         return;
@@ -1719,6 +2023,8 @@ static void game_audio_mute(int on) {
     cache_on = !!on;
     cache_ff = fast_forward_idx;
     cache_ff_mode = fast_forward_mode;
+    cache_aspect = aspect;
+    cache_rotation = rotation;
     cache_user_mtime = user_mtime;
     cache_hotkey_mtime = hotkey_mtime;
     cache_knulli_mtime = sn_path_mtime(path);
@@ -1845,7 +2151,7 @@ static void radio_poll(void) {
 }
 #else
 static void radio_stop(void) { radio_pid = 0; radio_now[0] = 0; radio_playing_idx = -1; }
-static void game_audio_mute(int on) { (void)on; }
+static void game_audio_mute(int on, int aspect, int rotation) { (void)on; (void)aspect; (void)rotation; }
 static void ra_user_settings_capture(void) {}
 static void ra_hotkeys_capture(void) {}
 static void ra_hotkeys_set_snap_fastforward(void) {}
@@ -2132,13 +2438,14 @@ static const struct TzEntry tz_list[] = {
 #define SETUP_WELCOME 0
 #define SETUP_NAME    1
 #define SETUP_DEVICE  2
-#define SETUP_TZ      3
-#define SETUP_CLOCK   4
-#define SETUP_WEATHER 5
-#define SETUP_ROMS    6
-#define SETUP_THEME   7
-#define SETUP_DONE    8
-#define SETUP_STEP_COUNT 9
+#define SETUP_HOTKEYS 3
+#define SETUP_TZ      4
+#define SETUP_CLOCK   5
+#define SETUP_WEATHER 6
+#define SETUP_ROMS    7
+#define SETUP_THEME   8
+#define SETUP_DONE    9
+#define SETUP_STEP_COUNT 10
 
 // Push tz_name into the C library (localtime/strftime) and, on the device,
 // into the OS so games and logs agree.
@@ -2750,6 +3057,83 @@ static long read_sysfs_long(const char *path) {
     return v;
 }
 
+typedef struct {
+    char health[24];
+    char status[24];
+    float volts;
+    float temp_c;
+} BatteryDetails;
+
+// The H700 battery exposes trustworthy health, cell voltage and temperature,
+// but no live discharge current/cycle count. Keep the widgets honest by using
+// only fields that are actually present instead of estimating time remaining.
+static void read_battery_details(BatteryDetails *out) {
+    static BatteryDetails cached;
+    static Uint32 last = 0;
+    Uint32 now = SDL_GetTicks();
+    if (last && now - last < 1500) { *out = cached; return; }
+    last = now;
+    memset(&cached, 0, sizeof cached);
+
+    DIR *d = opendir("/sys/class/power_supply");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            char path[320], type[32] = "";
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/type", e->d_name);
+            FILE *f = fopen(path, "r");
+            if (!f) continue;
+            (void)fgets(type, sizeof type, f); fclose(f);
+            if (strncmp(type, "Battery", 7) != 0) continue;
+
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/health", e->d_name);
+            f = fopen(path, "r");
+            if (f) { (void)fgets(cached.health, sizeof cached.health, f); fclose(f); }
+            cached.health[strcspn(cached.health, "\r\n")] = '\0';
+
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/status", e->d_name);
+            f = fopen(path, "r");
+            if (f) { (void)fgets(cached.status, sizeof cached.status, f); fclose(f); }
+            cached.status[strcspn(cached.status, "\r\n")] = '\0';
+
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/voltage_now", e->d_name);
+            long vr = read_sysfs_long(path);
+            if (vr > 100000) cached.volts = vr / 1000000.0f;
+            else if (vr > 100) cached.volts = vr / 1000.0f;
+
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/temp", e->d_name);
+            long tr = read_sysfs_long(path);
+            if (tr > 1000) cached.temp_c = tr / 1000.0f;
+            else if (tr > 100) cached.temp_c = tr / 10.0f; // power_supply temp is normally tenths C
+            else if (tr > 0) cached.temp_c = (float)tr;
+            break;
+        }
+        closedir(d);
+    }
+#ifndef SNAPOS_TARGET_KNULLI
+    if (!cached.health[0]) snprintf(cached.health, sizeof cached.health, "Good");
+    if (!cached.status[0]) snprintf(cached.status, sizeof cached.status, "Charging");
+    if (cached.volts <= 0) cached.volts = 4.20f;
+    if (cached.temp_c <= 0) cached.temp_c = 30.0f;
+#endif
+    *out = cached;
+}
+
+static void battery_details_text(char *out, size_t outsz, int charging) {
+    BatteryDetails d; read_battery_details(&d);
+    (void)charging; // charging is already shown by the live header battery glyph
+    const char *health = d.health[0] ? d.health : "Health unavailable";
+    if (d.volts > 0.1f && d.temp_c > 0.1f)
+        snprintf(out, outsz, "%s - %.2fV - %.0fC", health, d.volts, d.temp_c);
+    else if (d.volts > 0.1f)
+        snprintf(out, outsz, "%s - %.2fV", health, d.volts);
+    else if (d.temp_c > 0.1f)
+        snprintf(out, outsz, "%s - %.0fC", health, d.temp_c);
+    else
+        snprintf(out, outsz, "%s", health);
+}
+
 // Live charge telemetry for the performance overlay. Knulli exposes these as
 // mV/mA on the AXP2202; the normalization also accepts standard uV/uA sysfs.
 static void read_charge_telemetry(float *volts, float *watts, int *slow, int *at_max) {
@@ -3088,6 +3472,7 @@ AppState kb_return_state = STATE_SETTINGS;
 #define KB_PURPOSE_BG_SEARCH 14
 #define KB_PURPOSE_WALLHAVEN_KEY 15
 #define KB_PURPOSE_BG_RENAME 16
+#define KB_PURPOSE_CALENDAR_REMINDER 17
 int kb_purpose = KB_PURPOSE_API_KEY;
 
 // --- Scraper progress overlay (backgrounded scrape + polled status file) ---
@@ -3503,6 +3888,7 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_ART_ITEM 56       // row_extra = art type index
 #define ROW_DISP_FAVORITES_VIEW 57 // independent layout for the Favorites library
 #define ROW_DISP_GRP_WIDGETS 58
+#define ROW_DISP_APP_WIDGET 59
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
@@ -3523,9 +3909,10 @@ int favorites_view_idx = 0;
 #define APP_LINK       4
 #define APP_FLASHLIGHT 5
 #define APP_ACHIEVEMENTS 6
-#define APP_COUNT      7
+#define APP_CALCULATOR 7
+#define APP_COUNT      8
 const char *home_app_names[APP_COUNT] = {
-    "RetroArch", "Radio", "Music", "Mini Games", "Link Play", "Flashlight", "Achievements Book"
+    "RetroArch", "Radio", "Music", "Mini Games", "Link Play", "Flashlight", "Achievements Book", "Calculator"
 };
 int home_apps_mask = (1 << APP_COUNT) - 1;   // all visible
 
@@ -3693,7 +4080,10 @@ int build_display_rows(int *row_type, int *row_extra) {
         D_ADD(ROW_DISP_GREETING, 0);
         if (greeting_enabled) D_ADD(ROW_DISP_PLAYER_NAME, 0);
         D_ADD(ROW_DISP_GRP_WIDGETS, 0);
-        if (disp_grp_widgets_open) {
+        if (disp_grp_widgets_open && home_view_idx == HOME_VIEW_APPS) {
+            D_ADD(ROW_DISP_APP_WIDGET, 0);
+            if (app_widget_kind == APP_WIDGET_WEATHER) D_ADD(ROW_DISP_WEATHER_UNIT, 0);
+        } else if (disp_grp_widgets_open) {
             D_ADD(ROW_DISP_HOME_WIDGET, 0);
             D_ADD(ROW_DISP_HOME_WIDGET2, 0);
             int _wx_on = (home_widget_idx  == HOME_WIDGET_WEATHER || home_widget_idx  == HOME_WIDGET_DATEWX ||
@@ -3758,6 +4148,7 @@ int build_display_rows(int *row_type, int *row_extra) {
 
 Uint32 last_input_time = 0;
 int is_sleeping = 0;
+int auto_sleep_rest_active = 0; // timer-triggered deep rest (separate from lid sleep)
 int lid_closed = 0;          // clamshell state (RG34XX-SP): 0 open, 1 closed
 Uint32 lid_last_evt = 0;     // debounce for the polled hall sensor
 static int lid_evdev_fd = -1;       // raw controller event stream; survives SDL video handoff
@@ -4156,17 +4547,19 @@ int build_recent_list(int *recent_indices, int continue_idx) {
 #define ROW_H_QUICK_MINIGAMES 13
 #define ROW_H_QUICK_FAVORITES 14
 #define ROW_H_QUICK_ACHIEVEMENTS 15
+#define ROW_H_APP_WIDGET 16
+#define ROW_H_QUICK_CALCULATOR 17
 #define MAX_HOME_ROWS 24
 
-// App Focused keeps the Resume tile pinned, while these eleven launch tiles
+// App Focused keeps the Resume tile pinned, while these launch tiles
 // can be rearranged into persistent phone-style slots. Values are stable keys,
 // not row indices (row indices change when optional apps are hidden).
-#define HOME_ORDER_COUNT 12
-int home_tile_order[HOME_ORDER_COUNT] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+#define HOME_ORDER_COUNT 13
+int home_tile_order[HOME_ORDER_COUNT] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
 int home_grid_reorder = 0;
+int home_grid_dragging = 0;
 int home_grid_reorder_dirty = 0;
 int home_tile_order_backup[HOME_ORDER_COUNT];
-Uint32 home_reorder_x_down_at = 0;
 
 static int home_tile_key(int row_type) {
     switch (row_type) {
@@ -4182,6 +4575,7 @@ static int home_tile_key(int row_type) {
         case ROW_H_QUICK_FLASHLIGHT:return 9;
         case ROW_H_SURPRISE:        return 10;
         case ROW_H_QUICK_ACHIEVEMENTS:return 11;
+        case ROW_H_QUICK_CALCULATOR:return 12;
         default:                    return -1; // Resume/Welcome are pinned
     }
 }
@@ -4228,6 +4622,10 @@ int build_home_rows(int *row_type, int *row_extra, int *recent_indices, int *rec
     if (home_apps_mask & (1 << APP_LINK))      { row_type[idx] = ROW_H_QUICK_LINK;      row_extra[idx] = 0; idx++; }
     if (home_apps_mask & (1 << APP_FLASHLIGHT)) { row_type[idx] = ROW_H_QUICK_FLASHLIGHT; row_extra[idx] = 0; idx++; }  // bottom of APPS
     if (home_apps_mask & (1 << APP_ACHIEVEMENTS)) { row_type[idx] = ROW_H_QUICK_ACHIEVEMENTS; row_extra[idx] = 0; idx++; }
+    if (home_apps_mask & (1 << APP_CALCULATOR)) { row_type[idx] = ROW_H_QUICK_CALCULATOR; row_extra[idx] = 0; idx++; }
+    if (home_view_idx == HOME_VIEW_APPS && app_widget_kind != APP_WIDGET_NONE) {
+        row_type[idx] = ROW_H_APP_WIDGET; row_extra[idx] = app_widget_kind; idx++;
+    }
 
     (void)recent_indices;
     *recent_count_out = 0;   // Recently Played removed from the home list for now
@@ -4274,6 +4672,7 @@ char* settings_path() {
 void load_settings() {
     FILE *f = fopen(settings_path(), "r");
     if (!f) return;
+    int home_apps_schema_loaded = 0;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         char *eq = strchr(line, '=');
@@ -4318,7 +4717,10 @@ void load_settings() {
         else if (strcmp(key, "carousel_titles_on") == 0) carousel_titles_on = val;
         else if (strcmp(key, "home_widget_idx") == 0) home_widget_idx = (val >= 0 && val < HOME_WIDGET_COUNT) ? val : 1;
         else if (strcmp(key, "home_widget2_idx") == 0) home_widget2_idx = (val >= 0 && val < HOME_WIDGET_COUNT) ? val : 0;
+        else if (strcmp(key, "app_widget_kind") == 0) app_widget_kind = (val >= 0 && val < APP_WIDGET_COUNT) ? val : 0;
+        else if (strcmp(key, "app_widget_slot") == 0) app_widget_slot = val >= 0 ? val : 0;
         else if (strcmp(key, "home_apps_mask") == 0) home_apps_mask = val & ((1 << APP_COUNT) - 1);
+        else if (strcmp(key, "home_apps_schema") == 0) home_apps_schema_loaded = val >= 2;
         else if (strncmp(key, "home_tile_order_", 16) == 0) {
             int oi = atoi(key + 16);
             if (oi >= 0 && oi < HOME_ORDER_COUNT) home_tile_order[oi] = val;
@@ -4430,6 +4832,9 @@ void load_settings() {
     // existing user expects after upgrading.
     if (!menu_gesture_loaded)
         menu_triple_action = hk_flashlight_on ? MENU_ACT_FLASHLIGHT : MENU_ACT_NONE;
+    // Version 2 adds Calculator. Give it to existing installs exactly once;
+    // after the migrated file is saved, a user's explicit Hidden choice wins.
+    if (!home_apps_schema_loaded) home_apps_mask |= (1 << APP_CALCULATOR);
     normalize_home_tile_order();
     display_art_saved_idx = display_art_idx;
 }
@@ -4473,7 +4878,10 @@ void save_settings() {
     fprintf(f, "carousel_titles_on=%d\n", carousel_titles_on);
     fprintf(f, "home_widget_idx=%d\n", home_widget_idx);
     fprintf(f, "home_widget2_idx=%d\n", home_widget2_idx);
+    fprintf(f, "app_widget_kind=%d\n", app_widget_kind);
+    fprintf(f, "app_widget_slot=%d\n", app_widget_slot);
     fprintf(f, "home_apps_mask=%d\n", home_apps_mask);
+    fprintf(f, "home_apps_schema=2\n");
     for (int i = 0; i < HOME_ORDER_COUNT; i++)
         fprintf(f, "home_tile_order_%d=%d\n", i, home_tile_order[i]);
     fprintf(f, "hk_flashlight_btn=%d\n", hk_flashlight_btn);
@@ -4570,6 +4978,21 @@ void cpu_apply_pref(void) {
     if (power_save_mode)   cpu_set_governor("conservative");
     else if (cpu_perf_mode) cpu_set_governor("performance");
     else                    cpu_set_governor("ondemand");
+}
+
+// Python configgen is CPU- and metadata-heavy but runs for only a few seconds.
+// Give that handoff full clock speed, then immediately return to the user's
+// governor. Power Save is never overridden; persistent Performance already has
+// the desired governor and therefore needs no temporary state.
+static void cpu_launch_boost_start(void) {
+    if (power_save_mode || cpu_perf_mode || launch_cpu_boost_active) return;
+    cpu_set_governor("performance");
+    launch_cpu_boost_active = 1;
+}
+static void cpu_launch_boost_stop(void) {
+    if (!launch_cpu_boost_active) return;
+    launch_cpu_boost_active = 0;
+    cpu_apply_pref();
 }
 
 // Exact RG34XX-SP panel curve. Absolute 1 is the lowest visible panel level;
@@ -4740,7 +5163,10 @@ static void brightness_guard_tick(void) {
     // Once the three post-RetroArch writes are complete, the external hotkey
     // helper owns changes directly. Do no filesystem polling during gameplay.
     if (brightness_guard_emulator_ready && brightness_guard_ready_pulses >= 3) return;
-    if (!brightness_guard_emulator_ready && now - brightness_guard_started > 26000) return;
+    if (!brightness_guard_emulator_ready && now - brightness_guard_started > 26000) {
+        cpu_launch_boost_stop();
+        return;
+    }
     if (brightness_guard_last_poll && now - brightness_guard_last_poll < 150) return;
     brightness_guard_last_poll = now;
     int desired = brightness_guard_desired_pct();
@@ -4753,6 +5179,7 @@ static void brightness_guard_tick(void) {
 
     if (!brightness_guard_emulator_ready && emulator_video_process_ready()) {
         brightness_guard_emulator_ready = 1;
+        cpu_launch_boost_stop();
         brightness_guard_ready_at = now;
         brightness_guard_ready_pulses = 0;
         // One tmpfs-only timing marker per launch. Combined with the launch
@@ -5512,12 +5939,355 @@ static int home_widget_stats_height(void) {
     return pad + hdr_h + 8 + body * line_h + hint + pad - 6;
 }
 
+static int home_widget_recent_height(void) {
+    int idx[4] = {0};
+    int n = recent_activity_indices(1, 3, idx);
+    int line_h = TTF_FontHeight(font_label) + 4;
+    int row_h = line_h + 5;
+    int hth = TTF_FontHeight(font_small_bold);
+    int hint_h = TTF_FontHeight(font_label);
+    return hth + 10 + (n > 0 ? n * row_h : line_h + 5) + hint_h + 4;
+}
+
+// Filled by draw_home_widget() so the L/R navigation labels line up with the
+// first visible line of each actual card, including bottom-anchored widgets.
+static int home_widget_draw_top[2] = { 0, 0 };
+
+// These drawing primitives are defined later with the rest of the common UI
+// helpers; declare them here for the Calendar/Calculator app renderers.
+void fill_rounded(SDL_Renderer *ren, SDL_Rect rc, int rad,
+                  Uint8 r, Uint8 g, Uint8 b, Uint8 a);
+void draw_dock_logo(SDL_Renderer *ren, TTF_Font *font);
+
+static struct tm calendar_week_start_now(void) {
+    time_t now = time(NULL);
+    struct tm start = *localtime(&now);
+    start.tm_hour = 12; start.tm_min = 0; start.tm_sec = 0;
+    start.tm_mday -= start.tm_wday;  // Sunday-first, matching the full calendar
+    mktime(&start);
+    return start;
+}
+
+static void calendar_week_range(char *out, size_t cap) {
+    struct tm first = calendar_week_start_now(), last = first;
+    last.tm_mday += 6; mktime(&last);
+    char a[32], b[32];
+    strftime(a, sizeof a, "%b %-d", &first);
+    strftime(b, sizeof b, first.tm_year == last.tm_year ? "%b %-d, %Y" : "%b %-d, %Y", &last);
+    snprintf(out, cap, "%s - %s", a, b);
+}
+
+static void calendar_week_range_short(char *out, size_t cap) {
+    struct tm first = calendar_week_start_now(), last = first;
+    last.tm_mday += 6; mktime(&last);
+    char a[20], b[20];
+    strftime(a, sizeof a, "%b %-d", &first);
+    strftime(b, sizeof b, "%b %-d", &last);
+    snprintf(out, cap, "%s - %s", a, b);
+}
+
+static void draw_calendar_week_strip(SDL_Renderer *ren, Theme *th,
+                                     int x, int y, int w, int h) {
+    if (w < 70 || h < 30) return;
+    static const char *days[7] = { "S", "M", "T", "W", "T", "F", "S" };
+    struct tm first = calendar_week_start_now();
+    time_t now = time(NULL); struct tm today = *localtime(&now);
+    int cell_w = w / 7;
+    int day_h = TTF_FontHeight(font_label);
+    TTF_Font *number_font = font_small_bold ? font_small_bold : font_small;
+    int num_h = TTF_FontHeight(number_font);
+    if (day_h + num_h + 6 > h) {
+        number_font = font_label_bold ? font_label_bold : font_label;
+        num_h = TTF_FontHeight(number_font);
+    }
+    int number_y = y + day_h + 3;
+    for (int i = 0; i < 7; i++) {
+        struct tm d = first; d.tm_mday += i; mktime(&d);
+        int cx = x + i * cell_w;
+        int is_today = d.tm_year == today.tm_year && d.tm_yday == today.tm_yday;
+        if (is_today) {
+            SDL_Rect hi = { cx + 2, y - 3, cell_w - 4, h > day_h + num_h + 8 ? day_h + num_h + 8 : h };
+            fill_rounded(ren, hi, 8, th->accent2.r, th->accent2.g, th->accent2.b, 225);
+        }
+        SDL_Color dc = is_today ? th->bg : g_ui_dim;
+        SDL_Color nc = is_today ? th->bg : g_ui_text;
+        SDL_Texture *dt = render_text_fit(ren, font_label, days[i], dc, cell_w - 4);
+        int dw, dh; SDL_QueryTexture(dt, NULL, NULL, &dw, &dh);
+        SDL_RenderCopy(ren, dt, NULL, &(SDL_Rect){ cx + (cell_w - dw) / 2, y, dw, dh });
+        char number[8]; snprintf(number, sizeof number, "%d", d.tm_mday);
+        SDL_Texture *nt = render_text(ren, number_font, number, nc);
+        int nw, nh; SDL_QueryTexture(nt, NULL, NULL, &nw, &nh);
+        if (number_y + nh <= y + h)
+            SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ cx + (cell_w - nw) / 2, number_y, nw, nh });
+        if (calendar_reminder_find(calendar_ymd_from_tm(&d)) >= 0 && y + h - 5 > number_y) {
+            SDL_Color dot = is_today ? th->bg : th->accent2;
+            fill_rounded(ren, (SDL_Rect){ cx + cell_w / 2 - 2, y + h - 5, 5, 5 }, 2,
+                         dot.r, dot.g, dot.b, 255);
+        }
+    }
+}
+
+static void draw_calendar_app(SDL_Renderer *ren, Theme *th) {
+    draw_dock_logo(ren, font_small);
+    time_t now = time(NULL); struct tm today = *localtime(&now);
+    struct tm selected = calendar_selected_tm(), shown = selected;
+    shown.tm_hour = 12; shown.tm_min = 0; shown.tm_sec = 0; shown.tm_mday = 1; mktime(&shown);
+    struct tm last = shown; last.tm_mon += 1; last.tm_mday = 0; mktime(&last);
+
+    SDL_Texture *title = render_text(ren, font_small_bold, "CALENDAR", th->accent2);
+    int tw, thh; SDL_QueryTexture(title, NULL, NULL, &tw, &thh);
+    SDL_RenderCopy(ren, title, NULL, &(SDL_Rect){ 36, 67, tw, thh });
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+    SDL_RenderFillRect(ren, &(SDL_Rect){ 36, 67 + thh + 2, tw + 12, 2 });
+
+    char month[48]; strftime(month, sizeof month, "%B %Y", &shown);
+    SDL_Texture *mt = render_text(ren, font_big, month, g_ui_text);
+    int mw, mh; SDL_QueryTexture(mt, NULL, NULL, &mw, &mh);
+    SDL_RenderCopy(ren, mt, NULL, &(SDL_Rect){ WIN_W - 36 - mw, 62, mw, mh });
+
+    const int gx = 36, gy = 122, gw = WIN_W - 72, gh = WIN_H - gy - 86;
+    const int cell_w = gw / 7, head_h = 29, cell_h = (gh - head_h) / 6;
+    static const char *wd[7] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+    for (int c = 0; c < 7; c++) {
+        SDL_Color wc = (c == 0 || c == 6) ? th->accent2 : g_ui_dim;
+        SDL_Texture *wtx = render_text_fit(ren, font_label_bold ? font_label_bold : font_label, wd[c], wc, cell_w - 8);
+        int ww, wh; SDL_QueryTexture(wtx, NULL, NULL, &ww, &wh);
+        SDL_RenderCopy(ren, wtx, NULL, &(SDL_Rect){ gx + c * cell_w + (cell_w - ww) / 2, gy + (head_h - wh) / 2, ww, wh });
+    }
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 120);
+    SDL_RenderDrawLine(ren, gx, gy + head_h, gx + gw, gy + head_h);
+    for (int r = 0; r <= 6; r++) {
+        int yy = gy + head_h + r * cell_h;
+        SDL_SetRenderDrawColor(ren, th->dim.r, th->dim.g, th->dim.b, 80);
+        SDL_RenderDrawLine(ren, gx, yy, gx + gw, yy);
+    }
+    for (int c = 0; c <= 7; c++) {
+        int xx = gx + c * cell_w;
+        SDL_SetRenderDrawColor(ren, th->dim.r, th->dim.g, th->dim.b, 65);
+        SDL_RenderDrawLine(ren, xx, gy + head_h, xx, gy + gh);
+    }
+    for (int d = 1; d <= last.tm_mday; d++) {
+        int pos = shown.tm_wday + d - 1, row = pos / 7, col = pos % 7;
+        int cx = gx + col * cell_w, cy = gy + head_h + row * cell_h;
+        int is_today = shown.tm_year == today.tm_year && shown.tm_mon == today.tm_mon && d == today.tm_mday;
+        int is_selected = d == selected.tm_mday;
+        SDL_Rect date_chip = { cx + 6, cy + 4, 36, 28 };
+        if (is_selected) fill_rounded(ren, date_chip, 9,
+                                      th->accent2.r, th->accent2.g, th->accent2.b, 235);
+        else if (is_today) {
+            SDL_SetRenderDrawColor(ren, th->accent3.r, th->accent3.g, th->accent3.b, 255);
+            SDL_RenderDrawRect(ren, &date_chip);
+        }
+        char ds[8]; snprintf(ds, sizeof ds, "%d", d);
+        SDL_Texture *dt = render_text(ren, font_small_bold ? font_small_bold : font_small, ds,
+                                      is_selected ? th->bg : g_ui_text);
+        int dw, dh; SDL_QueryTexture(dt, NULL, NULL, &dw, &dh);
+        SDL_RenderCopy(ren, dt, NULL, &(SDL_Rect){ cx + 13, cy + 7, dw, dh });
+        struct tm cell = shown; cell.tm_mday = d; mktime(&cell);
+        if (calendar_reminder_find(calendar_ymd_from_tm(&cell)) >= 0) {
+            SDL_Color dot = is_selected ? th->bg : th->accent2;
+            fill_rounded(ren, (SDL_Rect){ cx + cell_w - 13, cy + cell_h - 11, 6, 6 }, 3,
+                         dot.r, dot.g, dot.b, 255);
+        }
+    }
+
+    int sy = gy + gh + 7;
+    // Keep the selected date compact so the reminder itself always has useful
+    // room on the 640px-wide handheld display.
+    char selected_label[64]; strftime(selected_label, sizeof selected_label, "%a, %b %d", &selected);
+    char *zero = strrchr(selected_label, ' ');
+    if (zero && zero[1] == '0') memmove(zero + 1, zero + 2, strlen(zero + 2) + 1);
+    SDL_Texture *sl = render_text_fit(ren, font_label_bold ? font_label_bold : font_label,
+                                      selected_label, th->accent2, 145);
+    int sw, sh; SDL_QueryTexture(sl, NULL, NULL, &sw, &sh);
+    SDL_RenderCopy(ren, sl, NULL, &(SDL_Rect){ gx, sy, sw, sh });
+    int reminder_i = calendar_reminder_find(calendar_ymd_from_tm(&selected));
+    char reminder_display[240];
+    if (reminder_i >= 0) {
+        char at[24]; calendar_format_time(calendar_reminders[reminder_i].minute_of_day, at, sizeof at);
+        snprintf(reminder_display, sizeof reminder_display, "%s - %s", at, calendar_reminders[reminder_i].text);
+    } else snprintf(reminder_display, sizeof reminder_display, "No reminder - press A to add one");
+    const char *reminder = reminder_display;
+    SDL_Texture *rem = render_text_fit(ren, font_label, reminder,
+                                       reminder_i >= 0 ? g_ui_text : g_ui_dim, gw - sw - 18);
+    int rw, rh; SDL_QueryTexture(rem, NULL, NULL, &rw, &rh);
+    SDL_RenderCopy(ren, rem, NULL, &(SDL_Rect){ gx + sw + 18, sy + (sh - rh) / 2, rw, rh });
+
+    SDL_Texture *hint = render_text_fit(ren, font_label,
+        "D-Pad Day   L1/R1 Month   A Add   X Delete   B Back", g_ui_dim, WIN_W - 72);
+    int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
+    SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ 36, WIN_H - hh - 10, hw, hh });
+
+    if (calendar_reminder_time_picker) {
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
+        SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+        int bw = WIN_W - 130, bh = 230, bx = (WIN_W - bw) / 2, by = (WIN_H - bh) / 2;
+        fill_rounded(ren, (SDL_Rect){ bx, by, bw, bh }, 14, th->bg.r, th->bg.g, th->bg.b, 255);
+        SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+        SDL_RenderDrawRect(ren, &(SDL_Rect){ bx, by, bw, bh });
+        SDL_Texture *pt = render_text(ren, font_small_bold, "REMINDER TIME", th->accent2);
+        int ptw, pth; SDL_QueryTexture(pt, NULL, NULL, &ptw, &pth);
+        SDL_RenderCopy(ren, pt, NULL, &(SDL_Rect){ bx + 22, by + 18, ptw, pth });
+        SDL_Texture *pm = render_text_fit(ren, font_label, calendar_reminder_pending_text, g_ui_dim, bw - 44);
+        int pmw, pmh; SDL_QueryTexture(pm, NULL, NULL, &pmw, &pmh);
+        SDL_RenderCopy(ren, pm, NULL, &(SDL_Rect){ bx + 22, by + 50, pmw, pmh });
+
+        char at[24]; calendar_format_time(calendar_reminder_edit_minutes, at, sizeof at);
+        const char *choice[2] = { "All Day", at };
+        for (int row = 0; row < 2; row++) {
+            int ry = by + 82 + row * 44;
+            int active = calendar_reminder_time_choice == row;
+            if (active) fill_rounded(ren, (SDL_Rect){ bx + 20, ry, bw - 40, 36 }, 8,
+                                     th->accent2.r, th->accent2.g, th->accent2.b, 235);
+            SDL_Texture *rt = render_text(ren, font_label, choice[row], active ? th->bg : g_ui_text);
+            int rtw, rth; SDL_QueryTexture(rt, NULL, NULL, &rtw, &rth);
+            SDL_RenderCopy(ren, rt, NULL, &(SDL_Rect){ bx + 34, ry + (36 - rth) / 2, rtw, rth });
+        }
+        SDL_Texture *pi1 = render_text_fit(ren, font_label,
+            "Up/Down Choose   Left/Right 5 min", g_ui_dim, bw - 44);
+        int pi1w, pi1h; SDL_QueryTexture(pi1, NULL, NULL, &pi1w, &pi1h);
+        SDL_RenderCopy(ren, pi1, NULL, &(SDL_Rect){ bx + 22, by + bh - 52, pi1w, pi1h });
+        SDL_Texture *pi2 = render_text_fit(ren, font_label,
+            "L1/R1 Hour   A Save   B Cancel", th->accent2, bw - 44);
+        int pi2w, pi2h; SDL_QueryTexture(pi2, NULL, NULL, &pi2w, &pi2h);
+        SDL_RenderCopy(ren, pi2, NULL, &(SDL_Rect){ bx + 22, by + bh - 27, pi2w, pi2h });
+    } else if (calendar_reminder_delete_confirm) {
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
+        SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+        int bw = WIN_W - 150, bh = 142, bx = (WIN_W - bw) / 2, by = (WIN_H - bh) / 2;
+        fill_rounded(ren, (SDL_Rect){ bx, by, bw, bh }, 14, th->bg.r, th->bg.g, th->bg.b, 255);
+        SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+        SDL_RenderDrawRect(ren, &(SDL_Rect){ bx, by, bw, bh });
+        SDL_Texture *ct = render_text_fit(ren, font_small_bold, "REMOVE THIS REMINDER?", g_ui_text, bw - 40);
+        int cw, ch; SDL_QueryTexture(ct, NULL, NULL, &cw, &ch);
+        SDL_RenderCopy(ren, ct, NULL, &(SDL_Rect){ bx + 20, by + 22, cw, ch });
+        SDL_Texture *cr = render_text_fit(ren, font_label, reminder, g_ui_dim, bw - 40);
+        int crw, crh; SDL_QueryTexture(cr, NULL, NULL, &crw, &crh);
+        SDL_RenderCopy(ren, cr, NULL, &(SDL_Rect){ bx + 20, by + 55, crw, crh });
+        SDL_Texture *ci = render_text(ren, font_label, "A  Remove       B  Cancel", th->accent2);
+        int ciw, cih; SDL_QueryTexture(ci, NULL, NULL, &ciw, &cih);
+        SDL_RenderCopy(ren, ci, NULL, &(SDL_Rect){ bx + 20, by + bh - cih - 17, ciw, cih });
+    }
+}
+
+static void draw_calendar_reminder_popup(SDL_Renderer *ren, Theme *th) {
+    if (!calendar_reminder_popup) return;
+    time_t now = time(NULL); struct tm today = *localtime(&now);
+    int i = calendar_reminder_find(calendar_ymd_from_tm(&today));
+    if (i < 0) { calendar_reminder_popup = 0; return; }
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
+    SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+    int bw = WIN_W - 130, bh = 178, bx = (WIN_W - bw) / 2, by = (WIN_H - bh) / 2;
+    fill_rounded(ren, (SDL_Rect){ bx, by, bw, bh }, 16, th->bg.r, th->bg.g, th->bg.b, 255);
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+    SDL_RenderDrawRect(ren, &(SDL_Rect){ bx, by, bw, bh });
+    SDL_Texture *title = render_text(ren, font_small_bold, "TODAY'S REMINDER", th->accent2);
+    int tw, thh; SDL_QueryTexture(title, NULL, NULL, &tw, &thh);
+    SDL_RenderCopy(ren, title, NULL, &(SDL_Rect){ bx + 22, by + 20, tw, thh });
+    char day[64], at[24], date[96]; strftime(day, sizeof day, "%A, %B %-d", &today);
+    calendar_format_time(calendar_reminders[i].minute_of_day, at, sizeof at);
+    snprintf(date, sizeof date, "%s - %s", day, at);
+    SDL_Texture *dt = render_text_fit(ren, font_label, date, g_ui_dim, bw - 44);
+    int dw, dh; SDL_QueryTexture(dt, NULL, NULL, &dw, &dh);
+    SDL_RenderCopy(ren, dt, NULL, &(SDL_Rect){ bx + 22, by + 22 + thh, dw, dh });
+    SDL_Texture *msg = render_text_fit(ren, font_small, calendar_reminders[i].text, g_ui_text, bw - 44);
+    int mw, mh; SDL_QueryTexture(msg, NULL, NULL, &mw, &mh);
+    SDL_RenderCopy(ren, msg, NULL, &(SDL_Rect){ bx + 22, by + 76, mw, mh });
+    SDL_Texture *hint = render_text(ren, font_label, "A / B  Dismiss", th->accent2);
+    int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
+    SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ bx + 22, by + bh - hh - 18, hw, hh });
+}
+
+static void draw_calculator_app(SDL_Renderer *ren, Theme *th) {
+    static const char *keys[16] = {
+        "7", "8", "9", "/", "4", "5", "6", "x",
+        "1", "2", "3", "-", "0", ".", "+", "="
+    };
+    draw_dock_logo(ren, font_small);
+    int panel_w = WIN_W > 680 ? 430 : WIN_W - 100;
+    int px = (WIN_W - panel_w) / 2, py = 64, display_h = 70;
+    SDL_Texture *title = render_text(ren, font_small_bold, "CALCULATOR", th->accent2);
+    int tw, thh; SDL_QueryTexture(title, NULL, NULL, &tw, &thh);
+    SDL_RenderCopy(ren, title, NULL, &(SDL_Rect){ px, py, tw, thh });
+    py += thh + 10;
+    SDL_Rect display = { px, py, panel_w, display_h };
+    fill_rounded(ren, display, 12, th->select_bg.r, th->select_bg.g, th->select_bg.b, 230);
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 190);
+    SDL_RenderDrawRect(ren, &display);
+    SDL_Texture *value = render_text_fit(ren, font_big, calculator_display, g_ui_text, panel_w - 28);
+    int vw, vh; SDL_QueryTexture(value, NULL, NULL, &vw, &vh);
+    SDL_RenderCopy(ren, value, NULL, &(SDL_Rect){ px + panel_w - vw - 14, py + (display_h - vh) / 2, vw, vh });
+
+    py += display_h + 11;
+    int gap = 8, key_w = (panel_w - 3 * gap) / 4;
+    int footer_h = TTF_FontHeight(font_label) + 18;
+    int key_h = (WIN_H - py - footer_h - 3 * gap - 12) / 4;
+    for (int i = 0; i < 16; i++) {
+        int r = i / 4, c = i % 4;
+        SDL_Rect kb = { px + c * (key_w + gap), py + r * (key_h + gap), key_w, key_h };
+        int sel = i == calculator_selected;
+        SDL_Color base = (c == 3 || i == 14) ? th->accent2 : th->select_bg;
+        fill_rounded(ren, kb, 10, base.r, base.g, base.b, sel ? 245 : 190);
+        if (sel) {
+            SDL_SetRenderDrawColor(ren, g_ui_text.r, g_ui_text.g, g_ui_text.b, 255);
+            SDL_RenderDrawRect(ren, &kb);
+        }
+        SDL_Texture *kt = render_text(ren, font_small_bold ? font_small_bold : font_small, keys[i],
+                                      (c == 3 || i == 14) ? th->bg : g_ui_text);
+        int kw, kh; SDL_QueryTexture(kt, NULL, NULL, &kw, &kh);
+        SDL_RenderCopy(ren, kt, NULL, &(SDL_Rect){ kb.x + (kb.w - kw) / 2, kb.y + (kb.h - kh) / 2, kw, kh });
+    }
+    SDL_Texture *hint = render_text_fit(ren, font_label,
+        "D-Pad  Choose     A  Press     X  Clear     Y  Delete     B  Back", g_ui_dim, WIN_W - 40);
+    int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
+    SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ (WIN_W - hw) / 2, WIN_H - hh - 7, hw, hh });
+}
+
 static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
                              int region_top, int region_bot, int wmaxw,
                              int anchor_bottom) {
+    home_widget_draw_top[anchor_bottom ? 1 : 0] = region_top;
     if (kind == HOME_WIDGET_NONE) return;
     if (region_bot - region_top < 28) return;
     Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+
+    // ---------------- Calendar: a useful current-week glance --------------
+    // The widget itself never browses or remembers another date. A opens the
+    // full calendar, whose browsing position also resets whenever it closes.
+    if (kind == HOME_WIDGET_CALENDAR) {
+        int slot = anchor_bottom ? 2 : 1;
+        int focused = home_recent_focus_slot == slot;
+        int header_h = TTF_FontHeight(font_small_bold) + 10;
+        int range_h = TTF_FontHeight(font_label) + 4;
+        int strip_h = TTF_FontHeight(font_label) + TTF_FontHeight(font_small_bold ? font_small_bold : font_small) + 11;
+        int hint_h = TTF_FontHeight(font_label);
+        int total = header_h + range_h + strip_h + hint_h + 5;
+        int wy = anchor_bottom ? region_bot - total : region_top;
+        if (wy < region_top) wy = region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
+
+        SDL_Texture *ht = render_text(ren, font_small_bold, "THIS WEEK", th->accent2);
+        int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
+        SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ wx, wy, hw, hh });
+        SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+        SDL_RenderFillRect(ren, &(SDL_Rect){ wx, wy + hh + 2, hw + 10, 2 });
+        wy += header_h;
+
+        char range[72]; calendar_week_range(range, sizeof range);
+        SDL_Texture *rt = render_text_fit(ren, font_label, range, g_ui_dim, wmaxw);
+        int rw, rh; SDL_QueryTexture(rt, NULL, NULL, &rw, &rh);
+        SDL_RenderCopy(ren, rt, NULL, &(SDL_Rect){ wx, wy, rw, rh });
+        wy += range_h;
+        draw_calendar_week_strip(ren, th, wx, wy, wmaxw, strip_h);
+        wy += strip_h;
+
+        SDL_Texture *hint = render_text_fit(ren, font_label,
+            focused ? "A  Open Calendar     B  Back" : "Right  Focus",
+            focused ? th->accent2 : g_ui_dim, wmaxw);
+        int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
+        if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
+        return;
+    }
 
     // ---------------- Recently Played: games 2-4, launchable in-place ------
     if (kind == HOME_WIDGET_RECENT) {
@@ -5528,10 +6298,10 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         int line_h = TTF_FontHeight(font_label) + 4;
         int row_h = line_h + 5;
         int hth = TTF_FontHeight(font_small_bold);
-        int hint_h = TTF_FontHeight(font_label);
-        int total = hth + 10 + (n > 0 ? n * row_h : line_h + 5) + hint_h + 4;
+        int total = home_widget_recent_height();
         int wy = anchor_bottom ? region_bot - total : region_top;
         if (wy < region_top) wy = region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
 
         SDL_Texture *ht = render_text(ren, font_small_bold, "RECENTLY PLAYED", th->accent2);
         int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
@@ -5588,6 +6358,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         int card_h = home_widget_stats_height();
         if (card_h > region_bot - region_top) card_h = region_bot - region_top;
         int card_y = anchor_bottom ? (region_bot - card_h) : region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = card_y;
 
         SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 90);
         SDL_RenderFillRect(ren, &(SDL_Rect){ card_x, card_y, card_w, card_h });
@@ -5638,6 +6409,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         int total = (hth + 10) + (nameh + 6) + (box + 4) + hinth;
         int wy = anchor_bottom ? (region_bot - total) : region_top;
         if (wy < region_top) wy = region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
 
         SDL_Texture *ht = render_text(ren, font_small_bold, "MUSIC PLAYER", th->accent2);
         int hw, hh2; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh2);
@@ -5687,6 +6459,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         int total = (hth + 10) + (dialh + 10) + (nameh + 4) + hinth;
         int wy = anchor_bottom ? (region_bot - total) : region_top;
         if (wy < region_top) wy = region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
 
         SDL_Texture *ht = render_text(ren, font_small_bold, "RADIO TUNER", th->accent2);
         int hw, hh2; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh2);
@@ -5746,7 +6519,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         if (wy + sh <= region_bot) SDL_RenderCopy(ren, snt, NULL, &(SDL_Rect){ wx, wy, sw, sh });
         wy += nameh + 4;
 
-        SDL_Texture *hint = render_text_fit(ren, font_label, "L1 Previous   Sel Play/Stop", g_ui_dim, wmaxw);
+        SDL_Texture *hint = render_text_fit(ren, font_label, "<L1 L2>   Sel. Play/Stop", g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
         return;
@@ -5765,6 +6538,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         int total = (hth + 10) + (art_side > 24 ? art_side + 8 : 0) + (nameh + 4) + (subh + 4) + hinth;
         int wy = anchor_bottom ? (region_bot - total) : region_top;
         if (wy < region_top) wy = region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
 
         SDL_Texture *ht = render_text(ren, font_small_bold, "NOW PLAYING", th->accent2);
         int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
@@ -5871,6 +6645,13 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
             } else snprintf(wbig, sizeof(wbig), "%s", g_weather_str);
         } else { snprintf(wbig, sizeof(wbig), "--"); snprintf(wsub, sizeof(wsub), "fetching..."); }
         weather_kick(0);
+    } else if (kind == HOME_WIDGET_BATTERY) {
+        int pct = -1, charging = 0;
+        snprintf(whdr, sizeof(whdr), "BATTERY HEALTH");
+        read_battery(&pct, &charging);
+        if (pct >= 0) snprintf(wbig, sizeof(wbig), "%d%%", pct);
+        else snprintf(wbig, sizeof(wbig), "--");
+        battery_details_text(wsub, sizeof wsub, charging);
     }
 
     int wicon = (kind == HOME_WIDGET_WEATHER && g_weather_str[0])
@@ -5879,7 +6660,8 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         wicon = WX_CLEARNIGHT;
         if (strncasecmp(wsub, "Sunny", 5) == 0) snprintf(wsub, sizeof(wsub), "Clear");
     }
-    int use_big = (kind == HOME_WIDGET_CLOCK || kind == HOME_WIDGET_DATE || kind == HOME_WIDGET_DATEWX);
+    int use_big = (kind == HOME_WIDGET_CLOCK || kind == HOME_WIDGET_DATE || kind == HOME_WIDGET_DATEWX ||
+                   kind == HOME_WIDGET_BATTERY);
 
     // measure so slot 2 can bottom-anchor (render_text_fit keeps everything to
     // one line, so font heights give the exact layout height)
@@ -5899,6 +6681,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
 
     int wy   = anchor_bottom ? (region_bot - total_h) : region_top;
     if (wy < region_top) wy = region_top;
+    home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
     int wbot = region_bot;
 
     if (whdr[0]) {
@@ -8989,9 +9772,20 @@ static pid_t spawn_emulatorlauncher_ex(const char *sys, const char *rompath, con
     }
     av[ac] = NULL;
 
+    cpu_launch_boost_start();
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
+        // Configgen logs every generated RetroArch key at DEBUG level.  On
+        // Knulli SNAP's stdout ultimately lands on slow persistent storage;
+        // hundreds of tiny writes added several seconds to every launch.
+        // Discard only normal/debug stdout here.  stderr remains attached so
+        // warnings and configgen/RetroArch launch failures are still recorded.
+        int null_out = open("/dev/null", O_WRONLY);
+        if (null_out >= 0) {
+            (void)dup2(null_out, STDOUT_FILENO);
+            if (null_out != STDOUT_FILENO) close(null_out);
+        }
         setenv("HOME", "/userdata/system", 1);
         setenv("XDG_CONFIG_HOME", "/userdata/system/configs", 1);
         setenv("XDG_RUNTIME_DIR", "/var/run", 1);
@@ -9000,6 +9794,7 @@ static pid_t spawn_emulatorlauncher_ex(const char *sys, const char *rompath, con
         execv("/usr/bin/emulatorlauncher", av);
         _exit(127);
     }
+    if (pid < 0) cpu_launch_boost_stop();
     return pid;
 }
 static pid_t spawn_emulatorlauncher(const char *sys, const char *rompath, const char *force_core) {
@@ -9553,7 +10348,7 @@ static void launch_release_video(SDL_Window **win, SDL_Renderer **ren, int *vide
 static void launch_restore_after_failure(SDL_Window **win, SDL_Renderer **ren,
                                          int *video_released) {
     brightness_guard_stop();
-    game_audio_mute(0); // a failed fork must not leave later games globally muted
+    game_audio_mute(0, game_aspect_idx, game_rotation_idx); // a failed fork must not leave later games globally muted
     if (win && ren && video_released && *video_released) {
         snap_acquire_video(win, ren);
         *video_released = 0;
@@ -9562,7 +10357,10 @@ static void launch_restore_after_failure(SDL_Window **win, SDL_Renderer **ren,
 
 void link_launch(SDL_Window **win, SDL_Renderer **ren, int *video_released) {
     link_write_core_opts(link_is_host, link_peer_ip);
-    game_audio_mute(0); // also enables RetroArch's local OSD command endpoint
+    int link_p = platform_index_for_dir(link_my_sys);
+    game_audio_mute(0,
+                    link_p >= 0 ? syscfg_aspect_for(link_p) : game_aspect_idx,
+                    link_p >= 0 ? syscfg_rotation_for(link_p) : game_rotation_idx);
     gamepad_evdev_reset();
     apply_brightness(); brightness_guard_start();
 
@@ -9618,7 +10416,9 @@ void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
     // Radio can now coexist with game sound.  SD-card music keeps its existing
     // explicit "mute game" behavior, while the radio option is independently
     // selectable so sound effects remain available by default.
-    game_audio_mute((keep_music || (keep_radio && !radio_game_audio)) ? 1 : 0);
+    game_audio_mute((keep_music || (keep_radio && !radio_game_audio)) ? 1 : 0,
+                    p >= 0 ? syscfg_aspect_for(p) : game_aspect_idx,
+                    p >= 0 ? syscfg_rotation_for(p) : game_rotation_idx);
     launch_perf_mark("prepared-settings", launch_started);
 
 #ifdef SNAPOS_TARGET_KNULLI
@@ -9752,7 +10552,7 @@ void launch_retroarch_menu(SDL_Window **win, SDL_Renderer **ren, int *video_rele
     // display options. This makes the Home app and in-game menu one settings
     // world instead of two unrelated RetroArch profiles.
     const char *shared_cfg = "/userdata/system/configs/retroarch/retroarchcustom.cfg";
-    game_audio_mute(0);
+    game_audio_mute(0, game_aspect_idx, game_rotation_idx);
     if (access(shared_cfg, R_OK) == 0) {
         ra_hotkeys_apply_to_cfg(shared_cfg);
         snprintf(ra_config, sizeof(ra_config), "%s", shared_cfg);
@@ -9957,6 +10757,7 @@ void factory_reset() {
     for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
     disp_grp_apps_open = 0; home_apps_mask = (1 << APP_COUNT) - 1;
     home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
+    app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
     menu_double_action = MENU_ACT_NONE; menu_triple_action = MENU_ACT_FLASHLIGHT;
     for (int i = 0; i < ART_TYPE_COUNT; i++) scrape_art_enabled[i] = (i == 0) ? 1 : 0;
     for (int i = 0; i < PLATFORM_COUNT; i++) scrape_system_enabled[i] = 1;
@@ -10038,6 +10839,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         game_aspect_idx = 0; game_rotation_idx = 0;
         show_fps = 0; show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
         home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
+        app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
         surprise_me_enabled = 0; weather_unit = 0; home_view_idx = 0;
         stats_mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5);
         for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
@@ -10862,6 +11664,16 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
         case KB_PURPOSE_BG_RENAME:
             rename_selected_background();
             break;
+        case KB_PURPOSE_CALENDAR_REMINDER: {
+            if (kb_buffer[0]) {
+                snprintf(calendar_reminder_pending_text,
+                         sizeof calendar_reminder_pending_text, "%.159s", kb_buffer);
+                // The keyboard returns to Calendar, where this controller-first
+                // picker completes the reminder without requiring time typing.
+                calendar_reminder_time_picker = 1;
+            }
+            break;
+        }
         default: break;   // KB_PURPOSE_PRACTICE
     }
     kb_shift = 0;
@@ -10876,7 +11688,7 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
 #define HOME_GRID_ROWS 2
 #define HOME_GRID_PAGE_SIZE (HOME_GRID_COLS * HOME_GRID_ROWS)
 static const char *HGRID_SLUGS[] =
-    { "consoles","library","favorites","radio","music","retroarch","link","settings","surprise","resume","flashlight","minigames","achievements" };
+    { "consoles","library","favorites","radio","music","retroarch","link","settings","surprise","resume","flashlight","minigames","achievements","calculator" };
 #define HGRID_SLUG_N ((int)(sizeof(HGRID_SLUGS)/sizeof(HGRID_SLUGS[0])))
 static SDL_Texture *hgrid_icon_cache[HGRID_SLUG_N] = { 0 };
 static int          hgrid_icon_tried[HGRID_SLUG_N] = { 0 };
@@ -10940,52 +11752,145 @@ static int hgrid_tiles(int *rt, int rcount, int *out) {
             if (home_tile_key(rt[i]) == home_tile_order[oi]) { out[n++] = i; break; }
     // Keep any future tile types reachable even before an order migration.
     for (int i = 0; i < rcount && n < MAX_HOME_ROWS; i++) {
-        if (rt[i] == ROW_H_WELCOME || rt[i] == ROW_H_CONTINUE) continue;
+        if (rt[i] == ROW_H_WELCOME || rt[i] == ROW_H_CONTINUE || rt[i] == ROW_H_APP_WIDGET) continue;
         int already = 0; for (int k = 0; k < n; k++) if (out[k] == i) { already = 1; break; }
         if (!already) out[n++] = i;
     }
     return n;
 }
 
-static int hgrid_nav_ord(int ord, int n, SDL_Keycode key) {
-    if (n <= 0) return 0;
-    int page = ord / HOME_GRID_PAGE_SIZE;
-    int local = ord % HOME_GRID_PAGE_SIZE;
-    int row = local / HOME_GRID_COLS, col = local % HOME_GRID_COLS;
-    if (key == SDLK_RIGHT) {
-        if (col + 1 < HOME_GRID_COLS && ord + 1 < n) return ord + 1;
-        int target = (page + 1) * HOME_GRID_PAGE_SIZE + row * HOME_GRID_COLS;
-        if (target < n) return target;
-        // A final page with only one row receives row-two navigation at its
-        // nearest available tile instead of trapping the cursor.
-        target = (page + 1) * HOME_GRID_PAGE_SIZE;
-        if (target < n) return n - 1;
-    } else if (key == SDLK_LEFT) {
-        if (col > 0) return ord - 1;
-        if (page > 0) {
-            int target = (page - 1) * HOME_GRID_PAGE_SIZE + row * HOME_GRID_COLS + (HOME_GRID_COLS - 1);
-            return target < n ? target : n - 1;
+typedef struct { int row_index, slot, span; } HGridItem;
+
+static int hgrid_widget_slot_normalize(int slot) {
+    if (slot < 0) slot = 0;
+    // A two-wide widget may begin in columns 0, 1 or 2, never across a row.
+    if (slot % HOME_GRID_COLS == HOME_GRID_COLS - 1) slot--;
+    return slot;
+}
+
+// Lay apps into physical 4x2 page cells. The widget consumes two adjacent
+// cells and apps naturally flow around it, so nothing is hidden underneath.
+static int hgrid_layout(int *rt, int rcount, HGridItem *items, int *total_slots) {
+    int base[MAX_HOME_ROWS], bn = hgrid_tiles(rt, rcount, base);
+    int widget_row = -1;
+    for (int i = 0; i < rcount; i++) if (rt[i] == ROW_H_APP_WIDGET) { widget_row = i; break; }
+
+    int anchor = hgrid_widget_slot_normalize(app_widget_slot);
+    if (anchor > bn) anchor = hgrid_widget_slot_normalize(bn);
+    int n = 0, bi = 0, slot = 0, placed = widget_row < 0;
+    while ((bi < bn || !placed) && n < MAX_HOME_ROWS) {
+        if (!placed && (slot >= anchor || bi >= bn)) {
+            if (slot < anchor) slot = anchor;
+            slot = hgrid_widget_slot_normalize(slot);
+            items[n++] = (HGridItem){ widget_row, slot, 2 };
+            slot += 2;
+            placed = 1;
+        } else if (bi < bn) {
+            items[n++] = (HGridItem){ base[bi++], slot++, 1 };
         }
-    } else if (key == SDLK_DOWN) {
-        if (row == 0 && ord + HOME_GRID_COLS < n) return ord + HOME_GRID_COLS;
-    } else if (key == SDLK_UP) {
-        if (row == 1) return ord - HOME_GRID_COLS;
     }
-    return ord;
+    *total_slots = slot;
+    return n;
+}
+
+static int hgrid_layout_row_at(const HGridItem *items, int n, int cell) {
+    for (int i = 0; i < n; i++)
+        if (cell >= items[i].slot && cell < items[i].slot + items[i].span)
+            return items[i].row_index;
+    return -1;
+}
+
+static int hgrid_layout_nearest(const HGridItem *items, int n, int first, int last, int wanted) {
+    int best = -1, best_d = 9999;
+    for (int c = first; c <= last; c++) {
+        int row = hgrid_layout_row_at(items, n, c);
+        if (row < 0) continue;
+        int d = c > wanted ? c - wanted : wanted - c;
+        if (d < best_d) { best = row; best_d = d; }
+    }
+    return best;
+}
+
+static int hgrid_nav_layout(int *rt, int rcount, int current, SDL_Keycode key) {
+    HGridItem items[MAX_HOME_ROWS]; int slots = 0;
+    int n = hgrid_layout(rt, rcount, items, &slots);
+    if (n <= 0) return current;
+    int ci = 0;
+    for (int i = 0; i < n; i++) if (items[i].row_index == current) { ci = i; break; }
+    int page_count = (slots + HOME_GRID_PAGE_SIZE - 1) / HOME_GRID_PAGE_SIZE;
+    if (page_count < 1) page_count = 1;
+    int slot = items[ci].slot, span = items[ci].span;
+    int page = slot / HOME_GRID_PAGE_SIZE;
+    int local = slot % HOME_GRID_PAGE_SIZE;
+    int row = local / HOME_GRID_COLS, col = local % HOME_GRID_COLS;
+    int target = -1;
+
+    if (key == SDLK_e || key == SDLK_q) { // R1 / L1: explicit page movement
+        int np = (page + (key == SDLK_e ? 1 : -1) + page_count) % page_count;
+        int wanted = np * HOME_GRID_PAGE_SIZE + local;
+        target = hgrid_layout_row_at(items, n, wanted);
+        if (target < 0)
+            target = hgrid_layout_nearest(items, n, np * HOME_GRID_PAGE_SIZE,
+                                          np * HOME_GRID_PAGE_SIZE + HOME_GRID_PAGE_SIZE - 1, wanted);
+    } else if (key == SDLK_RIGHT) {
+        int end_local = local + span - 1;
+        int wanted = (end_local % HOME_GRID_COLS < HOME_GRID_COLS - 1)
+                   ? slot + span
+                   : (page + 1) * HOME_GRID_PAGE_SIZE + row * HOME_GRID_COLS;
+        target = hgrid_layout_row_at(items, n, wanted);
+    } else if (key == SDLK_LEFT) {
+        int wanted = col > 0 ? slot - 1
+                   : (page > 0 ? (page - 1) * HOME_GRID_PAGE_SIZE + row * HOME_GRID_COLS + HOME_GRID_COLS - 1 : -1);
+        if (wanted >= 0) target = hgrid_layout_row_at(items, n, wanted);
+    } else if (key == SDLK_DOWN || key == SDLK_UP) {
+        int wanted = slot + (key == SDLK_DOWN ? HOME_GRID_COLS : -HOME_GRID_COLS);
+        if (wanted >= 0) {
+            target = hgrid_layout_row_at(items, n, wanted);
+            if (target < 0) {
+                int tp = wanted / HOME_GRID_PAGE_SIZE;
+                int tr = (wanted % HOME_GRID_PAGE_SIZE) / HOME_GRID_COLS;
+                target = hgrid_layout_nearest(items, n,
+                    tp * HOME_GRID_PAGE_SIZE + tr * HOME_GRID_COLS,
+                    tp * HOME_GRID_PAGE_SIZE + tr * HOME_GRID_COLS + HOME_GRID_COLS - 1, wanted);
+            }
+        }
+    }
+    return target >= 0 ? target : current;
+}
+
+static void hgrid_widget_move(int *rt, int rcount, SDL_Keycode key) {
+    int base[MAX_HOME_ROWS], bn = hgrid_tiles(rt, rcount, base);
+    int s = hgrid_widget_slot_normalize(app_widget_slot);
+    if (key == SDLK_LEFT)       s = (s % HOME_GRID_COLS > 0) ? s - 1 : (s >= 2 ? s - 2 : s);
+    else if (key == SDLK_RIGHT) s = (s % HOME_GRID_COLS < 2) ? s + 1 : s + 2;
+    else if (key == SDLK_UP)    s -= HOME_GRID_COLS;
+    else if (key == SDLK_DOWN)  s += HOME_GRID_COLS;
+    if (s < 0) s = 0;
+    if (s > bn) s = bn;
+    app_widget_slot = hgrid_widget_slot_normalize(s);
 }
 
 static void hgrid_reorder_move(int *rt, int rcount, SDL_Keycode key) {
-    int tiles[MAX_HOME_ROWS], n = hgrid_tiles(rt, rcount, tiles);
-    int from = -1;
-    for (int i = 0; i < n; i++) if (tiles[i] == home_selected) { from = i; break; }
-    if (from < 0) return;
-    int to = from;
-    // Left/right can cross a page edge, just like moving an app between phone
-    // home screens. The selected app's page follows it automatically.
-    to = hgrid_nav_ord(from, n, key);
-    if (to == from) return;
-    int a = home_tile_key(rt[tiles[from]]), b = home_tile_key(rt[tiles[to]]);
-    if (a < 0 || b < 0) return; // Resume is pinned and cannot be displaced.
+    int from_key = (home_selected >= 0 && home_selected < rcount)
+                 ? home_tile_key(rt[home_selected]) : -1;
+    if (from_key < 0) return;
+
+    // Follow the actual physical 4x2 layout rather than the underlying app
+    // array. The old ordinal movement ignored the two-cell widget, so Up/Down
+    // could swap with a visually diagonal app. If the next physical item is
+    // the widget, step across it once in the same requested direction.
+    int probe = home_selected, target = -1;
+    for (int step = 0; step < 3; step++) {
+        int next = hgrid_nav_layout(rt, rcount, probe, key);
+        if (next == probe) break;
+        probe = next;
+        if (probe < 0 || probe >= rcount) break;
+        if (home_tile_key(rt[probe]) >= 0) { target = probe; break; }
+        if (rt[probe] != ROW_H_APP_WIDGET) break; // Resume remains pinned.
+    }
+    if (target < 0) return;
+
+    int a = from_key, b = home_tile_key(rt[target]);
     int ai = -1, bi = -1;
     for (int i = 0; i < HOME_ORDER_COUNT; i++) {
         if (home_tile_order[i] == a) ai = i;
@@ -11011,14 +11916,102 @@ static void draw_simple_home_icon(SDL_Renderer *ren, SDL_Rect box, const char *s
     else if (!strcmp(slug,"link")) mark="L"; else if (!strcmp(slug,"settings")) mark="S";
     else if (!strcmp(slug,"surprise")) mark="?"; else if (!strcmp(slug,"flashlight")) mark="FL";
     else if (!strcmp(slug,"minigames")) mark="MG"; else if (!strcmp(slug,"achievements")) mark="A";
+    else if (!strcmp(slug,"calculator")) mark="123";
     else if (!strcmp(slug,"resume")) mark=">";
     SDL_Texture *mt = render_text(ren, font_fixed ? font_fixed : font_label, mark, ink);
     if (mt) { int mw,mh; SDL_QueryTexture(mt,NULL,NULL,&mw,&mh); SDL_RenderCopy(ren,mt,NULL,&(SDL_Rect){badge.x+badge.w/2-mw/2,badge.y+badge.h/2-mh/2,mw,mh}); }
 }
 
+static void draw_app_grid_widget(SDL_Renderer *ren, Theme *th, SDL_Rect box, int selected) {
+    if (selected) {
+        fill_rounded(ren, (SDL_Rect){ box.x - 4, box.y - 4, box.w + 8, box.h + 8 }, 14,
+                     th->accent2.r, th->accent2.g, th->accent2.b, 245);
+    }
+    fill_rounded(ren, box, 11, th->select_bg.r, th->select_bg.g, th->select_bg.b, 225);
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 230);
+    SDL_RenderDrawRect(ren, &box);
+    SDL_RenderSetClipRect(ren, &box);
+
+    int x = box.x + 12, y = box.y + 9, w = box.w - 24;
+    const char *title = app_widget_names[(app_widget_kind >= 0 && app_widget_kind < APP_WIDGET_COUNT) ? app_widget_kind : 0];
+    SDL_Texture *ht = render_text(ren, font_label_bold ? font_label_bold : font_label, title, th->accent2);
+    int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
+    SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ x, y, hw, hh });
+    y += hh + 5;
+
+    if (app_widget_kind == APP_WIDGET_CLOCK) {
+        time_t now = time(NULL); struct tm *lt = localtime(&now);
+        char big[24], sub[64];
+        strftime(big, sizeof big, clock_24h ? "%H:%M" : "%I:%M", lt);
+        if (!clock_24h && big[0] == '0') memmove(big, big + 1, strlen(big));
+        strftime(sub, sizeof sub, clock_24h ? "%A, %B %d" : "%p  -  %A, %B %d", lt);
+        SDL_Texture *bt = render_text_fit(ren, font_big, big, g_ui_text, w);
+        int bw,bh; SDL_QueryTexture(bt,NULL,NULL,&bw,&bh);
+        SDL_RenderCopy(ren,bt,NULL,&(SDL_Rect){x,y,bw,bh}); y += bh + 2;
+        SDL_Texture *st = render_text_fit(ren,font_label,sub,g_ui_dim,w);
+        int sw,sh; SDL_QueryTexture(st,NULL,NULL,&sw,&sh);
+        SDL_RenderCopy(ren,st,NULL,&(SDL_Rect){x,y,sw,sh});
+    } else if (app_widget_kind == APP_WIDGET_WEATHER) {
+        weather_read(); weather_kick(0);
+        char temp[32] = "--", cond[120] = "Fetching local weather...";
+        if (g_weather_str[0]) {
+            const char *sp = strchr(g_weather_str, ' ');
+            snprintf(temp, sizeof temp, "%.*s", sp ? (int)(sp - g_weather_str) : (int)strlen(g_weather_str), g_weather_str);
+            snprintf(cond, sizeof cond, "%s", (sp && sp[1]) ? sp + 1 : "Current conditions");
+        }
+        int wk = weather_icon_kind(cond);
+        if (wk == WX_SUN && weather_is_night()) wk = WX_CLEARNIGHT;
+        int isz = 48;
+        if (wk != WX_NONE) draw_weather_icon(ren, x, y, isz, wk, g_ui_text, th->bg);
+        SDL_Texture *bt = render_text(ren,font_big,temp,g_ui_text);
+        int bw,bh; SDL_QueryTexture(bt,NULL,NULL,&bw,&bh);
+        SDL_RenderCopy(ren,bt,NULL,&(SDL_Rect){x+(wk!=WX_NONE?isz+10:0),y,bw,bh});
+        y += (bh > isz ? bh : isz) + 2;
+        SDL_Texture *ct = render_text_fit(ren,font_label,cond,g_ui_dim,w);
+        int cw,ch; SDL_QueryTexture(ct,NULL,NULL,&cw,&ch);
+        SDL_RenderCopy(ren,ct,NULL,&(SDL_Rect){x,y,cw,ch});
+        y += ch + 2;
+        const char *refresh = SDL_GetTicks() < g_weather_refresh_msg_until ? "Refreshing..." : "A  Refresh";
+        SDL_Texture *rt = render_text(ren, font_label, refresh, th->accent2);
+        int rw, rh; SDL_QueryTexture(rt, NULL, NULL, &rw, &rh);
+        // Pin this control to the card's lower-right corner. Large fonts can
+        // consume the natural content flow, but the action must remain visible
+        // without escaping into the app-label/footer band.
+        SDL_RenderCopy(ren, rt, NULL,
+                       &(SDL_Rect){ box.x + box.w - rw - 10, box.y + box.h - rh - 7, rw, rh });
+    } else if (app_widget_kind == APP_WIDGET_BATTERY) {
+        int pct, charging; read_battery(&pct, &charging);
+        char big[32], sub[100];
+        if (pct >= 0) snprintf(big, sizeof big, "%d%%", pct);
+        else snprintf(big, sizeof big, "--");
+        battery_details_text(sub, sizeof sub, charging);
+        SDL_Texture *bt = render_text(ren,font_big,big,g_ui_text);
+        int bw,bh; SDL_QueryTexture(bt,NULL,NULL,&bw,&bh);
+        SDL_RenderCopy(ren,bt,NULL,&(SDL_Rect){x,y,bw,bh});
+        draw_battery_glyph(ren, x + bw + 18, y + bh/2 - 12, 24, pct, th->accent2);
+        y += bh + 2;
+        SDL_Texture *st = render_text_fit(ren,font_label,sub,g_ui_dim,w);
+        int sw,sh; SDL_QueryTexture(st,NULL,NULL,&sw,&sh);
+        SDL_RenderCopy(ren,st,NULL,&(SDL_Rect){x,y,sw,sh});
+    } else if (app_widget_kind == APP_WIDGET_CALENDAR) {
+        char range[72]; calendar_week_range_short(range, sizeof range);
+        SDL_Texture *mt = render_text_fit(ren, font_label, range, g_ui_dim, w);
+        int mw, mh; SDL_QueryTexture(mt, NULL, NULL, &mw, &mh);
+        SDL_RenderCopy(ren, mt, NULL, &(SDL_Rect){ x, y, mw, mh });
+        int strip_y = y + mh + 5;
+        int strip_h = box.y + box.h - strip_y - TTF_FontHeight(font_label) - 10;
+        draw_calendar_week_strip(ren, th, x, strip_y, w, strip_h);
+        SDL_Texture *open = render_text(ren, font_label, "A  Open", th->accent2);
+        int ow, oh; SDL_QueryTexture(open, NULL, NULL, &ow, &oh);
+        SDL_RenderCopy(ren, open, NULL,
+                       &(SDL_Rect){ box.x + box.w - ow - 10, box.y + box.h - oh - 7, ow, oh });
+    }
+    SDL_RenderSetClipRect(ren, NULL);
+}
+
 static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int rcount) {
-    int tiles[MAX_HOME_ROWS];
-    int n = hgrid_tiles(rt, rcount, tiles);
+    HGridItem items[MAX_HOME_ROWS]; int total_slots = 0;
+    int n = hgrid_layout(rt, rcount, items, &total_slots);
     if (n == 0) {
         SDL_Texture *m = render_text(ren, font_small, "No games yet -- add ROMs to your games card", g_ui_dim);
         int w, h; SDL_QueryTexture(m, NULL, NULL, &w, &h);
@@ -11026,39 +12019,49 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         return;
     }
     if (home_selected < 0 || home_selected >= rcount || rt[home_selected] == ROW_H_WELCOME)
-        home_selected = tiles[0];
-    int selected_ord = 0;
-    for (int k = 0; k < n; k++) if (tiles[k] == home_selected) { selected_ord = k; break; }
+        home_selected = items[0].row_index;
+    int selected_item = 0;
+    for (int k = 0; k < n; k++) if (items[k].row_index == home_selected) { selected_item = k; break; }
     const int cols = HOME_GRID_COLS;
     const int rows = HOME_GRID_ROWS;
-    const int page_count = (n + HOME_GRID_PAGE_SIZE - 1) / HOME_GRID_PAGE_SIZE;
-    const int page = selected_ord / HOME_GRID_PAGE_SIZE;
-    const int first = page * HOME_GRID_PAGE_SIZE;
-    int last = first + HOME_GRID_PAGE_SIZE; if (last > n) last = n;
-    int top = HUD_BAR_H + (home_grid_reorder ? 30 : 12), gap = 12;
-    TTF_Font *grid_label_font = font_fixed ? font_fixed : font_label;
+    int page_count = (total_slots + HOME_GRID_PAGE_SIZE - 1) / HOME_GRID_PAGE_SIZE;
+    if (page_count < 1) page_count = 1;
+    const int page = items[selected_item].slot / HOME_GRID_PAGE_SIZE;
+    int mode_banner = home_grid_reorder || app_widget_moving;
+    int top = HUD_BAR_H + (mode_banner ? 29 : 8), gap = 10;
+    // App titles follow the user's font family, size and legibility choices.
+    // Width fitting below keeps even X-Large labels inside their own cells.
+    TTF_Font *grid_label_font = font_label_bold ? font_label_bold : font_label;
     int label_h = TTF_FontHeight(grid_label_font) + 4;
-    int available_h = WIN_H - top - 32 - (rows - 1) * gap - rows * (label_h + 5);
+    // Keep controls and page dots in their own footer. Previously the grid
+    // consumed this band, so the second-row labels, help and dots shared the
+    // same pixels on the 720x480 panel.
+    const int footer_h = 38;
+    int available_h = WIN_H - top - footer_h - (rows - 1) * gap - rows * (label_h + 4);
     int tile_by_h = rows > 0 ? available_h / rows : 100;
-    int tile_by_w = (WIN_W - 48 - (cols - 1) * gap) / cols;
+    int tile_by_w = (WIN_W - 36 - (cols - 1) * gap) / cols;
     int tile = tile_by_h < tile_by_w ? tile_by_h : tile_by_w;
-    if (tile > 132) tile = 132;
+    if (tile > 164) tile = 164;
     if (tile < 72) tile = 72;
-    int cell_h = tile + label_h + 5 + gap;
+    int cell_h = tile + label_h + 4 + gap;
     int grid_w = cols * tile + (cols - 1) * gap;
     int mx = (WIN_W - grid_w) / 2;
 
-    if (home_grid_reorder) {
-        SDL_Texture *mh = render_text_fit(ren, font_label, "MOVING APP  -  D-pad: Place   A: Done   B: Cancel", th->accent2, WIN_W - 40);
+    if (mode_banner) {
+        const char *msg = app_widget_moving ? "MOVING WIDGET  -  D-pad Place   A Confirm   B Cancel"
+                        : home_grid_dragging ? "MOVING APP  -  D-pad Place   A Confirm   B Cancel"
+                        : "EDIT APPS  -  D-pad Choose   Y Pick Up   B Done";
+        SDL_Texture *mh = render_text_fit(ren, font_label, msg, th->accent2, WIN_W - 40);
         int mw, mhh; SDL_QueryTexture(mh, NULL, NULL, &mw, &mhh);
-        SDL_RenderCopy(ren, mh, NULL, &(SDL_Rect){ WIN_W/2 - mw/2, HUD_BAR_H + 5, mw, mhh });
+        SDL_RenderCopy(ren, mh, NULL, &(SDL_Rect){ WIN_W/2 - mw/2, HUD_BAR_H + 3, mw, mhh });
         g_text_scrolling = 1;
     }
 
-    for (int k = first; k < last; k++) {
-        int local = k - first;
+    for (int k = 0; k < n; k++) {
+        if (items[k].slot / HOME_GRID_PAGE_SIZE != page) continue;
+        int local = items[k].slot % HOME_GRID_PAGE_SIZE;
         int r = local / cols, c = local % cols;
-        int i = tiles[k], trt = rt[i], is_sel = (i == home_selected);
+        int i = items[k].row_index, trt = rt[i], is_sel = (i == home_selected);
         int jiggle_x = 0, jiggle_y = 0;
         if (home_grid_reorder && home_tile_key(trt) >= 0) {
             float phase = (float)SDL_GetTicks() * 0.018f + (float)k * 1.7f;
@@ -11067,7 +12070,12 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         }
         int cx = mx + c * (tile + gap) + jiggle_x;
         int cy = top + r * cell_h + jiggle_y;
-        SDL_Rect box = { cx, cy, tile, tile };
+        SDL_Rect box = { cx, cy, items[k].span == 2 ? tile * 2 + gap : tile, tile };
+
+        if (trt == ROW_H_APP_WIDGET) {
+            draw_app_grid_widget(ren, th, box, is_sel);
+            continue;
+        }
 
         SDL_Texture *art = NULL; const char *slug = NULL; char label[96] = "";
         if (trt == ROW_H_CONTINUE) {
@@ -11090,24 +12098,37 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         else if (trt == ROW_H_QUICK_FLASHLIGHT) { slug = "flashlight"; snprintf(label, sizeof label, "Flashlight"); }
         else if (trt == ROW_H_QUICK_MINIGAMES)  { slug = "minigames"; snprintf(label, sizeof label, "Mini Games"); }
         else if (trt == ROW_H_QUICK_ACHIEVEMENTS) { slug = "achievements"; snprintf(label, sizeof label, "Achievements"); }
+        else if (trt == ROW_H_QUICK_CALCULATOR) { slug = "calculator"; snprintf(label, sizeof label, "Calculator"); }
         else if (trt == ROW_H_SURPRISE)         { slug = "surprise";  snprintf(label, sizeof label, "Surprise Me"); }
-        // App placeholders intentionally stay monochrome and quiet. Only actual
-        // game resume/favorite covers use artwork.
-
-        if (is_sel) {
-            fill_rounded(ren, (SDL_Rect){ box.x - 5, box.y - 5, box.w + 10, box.h + 10 }, 13,
-                         th->accent2.r, th->accent2.g, th->accent2.b, 255);
-        }
-        fill_rounded(ren, box, 10, th->select_bg.r, th->select_bg.g, th->select_bg.b, is_sel ? 255 : 165);
-
         if (art) {
+            if (is_sel)
+                fill_rounded(ren, (SDL_Rect){ box.x - 4, box.y - 4, box.w + 8, box.h + 8 }, 14,
+                             th->accent2.r, th->accent2.g, th->accent2.b, 235);
+            fill_rounded(ren, box, 10, th->select_bg.r, th->select_bg.g, th->select_bg.b, 165);
             SDL_Rect d = fit_rect_for_texture(art, (SDL_Rect){ box.x + 7, box.y + 7, box.w - 14, box.h - 14 });
             SDL_RenderCopy(ren, art, NULL, &d);
-        } else if (slug) draw_simple_home_icon(ren, box, slug);
+        } else if (slug) {
+            SDL_Texture *icon = hgrid_icon(ren, slug);
+            if (icon) {
+                SDL_Rect d = fit_rect_for_texture(icon, (SDL_Rect){box.x + 2, box.y + 2, box.w - 4, box.h - 4});
+                // The supplied icons already contain their own rounded tile.
+                // A tight three-pixel accent behind that exact fitted image is
+                // enough to show focus without adding a second bulky border.
+                if (is_sel)
+                    fill_rounded(ren, (SDL_Rect){ d.x - 3, d.y - 3, d.w + 6, d.h + 6 }, 13,
+                                 th->accent2.r, th->accent2.g, th->accent2.b, 245);
+                SDL_RenderCopy(ren, icon, NULL, &d);
+            } else {
+                if (is_sel)
+                    fill_rounded(ren, (SDL_Rect){ box.x - 3, box.y - 3, box.w + 6, box.h + 6 }, 13,
+                                 th->accent2.r, th->accent2.g, th->accent2.b, 245);
+                draw_simple_home_icon(ren, box, slug);
+            }
+        }
 
-        SDL_Texture *lt = render_text_fit(ren, grid_label_font, label, is_sel ? g_ui_text : g_ui_dim, tile + 10);
+        SDL_Texture *lt = render_text_fit(ren, grid_label_font, label, is_sel ? g_ui_text : g_ui_dim, box.w + 10);
         int lw, lh; SDL_QueryTexture(lt, NULL, NULL, &lw, &lh);
-        SDL_RenderCopy(ren, lt, NULL, &(SDL_Rect){ cx + tile/2 - lw/2, cy + tile + 6, lw, lh });
+        SDL_RenderCopy(ren, lt, NULL, &(SDL_Rect){ cx + box.w/2 - lw/2, cy + tile + 5, lw, lh });
     }
 
     // Small page dots make the extra app screens discoverable without taking
@@ -11120,6 +12141,48 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
             fill_rounded(ren, (SDL_Rect){ dx + p * (dot + dg), dy, dot, dot }, dot/2,
                          dc.r, dc.g, dc.b, p == page ? 255 : 150);
         }
+    }
+
+    if (!home_grid_reorder && !app_widget_moving) {
+        // Weather advertises A Refresh inside its card; repeating it here made
+        // the footer unnecessarily long and crowded the centered page dots.
+        SDL_Texture *xh = render_text(ren, font_label, "X  Widget", g_ui_dim);
+        SDL_Texture *yh = render_text(ren, font_label, "Y  Move", g_ui_dim);
+        int xw,xhgt,yw,yhgt; SDL_QueryTexture(xh,NULL,NULL,&xw,&xhgt); SDL_QueryTexture(yh,NULL,NULL,&yw,&yhgt);
+        int fy = WIN_H - (xhgt > yhgt ? xhgt : yhgt) - 8;
+        SDL_RenderCopy(ren,xh,NULL,&(SDL_Rect){14,fy,xw,xhgt});
+        SDL_RenderCopy(ren,yh,NULL,&(SDL_Rect){24+xw,fy,yw,yhgt});
+    }
+
+    if (app_widget_picker) {
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
+        SDL_RenderFillRect(ren, &(SDL_Rect){0,0,WIN_W,WIN_H});
+        int existing = app_widget_kind != APP_WIDGET_NONE;
+        int count = existing ? 5 : 4;
+        int bw = WIN_W > 680 ? 420 : WIN_W - 100;
+        int pitch = TTF_FontHeight(font_label) + 9;
+        int bh = 62 + count * pitch + 34;
+        int bx = WIN_W/2 - bw/2, by = WIN_H/2 - bh/2;
+        fill_rounded(ren, (SDL_Rect){bx,by,bw,bh}, 14, th->bg.r,th->bg.g,th->bg.b,255);
+        SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,255);
+        SDL_RenderDrawRect(ren,&(SDL_Rect){bx,by,bw,bh});
+        SDL_Texture *pt=render_text(ren,font_small_bold,existing?"APP WIDGET":"ADD APP WIDGET",th->accent2);
+        int pw,ph; SDL_QueryTexture(pt,NULL,NULL,&pw,&ph);
+        SDL_RenderCopy(ren,pt,NULL,&(SDL_Rect){bx+20,by+16,pw,ph});
+        int py=by+48;
+        for(int j=0;j<count;j++) {
+            const char *name = j < 4 ? app_widget_names[j+1] : "Remove Widget";
+            int sel = app_widget_picker_sel == j;
+            if(sel) fill_rounded(ren,(SDL_Rect){bx+12,py-3,bw-24,pitch-1},8,
+                                  th->select_bg.r,th->select_bg.g,th->select_bg.b,255);
+            SDL_Texture *ot=render_text(ren,font_label,name,sel?g_ui_text:g_ui_dim);
+            int ow,oh; SDL_QueryTexture(ot,NULL,NULL,&ow,&oh);
+            SDL_RenderCopy(ren,ot,NULL,&(SDL_Rect){bx+24,py,ow,oh});
+            py += pitch;
+        }
+        SDL_Texture *ft=render_text(ren,font_label,"A  Choose     B  Cancel",g_ui_dim);
+        int fw,fh; SDL_QueryTexture(ft,NULL,NULL,&fw,&fh);
+        SDL_RenderCopy(ren,ft,NULL,&(SDL_Rect){bx+20,by+bh-fh-12,fw,fh});
     }
 }
 
@@ -12080,6 +13143,26 @@ static void promo_seed_radio(void) {
     snprintf(radio_status, sizeof radio_status, "%d local stations ready", radio_count);
 }
 
+static void promo_seed_recent(void) {
+    static const struct { const char *title, *sys; long age, played; } demo[] = {
+        { "Pokemon Sapphire", "gba", 120, 12600 },
+        { "Metroid Fusion", "gba", 3600, 5400 },
+        { "The Legend of Zelda", "gbc", 7200, 8100 },
+        { "Sonic Advance 3", "gba", 10800, 2700 },
+    };
+    activity_record_count = (int)(sizeof demo / sizeof demo[0]);
+    time_t now = time(NULL);
+    for (int i = 0; i < activity_record_count; i++) {
+        ActivityRecord *a = &activity_records[i]; memset(a, 0, sizeof *a);
+        snprintf(a->path, sizeof a->path, "/demo/%s.zip", demo[i].title);
+        snprintf(a->title, sizeof a->title, "%s", demo[i].title);
+        snprintf(a->platform_dir, sizeof a->platform_dir, "%s", demo[i].sys);
+        a->last_played = (long)now - demo[i].age;
+        a->total_seconds = demo[i].played;
+        a->session_count = i + 2;
+    }
+}
+
 static void promo_seed_achievements(void) {
     static const struct {
         const char *date, *title, *desc, *game, *console;
@@ -12193,10 +13276,11 @@ int main(int argc, char *argv[]) {
     load_system_overrides();
     load_activity_records();
     load_favorites();
+    calendar_reminders_load();
     load_ss_config();
     minigames_load();
     if (!promo_mode) {
-        game_audio_mute(0);       // sync fast-forward + "clear the mute" into knulli.conf up front
+        game_audio_mute(0, game_aspect_idx, game_rotation_idx); // sync launch settings into knulli.conf up front
         link_restore_core_opts(); // in case a previous link session was interrupted mid-game
         cpu_apply_pref();         // apply the saved CPU governor preference
         syncthing_apply();        // resume the user's local save-sync service
@@ -12385,27 +13469,19 @@ int main(int argc, char *argv[]) {
         if (game_count > 0 && (state == STATE_MENU || state == STATE_BOOK))
             art_prefetch(selected, 6, 24);
 
-        // Long-press X while hovering a launch tile to enter phone-style app
-        // arrangement mode. Raw button timing is used because pad_push_key()
-        // intentionally synthesizes an immediate key-up for ordinary presses.
-        if (state == STATE_HOME && home_view_idx == HOME_VIEW_APPS && !home_grid_reorder &&
-            home_reorder_x_down_at && SDL_GetTicks() - home_reorder_x_down_at >= 520) {
-            int rt[MAX_HOME_ROWS], rx[MAX_HOME_ROWS], ri[MAX_HOME_RECENT_SHOWN], rn = 0;
-            int rc = build_home_rows(rt, rx, ri, &rn);
-            if (home_selected >= 0 && home_selected < rc && home_tile_key(rt[home_selected]) >= 0) {
-                memcpy(home_tile_order_backup, home_tile_order, sizeof home_tile_order);
-                home_grid_reorder = 1;
-                home_grid_reorder_dirty = 0;
-                home_reorder_x_down_at = 0;
-                play_click();
-            }
-        }
         if (home_grid_reorder && (state != STATE_HOME || home_view_idx != HOME_VIEW_APPS)) {
-            memcpy(home_tile_order, home_tile_order_backup, sizeof home_tile_order);
+            if (home_grid_dragging)
+                memcpy(home_tile_order, home_tile_order_backup, sizeof home_tile_order);
             home_grid_reorder = 0;
+            home_grid_dragging = 0;
             home_grid_reorder_dirty = 0;
-            home_reorder_x_down_at = 0;
         }
+        if (state != STATE_HOME || home_view_idx != HOME_VIEW_APPS) {
+            app_widget_picker = 0;
+            if (app_widget_moving) app_widget_slot = app_widget_slot_backup;
+            app_widget_moving = 0;
+        }
+        if (state == STATE_HOME) calendar_reminder_check_today();
         SDL_Event e;
         // Stop consuming events the moment a launch flips game_running, so we
         // don't act on queued presses (which was launching game after game).
@@ -12425,9 +13501,6 @@ int main(int argc, char *argv[]) {
                 hat_nav = nd;
             } else if (e.type == SDL_JOYBUTTONDOWN) {
                 int jb = e.jbutton.button;
-                if (state == STATE_HOME && home_view_idx == HOME_VIEW_APPS && !home_grid_reorder &&
-                    pad_map_joybutton(jb) == SDLK_s)
-                    home_reorder_x_down_at = SDL_GetTicks();
                 if (jb == hk_mod_btn) {
                     hk_mod_window_until = SDL_GetTicks() + HK_MOD_WINDOW_MS;
                     gamepad_modifier_store(1);
@@ -12472,7 +13545,6 @@ int main(int argc, char *argv[]) {
                 }
             } else if (e.type == SDL_JOYBUTTONUP) {
                 if (e.jbutton.button == hk_held_btn) hk_held_btn = -1;
-                if (pad_map_joybutton(e.jbutton.button) == SDLK_s) home_reorder_x_down_at = 0;
             } else if (e.type == SDL_JOYAXISMOTION) {
                 const int DZ = 16000;
                 if (e.jaxis.axis == 0) {
@@ -12500,7 +13572,26 @@ int main(int argc, char *argv[]) {
                 }
 
                 last_input_time = SDL_GetTicks();
-                if (is_sleeping) { is_sleeping = 0; continue; }
+                if (is_sleeping) {
+                    is_sleeping = 0;
+                    if (auto_sleep_rest_active && !lid_closed) {
+                        if (deep_rest_active) deep_rest_exit();
+                        deep_rest_active = 0;
+                        auto_sleep_rest_active = 0;
+                        apply_brightness();
+                    }
+                    continue;
+                }
+
+                // A due reminder owns Home until acknowledged. Marking it as
+                // shown is persisted, so rebooting later that day does not
+                // nag the user again.
+                if (state == STATE_HOME && calendar_reminder_popup) {
+                    if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_ESCAPE) {
+                        calendar_reminder_dismiss(); play_click();
+                    }
+                    continue;
+                }
 
                 // Flashlight: Start turns it off and drops back to wherever it
                 // was triggered from (the Home list, a game, the console browser...).
@@ -12548,7 +13639,8 @@ int main(int argc, char *argv[]) {
                 // to terminate SNAP and trigger the service's goodbye/restart
                 // path, which made an accidental press look like a reboot.
                 if (e.key.keysym.sym == SDLK_ESCAPE && state == STATE_HOME &&
-                    !flashlight_pending && !home_grid_reorder && !home_recent_focus_slot) continue;
+                    !flashlight_pending && !home_grid_reorder && !home_recent_focus_slot &&
+                    !app_widget_picker && !app_widget_moving) continue;
 
                 if (state != STATE_BOOT && (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN ||
                     e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT || e.key.keysym.sym == SDLK_RETURN ||
@@ -12581,66 +13673,177 @@ int main(int argc, char *argv[]) {
                     int recent_count;
                     int rcount = build_home_rows(row_type, row_extra, recent_indices, &recent_count);
 
-                    // R1/R2 cycle the top/bottom widget live. The same conflict
-                    // rules used in Settings prevent duplicate cards and keep
-                    // Date & Weather from coexisting with Clock/Date/Weather.
-                    if (home_view_idx != HOME_VIEW_APPS && e.key.keysym.sym == SDLK_e) {
-                        home_widget_idx = home_widget_cycle(home_widget_idx, home_widget2_idx, 1);
+                    // App Focused widgets are managed in-place and never share
+                    // state with the two Informational widget slots.
+                    if (home_view_idx == HOME_VIEW_APPS && app_widget_picker) {
+                        SDL_Keycode pk = e.key.keysym.sym;
+                        int count = app_widget_kind == APP_WIDGET_NONE ? 4 : 5;
+                        if (pk == SDLK_UP) app_widget_picker_sel = (app_widget_picker_sel - 1 + count) % count;
+                        else if (pk == SDLK_DOWN) app_widget_picker_sel = (app_widget_picker_sel + 1) % count;
+                        else if (pk == SDLK_ESCAPE || pk == SDLK_s) { app_widget_picker = 0; play_click(); }
+                        else if (pk == SDLK_RETURN) {
+                            play_click();
+                            if (app_widget_picker_sel < 4) {
+                                int was_none = app_widget_kind == APP_WIDGET_NONE;
+                                app_widget_kind = app_widget_picker_sel + 1;
+                                if (was_none) {
+                                    HGridItem li[MAX_HOME_ROWS]; int ls = 0;
+                                    int ln = hgrid_layout(row_type, rcount, li, &ls);
+                                    for (int z = 0; z < ln; z++) if (li[z].row_index == home_selected) {
+                                        app_widget_slot = hgrid_widget_slot_normalize(li[z].slot); break;
+                                    }
+                                }
+                                if (app_widget_kind == APP_WIDGET_WEATHER) weather_kick(1);
+                                app_widget_picker = 0;
+                                save_settings();
+                            } else {
+                                app_widget_kind = APP_WIDGET_NONE;
+                                app_widget_picker = 0;
+                                rcount = build_home_rows(row_type, row_extra, recent_indices, &recent_count);
+                                home_selected = 0;
+                                while (home_selected < rcount && row_type[home_selected] == ROW_H_WELCOME) home_selected++;
+                                save_settings();
+                            }
+                        }
+                        continue;
+                    }
+                    if (home_view_idx == HOME_VIEW_APPS && app_widget_moving) {
+                        SDL_Keycode wk = e.key.keysym.sym;
+                        if (wk == SDLK_RETURN) {
+                            app_widget_moving = 0; save_settings(); play_click();
+                        } else if (wk == SDLK_ESCAPE) {
+                            app_widget_slot = app_widget_slot_backup;
+                            app_widget_moving = 0; play_click();
+                        } else if (wk == SDLK_UP || wk == SDLK_DOWN || wk == SDLK_LEFT || wk == SDLK_RIGHT) {
+                            hgrid_widget_move(row_type, rcount, wk); play_click();
+                        }
+                        continue;
+                    }
+                    if (home_view_idx == HOME_VIEW_APPS && !home_grid_reorder && e.key.keysym.sym == SDLK_s) {
+                        app_widget_picker = 1;
+                        app_widget_picker_sel = (app_widget_kind >= APP_WIDGET_WEATHER && app_widget_kind <= APP_WIDGET_CALENDAR)
+                                              ? app_widget_kind - 1 : 0;
+                        play_click();
+                        continue;
+                    }
+
+                    // App arrangement is deliberately two-stage: the first Y
+                    // enters jiggle/edit mode without moving anything; a second
+                    // Y picks up the highlighted app or widget. A confirms one
+                    // placement and returns to jiggle mode for another choice.
+                    if (home_view_idx == HOME_VIEW_APPS && e.key.keysym.sym == SDLK_f) {
+                        if (!home_grid_reorder) {
+                            home_grid_reorder = 1;
+                            home_grid_dragging = 0;
+                            home_grid_reorder_dirty = 0;
+                            play_click();
+                        } else if (!home_grid_dragging && !app_widget_moving) {
+                            int selected_type = (home_selected >= 0 && home_selected < rcount)
+                                              ? row_type[home_selected] : -1;
+                            if (selected_type == ROW_H_APP_WIDGET && app_widget_kind != APP_WIDGET_NONE) {
+                                app_widget_slot_backup = app_widget_slot;
+                                app_widget_moving = 1;
+                                play_click();
+                            } else if (home_tile_key(selected_type) >= 0) {
+                                memcpy(home_tile_order_backup, home_tile_order, sizeof home_tile_order);
+                                home_grid_dragging = 1;
+                                home_grid_reorder_dirty = 0;
+                                play_click();
+                            }
+                        }
+                        continue;
+                    }
+
+                    // L1/R1 move backward/forward through the top slot; L2/R2
+                    // do the same for the bottom. When Radio is visible its
+                    // explicitly advertised L1/L2 tuner controls take priority.
+                    // Conflict rules still prevent duplicate/incompatible cards.
+                    int home_radio_visible = (home_widget_idx == HOME_WIDGET_RADIO ||
+                                              home_widget2_idx == HOME_WIDGET_RADIO);
+                    if (home_view_idx != HOME_VIEW_APPS &&
+                        (e.key.keysym.sym == SDLK_e ||
+                         (e.key.keysym.sym == SDLK_q && !home_radio_visible))) {
+                        int dir = e.key.keysym.sym == SDLK_e ? 1 : -1;
+                        home_widget_idx = home_widget_cycle(home_widget_idx, home_widget2_idx, dir);
                         home_recent_focus_slot = 0;
                         if (home_widget_idx == HOME_WIDGET_WEATHER || home_widget_idx == HOME_WIDGET_DATEWX) weather_kick(1);
                         save_settings(); play_click(); continue;
                     }
-                    if (home_view_idx != HOME_VIEW_APPS && e.key.keysym.sym == SDLK_PAGEDOWN) {
-                        home_widget2_idx = home_widget_cycle(home_widget2_idx, home_widget_idx, 1);
+                    if (home_view_idx != HOME_VIEW_APPS &&
+                        (e.key.keysym.sym == SDLK_PAGEDOWN ||
+                         (e.key.keysym.sym == SDLK_PAGEUP && !home_radio_visible))) {
+                        int dir = e.key.keysym.sym == SDLK_PAGEDOWN ? 1 : -1;
+                        home_widget2_idx = home_widget_cycle(home_widget2_idx, home_widget_idx, dir);
                         home_recent_focus_slot = 0;
                         if (home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX) weather_kick(1);
                         save_settings(); play_click(); continue;
                     }
 
-                    // Right focuses a Recently Played widget without disturbing
-                    // the normal left-hand Home selection. Once focused, D-pad
-                    // chooses games 2-4 and A launches; Left/B returns.
+                    // Right focuses an interactive widget without disturbing
+                    // the normal left-hand Home selection. Recently Played uses
+                    // D-pad/A to launch; Calendar uses A to open the full app.
                     if (home_view_idx != HOME_VIEW_APPS) {
-                        int recent_slot = home_widget_idx == HOME_WIDGET_RECENT ? 1
-                                        : home_widget2_idx == HOME_WIDGET_RECENT ? 2 : 0;
+                        int kind1 = home_widget_idx, kind2 = home_widget2_idx;
                         int ridx[4] = {0}; int rn = recent_activity_indices(1, 3, ridx);
-                        if (!home_recent_focus_slot && recent_slot && rn > 0 && e.key.keysym.sym == SDLK_RIGHT) {
-                            home_recent_focus_slot = recent_slot;
-                            if (home_recent_widget_sel >= rn) home_recent_widget_sel = rn - 1;
+                        int focusable1 = kind1 == HOME_WIDGET_CALENDAR || (kind1 == HOME_WIDGET_RECENT && rn > 0);
+                        int focusable2 = kind2 == HOME_WIDGET_CALENDAR || (kind2 == HOME_WIDGET_RECENT && rn > 0);
+                        if (!home_recent_focus_slot && e.key.keysym.sym == SDLK_RIGHT && (focusable1 || focusable2)) {
+                            home_recent_focus_slot = focusable1 ? 1 : 2;
+                            if (rn > 0 && home_recent_widget_sel >= rn) home_recent_widget_sel = rn - 1;
                             play_click(); continue;
                         }
                         if (home_recent_focus_slot) {
-                            if (!recent_slot || home_recent_focus_slot != recent_slot || rn <= 0) {
+                            int focused_kind = home_recent_focus_slot == 1 ? kind1 : kind2;
+                            int focused_ok = focused_kind == HOME_WIDGET_CALENDAR ||
+                                             (focused_kind == HOME_WIDGET_RECENT && rn > 0);
+                            if (!focused_ok) {
                                 home_recent_focus_slot = 0;
                             } else if (e.key.keysym.sym == SDLK_ESCAPE || e.key.keysym.sym == SDLK_LEFT) {
                                 home_recent_focus_slot = 0; play_click(); continue;
-                            } else if (e.key.keysym.sym == SDLK_UP) {
+                            } else if (e.key.keysym.sym == SDLK_RIGHT) {
+                                int other = home_recent_focus_slot == 1 ? 2 : 1;
+                                int other_ok = other == 1 ? focusable1 : focusable2;
+                                if (other_ok) home_recent_focus_slot = other;
+                                continue;
+                            } else if (focused_kind == HOME_WIDGET_CALENDAR && e.key.keysym.sym == SDLK_RETURN) {
+                                calendar_set_today();
+                                home_recent_focus_slot = 0;
+                                state = STATE_CALENDAR;
+                                play_click(); continue;
+                            } else if (focused_kind == HOME_WIDGET_RECENT && e.key.keysym.sym == SDLK_UP) {
                                 home_recent_widget_sel = (home_recent_widget_sel - 1 + rn) % rn; continue;
-                            } else if (e.key.keysym.sym == SDLK_DOWN) {
+                            } else if (focused_kind == HOME_WIDGET_RECENT && e.key.keysym.sym == SDLK_DOWN) {
                                 home_recent_widget_sel = (home_recent_widget_sel + 1) % rn; continue;
-                            } else if (e.key.keysym.sym == SDLK_RETURN) {
+                            } else if (focused_kind == HOME_WIDGET_RECENT && e.key.keysym.sym == SDLK_RETURN) {
                                 ActivityRecord *a = &activity_records[ridx[home_recent_widget_sel]];
                                 play_click(); launch_game(&win, &ren, &game_video_released, a->path, a->title, a->platform_dir);
                                 continue;
-                            } else if (e.key.keysym.sym == SDLK_RIGHT) continue;
+                            } else if (focused_kind == HOME_WIDGET_CALENDAR &&
+                                       (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN)) continue;
                         }
                     } else home_recent_focus_slot = 0;
                     if (home_grid_reorder) {
                         SDL_Keycode rk = e.key.keysym.sym;
-                        if (rk == SDLK_RETURN || rk == SDLK_s) {
-                            if (home_grid_reorder_dirty) save_settings();
-                            home_grid_reorder = 0;
-                            home_grid_reorder_dirty = 0;
-                            home_reorder_x_down_at = 0;
-                            play_click();
+                        if (home_grid_dragging) {
+                            if (rk == SDLK_RETURN) {
+                                if (home_grid_reorder_dirty) save_settings();
+                                home_grid_dragging = 0;
+                                home_grid_reorder_dirty = 0;
+                                play_click();
+                            } else if (rk == SDLK_ESCAPE) {
+                                memcpy(home_tile_order, home_tile_order_backup, sizeof home_tile_order);
+                                home_grid_dragging = 0;
+                                home_grid_reorder_dirty = 0;
+                                play_click();
+                            } else if (rk == SDLK_UP || rk == SDLK_DOWN || rk == SDLK_LEFT || rk == SDLK_RIGHT) {
+                                hgrid_reorder_move(row_type, rcount, rk);
+                            }
                         } else if (rk == SDLK_ESCAPE) {
-                            memcpy(home_tile_order, home_tile_order_backup, sizeof home_tile_order);
                             home_grid_reorder = 0;
-                            home_grid_reorder_dirty = 0;
-                            home_reorder_x_down_at = 0;
                             play_click();
-                        } else if (rk == SDLK_UP || rk == SDLK_DOWN || rk == SDLK_LEFT || rk == SDLK_RIGHT) {
-                            hgrid_reorder_move(row_type, rcount, rk);
+                        } else if (rk == SDLK_UP || rk == SDLK_DOWN || rk == SDLK_LEFT || rk == SDLK_RIGHT ||
+                                   rk == SDLK_q || rk == SDLK_e) {
+                            home_selected = hgrid_nav_layout(row_type, rcount, home_selected, rk);
                         }
                         continue;
                     }
@@ -12648,15 +13851,9 @@ int main(int argc, char *argv[]) {
                     if (home_selected < 0) home_selected = 0;
                     if (row_type[home_selected] == ROW_H_WELCOME && rcount > 1) home_selected++;
                     if (home_view_idx == HOME_VIEW_APPS) {
-                        // Grid nav: Left/Right by one tile, Up/Down by a row.
-                        int tiles[MAX_HOME_ROWS], nt = 0, ord = 0;
-                        nt = hgrid_tiles(row_type, rcount, tiles);
-                        for (int n = 0; n < nt; n++) if (tiles[n] == home_selected) ord = n;
-                        if (nt > 0) {
-                            SDL_Keycode kk = e.key.keysym.sym;
-                            ord = hgrid_nav_ord(ord, nt, kk);
-                            home_selected = tiles[ord];
-                        }
+                        // D-pad keeps spatial phone-grid movement; L1/R1 also
+                        // switch pages while preserving the current row/column.
+                        home_selected = hgrid_nav_layout(row_type, rcount, home_selected, e.key.keysym.sym);
                     } else {
                     // Minimal list: step to the next selectable row, and wrap
                     // around at the ends (bottom + Down -> top, top + Up -> bottom)
@@ -12682,7 +13879,17 @@ int main(int argc, char *argv[]) {
                     }
                     if (e.key.keysym.sym == SDLK_RETURN) {
                         int rt = row_type[home_selected];
-                        if (rt == ROW_H_CONTINUE) {
+                        if (rt == ROW_H_APP_WIDGET) {
+                            if (app_widget_kind == APP_WIDGET_WEATHER) {
+                                weather_kick(1);
+                                g_weather_refresh_msg_until = SDL_GetTicks() + 4000;
+                                play_click();
+                            } else if (app_widget_kind == APP_WIDGET_CALENDAR) {
+                                calendar_set_today();
+                                state = STATE_CALENDAR;
+                                play_click();
+                            }
+                        } else if (rt == ROW_H_CONTINUE) {
                             ActivityRecord *r = &activity_records[row_extra[home_selected]];
                             play_click();
                             launch_game(&win, &ren, &game_video_released, r->path, r->title, r->platform_dir);
@@ -12767,22 +13974,26 @@ int main(int argc, char *argv[]) {
                         } else if (rt == ROW_H_QUICK_ACHIEVEMENTS) {
                             ra_book_load(); ra_book_selected = 0;
                             play_click(); state = STATE_ACHIEVEMENTS;
+                        } else if (rt == ROW_H_QUICK_CALCULATOR) {
+                            calculator_selected = 0;
+                            play_click(); state = STATE_CALCULATOR;
                         }
                     }
                     // --- Media widget transport (only in the Informational view) ---
-                    // Whichever of Music / Radio is showing gets L1/R1/Select.
+                    // Radio uses L1/L2/Select; Music keeps its own L1/Select
+                    // transport. R1/R2 remain dedicated to cycling widget slots.
                     if (home_view_idx != HOME_VIEW_APPS) {
                         int mw = HOME_WIDGET_NONE;
                         if (home_widget_idx  == HOME_WIDGET_MUSIC || home_widget_idx  == HOME_WIDGET_RADIO) mw = home_widget_idx;
                         else if (home_widget2_idx == HOME_WIDGET_MUSIC || home_widget2_idx == HOME_WIDGET_RADIO) mw = home_widget2_idx;
                         SDL_Keycode mk = e.key.keysym.sym;
-                        if (mw == HOME_WIDGET_RADIO && (mk == SDLK_q || mk == SDLK_SLASH)) {
+                        if (mw == HOME_WIDGET_RADIO && (mk == SDLK_q || mk == SDLK_PAGEUP || mk == SDLK_SLASH)) {
                             if (mk == SDLK_SLASH) {
                                 play_click();
                                 if (radio_pid > 0) radio_stop();
                                 else if (radio_count > 0) radio_play(radio_sel);
                             } else if (radio_count > 0) {
-                                radio_sel = (radio_sel - 1 + radio_count) % radio_count;
+                                radio_sel = (radio_sel + (mk == SDLK_PAGEUP ? 1 : -1) + radio_count) % radio_count;
                                 play_click();
                                 if (radio_pid > 0) radio_play(radio_sel);   // live re-tune, like a dial
                             }
@@ -13426,6 +14637,85 @@ int main(int argc, char *argv[]) {
                         }
                     }
                 }
+                else if (state == STATE_CALENDAR) {
+                    SDL_Keycode k = e.key.keysym.sym;
+                    struct tm selected_day = calendar_selected_tm();
+                    int selected_ymd = calendar_ymd_from_tm(&selected_day);
+                    int reminder_i = calendar_reminder_find(selected_ymd);
+                    if (calendar_reminder_time_picker) {
+                        if (k == SDLK_UP || k == SDLK_DOWN) {
+                            calendar_reminder_time_choice = !calendar_reminder_time_choice;
+                        } else if (calendar_reminder_time_choice && k == SDLK_LEFT) {
+                            calendar_reminder_edit_minutes =
+                                (calendar_reminder_edit_minutes - 5 + 1440) % 1440;
+                        } else if (calendar_reminder_time_choice && k == SDLK_RIGHT) {
+                            calendar_reminder_edit_minutes =
+                                (calendar_reminder_edit_minutes + 5) % 1440;
+                        } else if (calendar_reminder_time_choice && k == SDLK_q) {
+                            calendar_reminder_edit_minutes =
+                                (calendar_reminder_edit_minutes - 60 + 1440) % 1440;
+                        } else if (calendar_reminder_time_choice && k == SDLK_e) {
+                            calendar_reminder_edit_minutes =
+                                (calendar_reminder_edit_minutes + 60) % 1440;
+                        } else if (k == SDLK_RETURN) {
+                            calendar_reminder_set(selected_ymd, calendar_reminder_pending_text,
+                                calendar_reminder_time_choice ? calendar_reminder_edit_minutes : -1);
+                            calendar_reminder_time_picker = 0;
+                            calendar_reminder_pending_text[0] = '\0';
+                            play_click();
+                        } else if (k == SDLK_ESCAPE) {
+                            calendar_reminder_time_picker = 0;
+                            calendar_reminder_pending_text[0] = '\0';
+                            play_click();
+                        }
+                    } else if (calendar_reminder_delete_confirm) {
+                        if (k == SDLK_RETURN) {
+                            calendar_reminder_remove(selected_ymd);
+                            calendar_reminder_delete_confirm = 0; play_click();
+                        } else if (k == SDLK_ESCAPE) {
+                            calendar_reminder_delete_confirm = 0; play_click();
+                        }
+                    } else if (k == SDLK_ESCAPE) {
+                        calendar_set_today();
+                        play_click(); state = STATE_HOME;
+                    } else if (k == SDLK_LEFT) calendar_move_days(-1);
+                    else if (k == SDLK_RIGHT) calendar_move_days(1);
+                    else if (k == SDLK_UP) calendar_move_days(-7);
+                    else if (k == SDLK_DOWN) calendar_move_days(7);
+                    else if (k == SDLK_q) calendar_move_month(-1);
+                    else if (k == SDLK_e) calendar_move_month(1);
+                    else if (k == SDLK_s && reminder_i >= 0) {
+                        calendar_reminder_delete_confirm = 1; play_click();
+                    } else if (k == SDLK_RETURN) {
+                        calendar_reminder_time_choice =
+                            reminder_i >= 0 && calendar_reminders[reminder_i].minute_of_day >= 0;
+                        calendar_reminder_edit_minutes = calendar_reminder_time_choice
+                            ? calendar_reminders[reminder_i].minute_of_day : 9 * 60;
+                        calendar_reminder_pending_text[0] = '\0';
+                        snprintf(kb_buffer, sizeof kb_buffer, "%s",
+                                 reminder_i >= 0 ? calendar_reminders[reminder_i].text : "");
+                        kb_len = (int)strlen(kb_buffer); kb_row = kb_col = 0;
+                        kb_return_state = STATE_CALENDAR;
+                        kb_purpose = KB_PURPOSE_CALENDAR_REMINDER;
+                        state = STATE_KEYBOARD; play_click();
+                    }
+                }
+                else if (state == STATE_CALCULATOR) {
+                    static const char *calc_keys[16] = {
+                        "7", "8", "9", "/", "4", "5", "6", "*",
+                        "1", "2", "3", "-", "0", ".", "+", "="
+                    };
+                    SDL_Keycode k = e.key.keysym.sym;
+                    int row = calculator_selected / 4, col = calculator_selected % 4;
+                    if (k == SDLK_ESCAPE) { play_click(); state = STATE_HOME; }
+                    else if (k == SDLK_LEFT) calculator_selected = row * 4 + (col + 3) % 4;
+                    else if (k == SDLK_RIGHT) calculator_selected = row * 4 + (col + 1) % 4;
+                    else if (k == SDLK_UP) calculator_selected = ((row + 3) % 4) * 4 + col;
+                    else if (k == SDLK_DOWN) calculator_selected = ((row + 1) % 4) * 4 + col;
+                    else if (k == SDLK_RETURN) calculator_press(calc_keys[calculator_selected]);
+                    else if (k == SDLK_s) calculator_reset();
+                    else if (k == SDLK_f) calculator_backspace();
+                }
                 else if (state == STATE_ACHIEVEMENTS) {
                     SDL_Keycode k = e.key.keysym.sym;
                     if (k == SDLK_ESCAPE) { play_click(); state = STATE_SETTINGS; }
@@ -13732,6 +15022,9 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_HOME_WIDGET2) {
                                 home_widget2_idx = home_widget_cycle(home_widget2_idx, home_widget_idx, dir);
                                 if (home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX) weather_kick(1);
+                            } else if (rt == ROW_DISP_APP_WIDGET) {
+                                app_widget_kind = (app_widget_kind + dir + APP_WIDGET_COUNT) % APP_WIDGET_COUNT;
+                                if (app_widget_kind == APP_WIDGET_WEATHER) weather_kick(1);
                             } else if (rt == ROW_DISP_WEATHER_UNIT) {
                                 weather_unit = !weather_unit;
                                 weather_convert_cached(weather_unit);   // flip the shown value now
@@ -13833,11 +15126,11 @@ int main(int argc, char *argv[]) {
                             if (rt == ROW_G_FASTFORWARD) {
                                 fast_forward_idx = (fast_forward_idx + dir + FASTFORWARD_COUNT) % FASTFORWARD_COUNT;
                                 ra_hotkeys_set_snap_fastforward();
-                                game_audio_mute(0);   // push ratio/mode into knulli.conf now
+                                game_audio_mute(0, game_aspect_idx, game_rotation_idx); // push launch settings now
                             } else if (rt == ROW_G_FASTFWD_MODE) {
                                 fast_forward_mode = !fast_forward_mode;
                                 ra_hotkeys_set_snap_fastforward();
-                                game_audio_mute(0);
+                                game_audio_mute(0, game_aspect_idx, game_rotation_idx);
                             } else if (rt == ROW_G_AUTOSAVE) {
                                 auto_save_games = !auto_save_games;
                             } else if (rt == ROW_G_CONSOLE_VIEW) {
@@ -14138,6 +15431,10 @@ int main(int argc, char *argv[]) {
                                 disp_grp_home_open = !disp_grp_home_open;
                             } else if (rt == ROW_DISP_GRP_WIDGETS) {
                                 disp_grp_widgets_open = !disp_grp_widgets_open;
+                            } else if (rt == ROW_DISP_APP_WIDGET) {
+                                app_widget_kind = (app_widget_kind + 1) % APP_WIDGET_COUNT;
+                                if (app_widget_kind == APP_WIDGET_WEATHER) weather_kick(1);
+                                save_settings(); settings_dirty = 0;
                             } else if (rt == ROW_DISP_GRP_STATS) {
                                 disp_grp_stats_open = !disp_grp_stats_open;
                             } else if (rt == ROW_DISP_STAT_GRP) {
@@ -14406,6 +15703,11 @@ int main(int argc, char *argv[]) {
                         if (k == SDLK_DOWN) setup_sel = (setup_sel + 1) % DEVICE_PROFILE_COUNT;
                         if (k == SDLK_RETURN) {
                             device_idx = setup_sel;
+                            setup_step = SETUP_HOTKEYS; setup_sel = 0;
+                            play_click();
+                        }
+                    } else if (setup_step == SETUP_HOTKEYS) {
+                        if (k == SDLK_RETURN) {
                             setup_step = SETUP_TZ; setup_sel = 0;
                             for (int i = 0; i < TZ_COUNT; i++)
                                 if (strcmp(tz_list[i].zone, tz_name) == 0) setup_sel = i;
@@ -14588,7 +15890,8 @@ int main(int argc, char *argv[]) {
                 if (g_link_active) { link_restore_core_opts(); g_link_active = 0; } // undo network-link core options
                 ra_user_settings_capture(); // sync global menu/OSD options from either RA entry point
                 ra_hotkeys_capture(); // retain a menu combo the user saved inside RetroArch
-                game_audio_mute(0);   // clear the "radio over games" mute, if set
+                game_audio_mute(0, game_aspect_idx, game_rotation_idx); // clear game-only overrides
+                cpu_launch_boost_stop(); // also covers an early launcher failure before RetroArch appeared
                 cpu_apply_pref();     // re-assert the governor in case the emulator changed it
                 apply_brightness();   // re-assert the backlight (RetroArch may have its own)
                 { int v = sys_volume_read(); if (v >= 0) sys_volume_pct = v; }  // follow any in-game volume change
@@ -14628,7 +15931,15 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (light_rest_active) { system("knulli-brightness dispon >/dev/null 2>&1"); light_rest_active = 0; }
-        if (deep_rest_active) { deep_rest_exit(); deep_rest_active = 0; apply_brightness(); }
+        if (deep_rest_active && !auto_sleep_rest_active) { deep_rest_exit(); deep_rest_active = 0; apply_brightness(); }
+        if (auto_sleep_rest_active && !is_sleeping) {
+            if (deep_rest_active) deep_rest_exit();
+            deep_rest_active = 0; auto_sleep_rest_active = 0; apply_brightness();
+        }
+        if (auto_sleep_rest_active && is_sleeping) {
+            SDL_Delay(250); // panel/radios are off; wait only for an input event
+            continue;
+        }
 
         // Self-heal a saved Wi-Fi connection when the device comes back into
         // range. This is intentionally skipped while the lid/deep-rest path is
@@ -14649,9 +15960,11 @@ int main(int argc, char *argv[]) {
 
         int timeout_s = auto_sleep_values[auto_sleep_idx];
         if (!is_sleeping && timeout_s > 0 && state != STATE_BOOT && state != STATE_FLASHLIGHT &&
-            state != STATE_MINIGAME &&
+            state != STATE_MINIGAME && !scrape_in_progress &&
             (SDL_GetTicks() - last_input_time) > (Uint32)(timeout_s * 1000)) {
             is_sleeping = 1;
+            if (!deep_rest_active) { deep_rest_enter(); deep_rest_active = 1; }
+            auto_sleep_rest_active = 1;
         }
 
         // (game-running liveness is handled in the dormant fast-path above)
@@ -14907,7 +16220,8 @@ int main(int argc, char *argv[]) {
                 if (t == ROW_H_SURPRISE) surprise_row = i;
                 if (t == ROW_H_QUICK_RETROARCH || t == ROW_H_QUICK_RADIO || t == ROW_H_QUICK_MUSIC ||
                     t == ROW_H_QUICK_MINIGAMES || t == ROW_H_QUICK_LINK ||
-                    t == ROW_H_QUICK_FLASHLIGHT || t == ROW_H_QUICK_ACHIEVEMENTS) { first_app_row = i; break; }
+                    t == ROW_H_QUICK_FLASHLIGHT || t == ROW_H_QUICK_ACHIEVEMENTS ||
+                    t == ROW_H_QUICK_CALCULATOR) { first_app_row = i; break; }
             }
 
             for (int i = 0; i < rcount; i++) {
@@ -15008,6 +16322,8 @@ int main(int argc, char *argv[]) {
                     snprintf(text, sizeof(text), "Mini Games");
                 } else if (rt == ROW_H_QUICK_ACHIEVEMENTS) {
                     snprintf(text, sizeof(text), "Achievements Book");
+                } else if (rt == ROW_H_QUICK_CALCULATOR) {
+                    snprintf(text, sizeof(text), "Calculator");
                 }
 
                 int selected_row = (i == home_selected && rt != ROW_H_WELCOME);
@@ -15129,14 +16445,16 @@ int main(int argc, char *argv[]) {
                 // of their own slot and below the status bar. They are drawn
                 // last so art or a long title can never cover them.
                 if (w1 != HOME_WIDGET_NONE) {
-                    SDL_Texture *b = render_text(ren, font_label, "R1", th->accent2);
+                    const char *keys = (w1 == HOME_WIDGET_RADIO || w2 == HOME_WIDGET_RADIO) ? "R1" : "L1  R1";
+                    SDL_Texture *b = render_text(ren, font_fixed ? font_fixed : font_label, keys, th->accent2);
                     int bw, bh; SDL_QueryTexture(b, NULL, NULL, &bw, &bh);
-                    SDL_RenderCopy(ren, b, NULL, &(SDL_Rect){ WIN_W - 16 - bw, r1t, bw, bh });
+                    SDL_RenderCopy(ren, b, NULL, &(SDL_Rect){ WIN_W - 16 - bw, home_widget_draw_top[0], bw, bh });
                 }
                 if (w2 != HOME_WIDGET_NONE) {
-                    SDL_Texture *b = render_text(ren, font_label, "R2", th->accent2);
+                    const char *keys = (w1 == HOME_WIDGET_RADIO || w2 == HOME_WIDGET_RADIO) ? "R2" : "L2  R2";
+                    SDL_Texture *b = render_text(ren, font_fixed ? font_fixed : font_label, keys, th->accent2);
                     int bw, bh; SDL_QueryTexture(b, NULL, NULL, &bw, &bh);
-                    SDL_RenderCopy(ren, b, NULL, &(SDL_Rect){ WIN_W - 16 - bw, r2t, bw, bh });
+                    SDL_RenderCopy(ren, b, NULL, &(SDL_Rect){ WIN_W - 16 - bw, home_widget_draw_top[1], bw, bh });
                 }
             }
           } // end Minimal home layout
@@ -15166,6 +16484,7 @@ int main(int argc, char *argv[]) {
               int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
               SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ bx + 20, by + bh - hh - 18, hw, hh });
           }
+          draw_calendar_reminder_popup(ren, th);
 
         } else if (state == STATE_SURPRISE) {
             draw_dock_logo(ren, font_small);
@@ -16248,9 +17567,13 @@ int main(int argc, char *argv[]) {
                     switch (rt) {
                         case ROW_DISP_GRP_HOME: snprintf(text, sizeof(text), "%c Home", disp_grp_home_open ? 'v' : '>'); break;
                         case ROW_DISP_HOME_VIEW: snprintf(text, sizeof(text), "Home Layout: %s", home_view_names[(home_view_idx >= 0 && home_view_idx < HOME_VIEW_COUNT) ? home_view_idx : 0]); indent = 1; break;
-                        case ROW_DISP_GRP_WIDGETS: snprintf(text, sizeof(text), "%c Widgets", disp_grp_widgets_open ? 'v' : '>'); indent = 1; break;
+                        case ROW_DISP_GRP_WIDGETS: snprintf(text, sizeof(text), "%c %s Widgets", disp_grp_widgets_open ? 'v' : '>',
+                                                           home_view_idx == HOME_VIEW_APPS ? "App Focused" : "Informational"); indent = 1; break;
                         case ROW_DISP_HOME_WIDGET: snprintf(text, sizeof(text), "#1: %s", home_widget_names[(home_widget_idx >= 0 && home_widget_idx < HOME_WIDGET_COUNT) ? home_widget_idx : 0]); indent = 2; break;
                         case ROW_DISP_HOME_WIDGET2: snprintf(text, sizeof(text), "#2: %s", home_widget_names[(home_widget2_idx >= 0 && home_widget2_idx < HOME_WIDGET_COUNT) ? home_widget2_idx : 0]); indent = 2; break;
+                        case ROW_DISP_APP_WIDGET: snprintf(text, sizeof(text), "Home App Widget: %s%s",
+                                                          app_widget_names[(app_widget_kind >= 0 && app_widget_kind < APP_WIDGET_COUNT) ? app_widget_kind : 0],
+                                                          app_widget_kind == APP_WIDGET_NONE ? "  (X on Home to add)" : "  (X on Home to change)"); indent = 2; break;
                         case ROW_DISP_WEATHER_UNIT: snprintf(text, sizeof(text), "Weather Units: %s", weather_unit ? "Celsius" : "Fahrenheit"); indent = 2; break;
                         case ROW_DISP_SURPRISE: snprintf(text, sizeof(text), "Surprise Me (Home): %s", surprise_me_enabled ? "ON" : "OFF"); indent = 1; break;
                         case ROW_DISP_GRP_STATS: snprintf(text, sizeof(text), "%c Your Stats Items (%d/%d)", disp_grp_stats_open ? 'v' : '>', stats_count(), STATS_PICK_MAX); indent = 1; break;
@@ -16520,6 +17843,10 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, ch, NULL, &(SDL_Rect){ (WIN_W - cw) / 2, WIN_H / 2 + 28, cw, chh });
             }
 
+        } else if (state == STATE_CALENDAR) {
+            draw_calendar_app(ren, th);
+        } else if (state == STATE_CALCULATOR) {
+            draw_calculator_app(ren, th);
         } else if (state == STATE_ACHIEVEMENTS) {
             // A compact open-book library: recent unlocks on the left, the
             // selected achievement's full record on the right. The TSV cache
@@ -16737,8 +18064,8 @@ int main(int argc, char *argv[]) {
 
             const char *titles[SETUP_STEP_COUNT] = {
                 "Welcome to Snap FE", "What should we call you?", "Which handheld is this?",
-                "Choose your time zone", "Clock format", "Weather & Radio location",
-                "Your games", "Pick a theme", "You're all set"
+                "Built-in controls & hotkeys", "Choose your time zone", "Clock format",
+                "Weather & Radio location", "Your games", "Pick a theme", "You're all set"
             };
             SDL_Texture *tt = render_text(ren, font_small, titles[setup_step], g_ui_text);
             int ttw, tth; SDL_QueryTexture(tt, NULL, NULL, &ttw, &tth);
@@ -16796,6 +18123,35 @@ int main(int argc, char *argv[]) {
                     g_ui_dim, WIN_W - 2*hx);
                 int n2w, n2h; SDL_QueryTexture(n2, NULL, NULL, &n2w, &n2h);
                 SDL_RenderCopy(ren, n2, NULL, &(SDL_Rect){ hx, y, n2w, n2h });
+            } else if (setup_step == SETUP_HOTKEYS) {
+                const char *controls[][2] = {
+                    { "A",              "Select / open" },
+                    { "B",              "Back" },
+                    { "X",              "Context / change App Focused widget" },
+                    { "Y",              "Favorite / App edit and pick-up" },
+                    { "Select",         "Search / options" },
+                    { "L1 / R1",        "Change App Focused pages" },
+                    { "L1/R1, L2/R2",   "Back/next top and bottom widgets" },
+                    { "Menu x3",        "Flashlight (programmable in Settings)" },
+                    { "Menu + Select",  "RetroArch menu while playing" },
+                    { "Menu + Start",   "Exit a game to Snap FE" },
+                    { "Menu + R2",      "Fast-forward" },
+                    { "Menu + Vol +/-", "Brightness; Volume alone adjusts sound" },
+                };
+                int colw = (WIN_W - 2*hx - 22) / 2;
+                int pitch = TTF_FontHeight(font_label) + TTF_FontHeight(font_fixed ? font_fixed : font_label) + 4;
+                for (int i = 0; i < (int)(sizeof(controls)/sizeof(controls[0])); i++) {
+                    int col = i / 6, row = i % 6;
+                    int cx = hx + col * (colw + 22), cy = y + row * pitch;
+                    SDL_Texture *bt = render_text_fit(ren, font_label_bold ? font_label_bold : font_label,
+                                                      controls[i][0], th->accent2, colw);
+                    int cw,ch; SDL_QueryTexture(bt,NULL,NULL,&cw,&ch);
+                    SDL_RenderCopy(ren,bt,NULL,&(SDL_Rect){cx,cy,cw,ch});
+                    SDL_Texture *dt = render_text_fit(ren, font_fixed ? font_fixed : font_label,
+                                                      controls[i][1], g_ui_dim, colw);
+                    int dw,dh; SDL_QueryTexture(dt,NULL,NULL,&dw,&dh);
+                    SDL_RenderCopy(ren,dt,NULL,&(SDL_Rect){cx,cy+ch+1,dw,dh});
+                }
             } else if (setup_step == SETUP_ROMS) {
                 char rl[MAX_LINES][128];
                 int rn = wrap_text(font_label, roms_status[0] ? roms_status : "Scanning for a games card...", WIN_W - 2*hx, rl);
@@ -16899,6 +18255,7 @@ int main(int argc, char *argv[]) {
 
             const char *fh = setup_step == SETUP_WELCOME ? "A: Begin"
                            : setup_step == SETUP_DONE   ? "A: Start Snap FE     B: Back"
+                           : setup_step == SETUP_HOTKEYS ? "A: Continue     B: Back"
                            : "A: Select     B: Back";
             SDL_Texture *fht = render_text(ren, font_label, fh, g_ui_dim);
             int fw, fhh; SDL_QueryTexture(fht, NULL, NULL, &fw, &fhh);
@@ -16921,6 +18278,7 @@ int main(int argc, char *argv[]) {
                                  : kb_purpose == KB_PURPOSE_BG_SEARCH ? "SEARCH WALLHAVEN BACKGROUNDS"
                                  : kb_purpose == KB_PURPOSE_WALLHAVEN_KEY ? "WALLHAVEN PERSONAL API KEY"
                                  : kb_purpose == KB_PURPOSE_BG_RENAME ? "RENAME BACKGROUND FILE"
+                                 : kb_purpose == KB_PURPOSE_CALENDAR_REMINDER ? "CALENDAR REMINDER"
                                  : "API KEY";
             // Bigger keys, and the whole block centred in the space below the
             // status bar so it fills the screen instead of floating up top.
@@ -18364,7 +19722,7 @@ int main(int argc, char *argv[]) {
             SDL_RenderFillRect(ren, &(SDL_Rect){ 0, HUD_BAR_H - 2, WIN_W, 2 });
             if (state == STATE_HOME || state == STATE_SURPRISE || state == STATE_PLATFORM ||
                 state == STATE_BG_PICKER || state == STATE_BG_ONLINE || state == STATE_BG_PREVIEW || state == STATE_BG_TARGET || state == STATE_MENU || state == STATE_BOOK ||
-                state == STATE_ACHIEVEMENTS) {
+                state == STATE_ACHIEVEMENTS || state == STATE_CALENDAR || state == STATE_CALCULATOR) {
                 draw_dock_logo(ren, font_small);
             }
         }
@@ -18735,11 +20093,14 @@ int main(int argc, char *argv[]) {
                 "minigames-pixel", "home-dark-bold",
                 "settings-game-layout", "settings-stop-scrape-ra", "achievements-book",
                 "surprise-layout", "settings-power-confirm", "home-app-reorder", "favorites-single-card",
-                "block-roll-level", "link-play-game-list"
+                "block-roll-level", "link-play-game-list", "setup-built-in-hotkeys",
+                "home-stats-recent-spacing", "home-app-weather-controls",
+                "home-battery-health-data", "home-calendar-week",
+                "calendar-app", "calculator-app", "calendar-reminder-popup", "calendar-time-picker"
             };
             static const int pfonts[] = {
                 0, 3, 7, 9, 1, 3, 2, 3, 2, 0, 4, 4, 3, 3, 3, 3, 9, 1, 3, 3, 4,
-                3, 0, 5, 3, 9, 3
+                3, 0, 5, 3, 9, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0
             };
             const int PROMO_STEPS = (int)(sizeof(pnames)/sizeof(pnames[0]));
             if (pstep < 0) {
@@ -18749,9 +20110,14 @@ int main(int argc, char *argv[]) {
             last_input_time = SDL_GetTicks();   // keep the loop at 60fps so anims settle
             if (pf == 0) {
                 book_info_open = 0; book_l_scroll = book_r_scroll = 0;
-                home_grid_reorder = 0; settings_night_theme_confirm = 0; settings_autops_confirm = 0;
+                home_grid_reorder = 0; home_grid_dragging = 0; app_widget_moving = 0;
+                settings_night_theme_confirm = 0; settings_autops_confirm = 0;
                 home_view_idx = 0; platform_selected = 0; selected = 0;
                 home_widget_idx = HOME_WIDGET_NONE; home_widget2_idx = HOME_WIDGET_NONE;
+                app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
+                calendar_reminder_popup = 0; calendar_reminder_delete_confirm = 0;
+                calendar_reminder_time_picker = 0; calendar_reminder_pending_text[0] = '\0';
+                calendar_reminder_count = 0;
                 font_choice_idx = pfonts[pstep];
                 font_size_idx = 1;              // Medium: legible without crowding
                 font_bold = 0;
@@ -18767,7 +20133,8 @@ int main(int argc, char *argv[]) {
                   case 1:  promo_seed_radio(); state = STATE_HOME; theme_idx = 2; home_view_idx = 0; home_selected = 5;
                            home_widget_idx = HOME_WIDGET_RADIO; home_widget2_idx = HOME_WIDGET_STATS; break;
                   case 2:  promo_seed_radio(); state = STATE_RADIO; theme_idx = 2; break;
-                  case 3:  state = STATE_HOME; theme_idx = 1; home_view_idx = 1; home_selected = 5; break;
+                  case 3:  state = STATE_HOME; theme_idx = 1; home_view_idx = 1; home_selected = 5;
+                           app_widget_kind = APP_WIDGET_CALENDAR; app_widget_slot = 1; break;
                   case 4:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 1; break;
                   case 5:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 2; break;
                   case 6:  state = STATE_PLATFORM; theme_idx = 1; platform_view_style = 3; break;
@@ -18827,7 +20194,7 @@ int main(int argc, char *argv[]) {
                            scrape_in_progress = 0; state = STATE_HOME; theme_idx = THEME_COUNT - 1; home_view_idx = HOME_VIEW_APPS;
                            home_apps_mask = (1 << APP_COUNT) - 1; surprise_me_enabled = 1;
                            hud_chrome_style = 3; hud_chrome_color_idx = 5; cpu_perf_mode = 1; power_save_mode = 0;
-                           home_selected = 2; home_grid_reorder = 1; break;
+                           home_selected = 2; home_grid_reorder = 1; home_grid_dragging = 0; break;
                   case 24:
                            scrape_in_progress = 0; theme_idx = 1; display_art_idx = 0;
                            free_games(ren); scan_games(ren, font_label, 0);
@@ -18853,6 +20220,53 @@ int main(int argc, char *argv[]) {
                            }
                            break;
                            }
+                  case 27:
+                           scrape_in_progress = 0; state = STATE_SETUP; theme_idx = 1;
+                           setup_step = SETUP_HOTKEYS; setup_sel = 0; break;
+                  case 28:
+                           scrape_in_progress = 0; promo_seed_recent();
+                           state = STATE_HOME; theme_idx = 1; home_view_idx = HOME_VIEW_MINIMAL; home_selected = 0;
+                           home_widget_idx = HOME_WIDGET_STATS; home_widget2_idx = HOME_WIDGET_RECENT; break;
+                  case 29:
+                           scrape_in_progress = 0; state = STATE_HOME; theme_idx = 1;
+                           home_view_idx = HOME_VIEW_APPS; home_selected = 5;
+                           app_widget_kind = APP_WIDGET_WEATHER; app_widget_slot = 1;
+                           snprintf(g_weather_str, sizeof g_weather_str, "72F Sunny"); g_weather_at = time(NULL); break;
+                  case 30:
+                           scrape_in_progress = 0; state = STATE_HOME; theme_idx = THEME_MIDNIGHT;
+                           home_view_idx = HOME_VIEW_MINIMAL; home_selected = 0;
+                           home_widget_idx = HOME_WIDGET_CLOCK; home_widget2_idx = HOME_WIDGET_BATTERY; break;
+                  case 31:
+                           scrape_in_progress = 0; state = STATE_HOME; theme_idx = 1;
+                           home_view_idx = HOME_VIEW_MINIMAL; home_selected = 0;
+                           home_widget_idx = HOME_WIDGET_CALENDAR; home_widget2_idx = HOME_WIDGET_STATS; break;
+                  case 32:
+                           scrape_in_progress = 0; state = STATE_CALENDAR; theme_idx = 1;
+                           calendar_set_today();
+                           calendar_reminder_count = 1;
+                           { struct tm _d = calendar_selected_tm(); calendar_reminders[0].ymd = calendar_ymd_from_tm(&_d); }
+                           calendar_reminders[0].minute_of_day = 18 * 60;
+                           snprintf(calendar_reminders[0].text, sizeof calendar_reminders[0].text, "Call Mom");
+                           break;
+                  case 33:
+                           scrape_in_progress = 0; state = STATE_CALCULATOR; theme_idx = 1;
+                           calculator_reset(); calculator_selected = 15; break;
+                  case 34: {
+                           scrape_in_progress = 0; state = STATE_HOME; theme_idx = 1;
+                           home_view_idx = HOME_VIEW_MINIMAL; home_selected = 0;
+                           home_widget_idx = HOME_WIDGET_CALENDAR; home_widget2_idx = HOME_WIDGET_STATS;
+                           calendar_reminder_count = 1; time_t _now = time(NULL); struct tm _today = *localtime(&_now);
+                           calendar_reminders[0].ymd = calendar_ymd_from_tm(&_today);
+                           calendar_reminders[0].minute_of_day = 18 * 60;
+                           snprintf(calendar_reminders[0].text, sizeof calendar_reminders[0].text, "Call Mom");
+                           calendar_reminder_last_shown = 0; calendar_reminder_popup = 1; break;
+                           }
+                  case 35:
+                           scrape_in_progress = 0; state = STATE_CALENDAR; theme_idx = 1;
+                           calendar_set_today(); calendar_reminder_time_picker = 1;
+                           calendar_reminder_time_choice = 1; calendar_reminder_edit_minutes = 18 * 60;
+                           snprintf(calendar_reminder_pending_text, sizeof calendar_reminder_pending_text, "Call Mom");
+                           break;
                 }
                 carousel_transition_start = anim_start(); platform_enter_time = SDL_GetTicks();
                 if (pstep >= 4 && pstep <= 7) platform_enter_time -= 11000;

@@ -15,8 +15,8 @@ BIN=snapos_ui.aarch64
 [[ -f "$BIN" ]] || { echo "build first:  ./build-knulli.sh --sysroot ~/knulli-sysroot" >&2; exit 1; }
 [[ -d assets ]] || { echo "no assets/ here?" >&2; exit 1; }
 
-# Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.1
-RELEASE="${1:-1.2.1}"
+# Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.2
+RELEASE="${1:-1.2.2}"
 VER="Alpha-${RELEASE}"
 STAGE="$(mktemp -d)"
 DEST="$STAGE/system/snapos"

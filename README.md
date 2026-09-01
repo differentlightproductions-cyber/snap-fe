@@ -5,8 +5,33 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.1.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.2.2.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.2.2 Home widgets and launch-time update
+
+- App Focused Home now uses more of the screen, keeps a true 4x2 layout across
+  pages, ships the latest transparent app icons, and supports L1/R1 page changes.
+- X adds or changes a separate movable two-cell app widget, while A refreshes
+  its Weather card and Y enters app movement. Weather, Clock, Battery Health,
+  and a current-week Calendar are available without changing the two
+  Informational Home widget selections.
+- The weekly Calendar widget opens into a full Calendar app and always returns
+  to the current month on the next visit. D-pad selects a day, L1/R1 changes
+  months, and A adds or edits a saved reminder. Reminders can be all-day or use
+  a specific five-minute time, and appear on Home when due if the Calendar
+  widget is active. Calculator is a new app in both Home layouts.
+- Radio Tuner uses L1/L2 for previous/next and Select for play/stop. L1/R1 and
+  L2/R2 otherwise cycle the two Informational widget slots in both directions,
+  with their guidance aligned to the cards. Battery Health displays real health,
+  voltage and temperature data exposed by the device.
+- Auto-Sleep now enters the low-power display/radio/CPU rest path, and explicit
+  aspect-ratio choices now reach Knulli's generated RetroArch game configuration.
+- First-time setup includes a physical-button and built-in-hotkey guide.
+- The newest game-launch repair removes unused configgen output, avoids parsing
+  a byte-identical duplicate controller database, and boosts only the configgen
+  window. The RG SP diagnostic improved from about 9.262s to 2.834s while the
+  working in-game brightness path and 1% floor remain intact.
 
 ### 1.2.1 interface and control update
 
@@ -85,8 +110,9 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
 
 ### 1.1.8 highlights
 
-- App Focused Home is now a strict, paged 4x2 layout. Hold X to rearrange apps
-  with the familiar jiggle mode, including movement between pages.
+- App Focused Home is now a strict, paged 4x2 layout. Press Y to enter its
+  jiggle mode, Y again to pick up an app, and A to confirm its placement while
+  staying in edit mode for another move. Movement between pages is supported.
 - The Game settings tab now contains Games Folder, Display Art, and Show
   Descriptions. Display Art refreshes the library only after Save and only when
   the saved art type actually changed.
@@ -163,7 +189,7 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.2.1.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.2.2.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,

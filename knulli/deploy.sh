@@ -49,14 +49,17 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
   # "custom.sh" -- this very script mentions it and would kill our own shell.
   killall -9 snapos_ui retroarch mgba 2>/dev/null || true
   mkdir -p /userdata/system/snapos/config /userdata/roms
-  # configgen needs a controller map at this path; ES normally writes it on
-  # first boot, but we never let ES run. Seed it from the built-in template
-  # (has the Anbernic RG34XX-SP block). Dont clobber a user-tuned one.
+  # Configgen always loads both the built-in controller database and this user
+  # file. Older SNAP deploys copied the complete built-in database here, making
+  # configgen parse every controller twice on every game launch. Migrate only a
+  # byte-identical stock copy out of the active path; preserve any genuinely
+  # user-edited controller map untouched and keep the migrated copy recoverable.
   mkdir -p /userdata/system/configs/emulationstation
-  if [ ! -f /userdata/system/configs/emulationstation/es_input.cfg ] && \
-     [ -f /usr/share/emulationstation/es_input.cfg ]; then
-    cp -f /usr/share/emulationstation/es_input.cfg /userdata/system/configs/emulationstation/es_input.cfg
-    echo "   seeded es_input.cfg"
+  USER_INPUT=/userdata/system/configs/emulationstation/es_input.cfg
+  STOCK_INPUT=/usr/share/emulationstation/es_input.cfg
+  if [ -f "$USER_INPUT" ] && [ -f "$STOCK_INPUT" ] && cmp -s "$USER_INPUT" "$STOCK_INPUT"; then
+    mv -f "$USER_INPUT" "$USER_INPUT.snap-stock-duplicate"
+    echo "   removed duplicate stock controller database from launch path"
   fi
   cd /userdata/system/snapos
   # Extract over the top (tar replaces each bundled file). Never clear the
@@ -95,6 +98,12 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
   # that stale process once more now that snapos_ui has been atomically replaced;
   # the persistent custom.sh loop will immediately start the new build.
   killall -9 snapos_ui 2>/dev/null || true
+  # A manually stopped or crashed supervisor cannot relaunch the newly installed
+  # frontend. Start exactly one copy when it is absent; leave a healthy existing
+  # loop alone so repeated deployments never stack supervisors.
+  if ! pgrep -f "[/]userdata/system/custom.sh start" >/dev/null 2>&1; then
+    nohup /userdata/system/custom.sh start >/tmp/snapfe-deploy-restart.log 2>&1 </dev/null &
+  fi
   echo "   installed to /userdata/system/snapos/"
   if [ -x snapos_ui ]; then echo "   exec bit: OK"; else
     echo "   NOTE: no exec bit (FAT /userdata). custom.sh runs it as: sh -c ./snapos_ui"
