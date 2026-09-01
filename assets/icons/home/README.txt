@@ -1,21 +1,23 @@
-"App Focused" home layout icons
-(Settings > Display > Home > Home Layout: App Focused)
+"App Focused" Home icon packs
+(Settings > Display > Home > App Icon Pack)
 
-Drop a square image for each tile here. Any of .png / .jpg / .jpeg,
-named exactly by its slug:
+Bundled packs:
 
-  consoles.png      Consoles
-  library.png       Game Library
-  radio.png         Radio
-  music.png         Music
-  retroarch.png     RetroArch
-  link.png          Link Play
-  settings.png      Settings
-  surprise.png      Surprise Me   (only shown if you enable Surprise Me)
-  resume.png        fallback for the Resume tile when a game has no cover art
+  simple/       Lightweight line icons; automatically tinted for each theme.
+  pixel-art/    The full-color Pixel Art set shipped with Snap FE 1.2.3.
 
-The Resume tile and any Favourite tiles use the game's real scraped cover
-art -- no file needed. Missing icon file -> the tile just shows its label.
+Each pack may contain .png / .jpg / .jpeg files named exactly by slug:
 
-Recommended: ~256-512 px square, transparent PNG. Tiles render about
-150 px on the 720x480 panel; the image is fit inside (never stretched).
+  achievements, calculator, consoles, favorites, flashlight, library,
+  link, minigames, music, radio, retroarch, settings, surprise
+
+resume.png remains in this parent folder as a compatibility fallback for a
+Resume tile with no scraped cover. Resume and game-favorite tiles normally use
+the game's real artwork.
+
+If an icon is absent from the selected pack, Snap FE tries the Simple pack and
+then this legacy parent folder. A missing file therefore never produces an
+empty tile.
+
+Recommended: square transparent PNG. Tiles render at roughly 140 px on the
+720x480 panel and the image is fitted without stretching.

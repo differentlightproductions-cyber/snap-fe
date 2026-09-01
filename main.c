@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.3"
+#define SNAPFE_VERSION "Alpha Build 1.2.4"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -819,12 +819,18 @@ int surprise_me_enabled = 0;
 
 // Home screen layout -- a secondary option like a theme. Minimal = the original
 // list. App Focused = a grid of tappable icon tiles, with the resume tile
-// showing the actual cover art. Icons: assets/icons/home/<slug>.{png,jpg,jpeg}.
+// showing the actual cover art. Icon packs live under
+// assets/icons/home/<pack>/<slug>.{png,jpg,jpeg}.
 #define HOME_VIEW_MINIMAL 0
 #define HOME_VIEW_APPS    1
 #define HOME_VIEW_COUNT   2
 const char *home_view_names[HOME_VIEW_COUNT] = { "Informational (Default)", "App Focused" };
 int home_view_idx = 0;
+
+#define HOME_ICON_PACK_COUNT 2
+const char *home_icon_pack_names[HOME_ICON_PACK_COUNT] = { "Simple", "Pixel Art" };
+const char *home_icon_pack_dirs[HOME_ICON_PACK_COUNT] = { "simple", "pixel-art" };
+int home_icon_pack_idx = 0;
 
 // Home screen has TWO stacked widget slots down the right column:
 //   slot 1 (top)    -- home_widget_idx,  grows downward
@@ -3889,6 +3895,7 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_FAVORITES_VIEW 57 // independent layout for the Favorites library
 #define ROW_DISP_GRP_WIDGETS 58
 #define ROW_DISP_APP_WIDGET 59
+#define ROW_DISP_ICON_PACK 60
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
@@ -4077,6 +4084,7 @@ int build_display_rows(int *row_type, int *row_extra) {
     D_ADD(ROW_DISP_GRP_HOME, 0);
     if (disp_grp_home_open) {
         D_ADD(ROW_DISP_HOME_VIEW, 0);
+        D_ADD(ROW_DISP_ICON_PACK, 0);
         D_ADD(ROW_DISP_GREETING, 0);
         if (greeting_enabled) D_ADD(ROW_DISP_PLAYER_NAME, 0);
         D_ADD(ROW_DISP_GRP_WIDGETS, 0);
@@ -4736,6 +4744,7 @@ void load_settings() {
             menu_gesture_loaded = 1;
         }
         else if (strcmp(key, "home_view_idx") == 0) home_view_idx = (val >= 0 && val < HOME_VIEW_COUNT) ? val : 0;
+        else if (strcmp(key, "home_icon_pack_idx") == 0) home_icon_pack_idx = (val >= 0 && val < HOME_ICON_PACK_COUNT) ? val : 0;
         else if (strcmp(key, "favorites_view_idx") == 0) favorites_view_idx = (val >= 0 && val < FAVORITES_VIEW_COUNT) ? val : 0;
         else if (strcmp(key, "show_empty_systems") == 0) show_empty_systems = val;
         else if (strcmp(key, "setup_done") == 0) setup_done = val;
@@ -4889,6 +4898,7 @@ void save_settings() {
     fprintf(f, "menu_double_action=%d\n", menu_double_action);
     fprintf(f, "menu_triple_action=%d\n", menu_triple_action);
     fprintf(f, "home_view_idx=%d\n", home_view_idx);
+    fprintf(f, "home_icon_pack_idx=%d\n", home_icon_pack_idx);
     fprintf(f, "favorites_view_idx=%d\n", favorites_view_idx);
     fprintf(f, "show_empty_systems=%d\n", show_empty_systems);
     fprintf(f, "setup_done=%d\n", setup_done);
@@ -5747,21 +5757,11 @@ void splash_now(SDL_Renderer *ren, const char *msg) {
 // screen and leave one quote readable for several seconds.
 #define BOOT_MIN_VISIBLE_MS 9000
 static const char *boot_quotes[] = {
-    "Fun is just another word for learning. - Raph Koster",
-    "I believe that ideas are limitless. - Shigeru Miyamoto",
-    "You can't just throw every good idea you have into a game. - Shigeru Miyamoto",
-    "I think limits are important. - Takashi Tezuka",
-    "Work is fun when feedback comes fast. - Satoru Iwata",
-    "A developer's happiness is reflected in the games he or she makes. - Yosuke Hayashi",
-    "It's very important that even little kids can have fun blasting away. - Takaya Imamura",
-    "I always think about how the music will make someone feel while they're actually playing. - Hitoshi Sakimoto",
-    "We tried to make that beginning easy on purpose. - Toshiaki Saegusa",
-    "Give the player an engaging and interesting experience. - Hirokazu Yasuhara",
-    "The fine-tuning stage is important in game development. - Takeshi Tezuka",
-    "If it's fun, it's a game. - Shigeru Miyamoto",
-    "We wanted to come up with the play structure from scratch. - Hisashi Nogami",
-    "That kind of puzzle-solving was a big part of making Super Mario Bros. games. - Satoru Iwata",
-    "Every project starts with something from the past that needs to be improved. - Yosuke Hayashi"
+    "GDC 2005 - Satoru Iwata: On my business card, I am a corporate president. In my mind, I am a game developer. But in my heart, I am a gamer.",
+    "GDC 2006 - Satoru Iwata: Above all, video games are meant to be just one thing: fun.",
+    "GDC 2006 - Satoru Iwata: New is good, but there also is an appetite for old. For young players, classic games are brand new. For others, they are a way to feel young again.",
+    "E3 2004 - Reggie Fils-Aime: My name is Reggie. I'm about kicking ass, I'm about taking names, and we're about making games.",
+    "E3 1995 PlayStation price reveal - Steve Race: $299."
 };
 #define BOOT_QUOTE_COUNT ((int)(sizeof(boot_quotes) / sizeof(boot_quotes[0])))
 static Uint32 g_boot_sequence_started = 0;
@@ -10778,6 +10778,7 @@ void factory_reset() {
     platform_view_style = 1; bookshelf_sort = 0;
     card_shape_idx = 0;
     home_view_idx = 0;
+    home_icon_pack_idx = 0;
     show_empty_systems = 0;
     platform_grid_cols = 3; platform_grid_rows = 2; carousel_titles_on = 1;
     list_bar_color_idx = 1; list_frame_color_idx = 3; list_text_color_idx = 0;
@@ -10840,7 +10841,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         show_fps = 0; show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
         home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
         app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
-        surprise_me_enabled = 0; weather_unit = 0; home_view_idx = 0;
+        surprise_me_enabled = 0; weather_unit = 0; home_view_idx = 0; home_icon_pack_idx = 0;
         stats_mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5);
         for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
         home_apps_mask = (1 << APP_COUNT) - 1;
@@ -11695,17 +11696,36 @@ static int          hgrid_icon_tried[HGRID_SLUG_N] = { 0 };
 
 static SDL_Texture *hgrid_icon(SDL_Renderer *ren, const char *slug) {
     static unsigned icon_epoch = 0;
-    if (icon_epoch != renderer_epoch) {
+    static int cached_pack = -1;
+    int pack = (home_icon_pack_idx >= 0 && home_icon_pack_idx < HOME_ICON_PACK_COUNT) ? home_icon_pack_idx : 0;
+    if (icon_epoch != renderer_epoch || cached_pack != pack) {
+        if (icon_epoch == renderer_epoch)
+            for (int i = 0; i < HGRID_SLUG_N; i++)
+                if (hgrid_icon_cache[i]) SDL_DestroyTexture(hgrid_icon_cache[i]);
         memset(hgrid_icon_cache, 0, sizeof hgrid_icon_cache);
         memset(hgrid_icon_tried, 0, sizeof hgrid_icon_tried);
         icon_epoch = renderer_epoch;
+        cached_pack = pack;
     }
     for (int i = 0; i < HGRID_SLUG_N; i++) if (strcmp(HGRID_SLUGS[i], slug) == 0) {
         if (!hgrid_icon_tried[i]) {
             hgrid_icon_tried[i] = 1;
             char stem[600];
-            snprintf(stem, sizeof stem, "%s/assets/icons/home/%s", sn_data_root(), slug);
+            snprintf(stem, sizeof stem, "%s/assets/icons/home/%s/%s",
+                     sn_data_root(), home_icon_pack_dirs[pack], slug);
             hgrid_icon_cache[i] = try_load_img(ren, stem, 512);
+            // A partially installed or user-edited pack should never create a
+            // blank tile. Prefer the complete Simple pack, then accept the old
+            // pre-pack location used by upgrades from 1.2.3 and earlier.
+            if (!hgrid_icon_cache[i] && pack != 0) {
+                snprintf(stem, sizeof stem, "%s/assets/icons/home/%s/%s",
+                         sn_data_root(), home_icon_pack_dirs[0], slug);
+                hgrid_icon_cache[i] = try_load_img(ren, stem, 512);
+            }
+            if (!hgrid_icon_cache[i]) {
+                snprintf(stem, sizeof stem, "%s/assets/icons/home/%s", sn_data_root(), slug);
+                hgrid_icon_cache[i] = try_load_img(ren, stem, 512);
+            }
         }
         return hgrid_icon_cache[i];
     }
@@ -12119,8 +12139,31 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
                                  th->accent2.r, th->accent2.g, th->accent2.b, 245);
                 fill_rounded(ren, box, 12,
                              th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                // The Simple sources are deliberately small, crisp symbols.
+                // Give them more breathing room than the illustrated pack so
+                // they do not look oversized or distort against the tile edge.
+                // Keep the tile itself unchanged; shrink only the Simple art.
+                // Twenty-four pixels makes the reduction visible on the 640x480
+                // handheld panel while keeping every symbol centered.
+                int icon_inset = (home_icon_pack_idx == 0) ? 24 : 9;
+                if (home_icon_pack_idx == 0 &&
+                    (strcmp(slug, "consoles") == 0 ||
+                     strcmp(slug, "achievements") == 0 ||
+                     strcmp(slug, "calculator") == 0 ||
+                     strcmp(slug, "link") == 0 ||
+                     strcmp(slug, "surprise") == 0))
+                    icon_inset = 28;
+                if (home_icon_pack_idx == 0 &&
+                    (strcmp(slug, "settings") == 0 ||
+                     strcmp(slug, "favorites") == 0))
+                    icon_inset = 32;
                 SDL_Rect d = fit_rect_for_texture(icon,
-                    (SDL_Rect){ box.x + 9, box.y + 9, box.w - 18, box.h - 18 });
+                    (SDL_Rect){ box.x + icon_inset, box.y + icon_inset,
+                                box.w - icon_inset * 2, box.h - icon_inset * 2 });
+                if (home_icon_pack_idx == 0 && strcmp(slug, "resume") != 0)
+                    SDL_SetTextureColorMod(icon, th->text.r, th->text.g, th->text.b);
+                else
+                    SDL_SetTextureColorMod(icon, 255, 255, 255);
                 SDL_RenderCopy(ren, icon, NULL, &d);
             } else {
                 if (is_sel)
@@ -15018,6 +15061,8 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_HOME_VIEW) {
                                 home_view_idx = (home_view_idx + dir + HOME_VIEW_COUNT) % HOME_VIEW_COUNT;
                                 home_selected = 0; home_scroll = 0;
+                            } else if (rt == ROW_DISP_ICON_PACK) {
+                                home_icon_pack_idx = (home_icon_pack_idx + dir + HOME_ICON_PACK_COUNT) % HOME_ICON_PACK_COUNT;
                             } else if (rt == ROW_DISP_FAVORITES_VIEW) {
                                 favorites_view_idx = (favorites_view_idx + dir + FAVORITES_VIEW_COUNT) % FAVORITES_VIEW_COUNT;
                             } else if (rt == ROW_DISP_HOME_WIDGET) {
@@ -15433,6 +15478,9 @@ int main(int argc, char *argv[]) {
                                 save_settings(); settings_dirty = 0;
                             } else if (rt == ROW_DISP_GRP_HOME) {
                                 disp_grp_home_open = !disp_grp_home_open;
+                            } else if (rt == ROW_DISP_ICON_PACK) {
+                                home_icon_pack_idx = (home_icon_pack_idx + 1) % HOME_ICON_PACK_COUNT;
+                                save_settings(); settings_dirty = 0;
                             } else if (rt == ROW_DISP_GRP_WIDGETS) {
                                 disp_grp_widgets_open = !disp_grp_widgets_open;
                             } else if (rt == ROW_DISP_APP_WIDGET) {
@@ -17571,6 +17619,7 @@ int main(int argc, char *argv[]) {
                     switch (rt) {
                         case ROW_DISP_GRP_HOME: snprintf(text, sizeof(text), "%c Home", disp_grp_home_open ? 'v' : '>'); break;
                         case ROW_DISP_HOME_VIEW: snprintf(text, sizeof(text), "Home Layout: %s", home_view_names[(home_view_idx >= 0 && home_view_idx < HOME_VIEW_COUNT) ? home_view_idx : 0]); indent = 1; break;
+                        case ROW_DISP_ICON_PACK: snprintf(text, sizeof(text), "App Icon Pack: %s", home_icon_pack_names[(home_icon_pack_idx >= 0 && home_icon_pack_idx < HOME_ICON_PACK_COUNT) ? home_icon_pack_idx : 0]); indent = 1; break;
                         case ROW_DISP_GRP_WIDGETS: snprintf(text, sizeof(text), "%c %s Widgets", disp_grp_widgets_open ? 'v' : '>',
                                                            home_view_idx == HOME_VIEW_APPS ? "App Focused" : "Informational"); indent = 1; break;
                         case ROW_DISP_HOME_WIDGET: snprintf(text, sizeof(text), "#1: %s", home_widget_names[(home_widget_idx >= 0 && home_widget_idx < HOME_WIDGET_COUNT) ? home_widget_idx : 0]); indent = 2; break;
