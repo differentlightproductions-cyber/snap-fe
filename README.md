@@ -5,8 +5,24 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.0.** It launches RetroArch / libretro games right
+**Current release: Alpha 1.2.1.** It launches RetroArch / libretro games right
 now — not every emulator or system Knulli supports. Expect alpha rough edges.
+
+### 1.2.1 interface and control update
+
+- Selected games have a clearer artwork outline, and missing artwork now uses a
+  clean `NO ART` placeholder instead of an empty tile.
+- Home widgets can be changed live with R1/R2. Recently Played is available as
+  a widget and shows games 2–4 because the newest game remains under HOME.
+- Up to three ROM folders can be selected and rescanned, including during first
+  setup. Per-system settings now open with Select.
+- SNAP-only Menu double-tap and triple-tap actions are programmable without
+  altering RetroArch hotkeys.
+- Settings dropdowns collapse after leaving Settings. Unsaved Hotkey changes
+  now show an explicit Save, Discard, or Cancel prompt.
+
+See [UPDATING.md](UPDATING.md) for the safe in-place update procedure. Updating
+does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
 
 ### 1.2.0 stability and performance release
 
@@ -147,7 +163,7 @@ now — not every emulator or system Knulli supports. Expect alpha rough edges.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.2.0.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.2.1.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,

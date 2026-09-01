@@ -15,8 +15,8 @@ BIN=snapos_ui.aarch64
 [[ -f "$BIN" ]] || { echo "build first:  ./build-knulli.sh --sysroot ~/knulli-sysroot" >&2; exit 1; }
 [[ -d assets ]] || { echo "no assets/ here?" >&2; exit 1; }
 
-# Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.0
-RELEASE="${1:-1.2.0}"
+# Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.1
+RELEASE="${1:-1.2.1}"
 VER="Alpha-${RELEASE}"
 STAGE="$(mktemp -d)"
 DEST="$STAGE/system/snapos"
@@ -98,6 +98,7 @@ chmod 0755 "$PORTS/"*.sh "$DEST/snapos_ui" "$DEST"/*.sh "$DEST"/*.py "$DEST/core
 
 # --- instructions ----------------------------------------------------------
 cp knulli/INSTALL.txt "$STAGE/INSTALL.txt"
+cp UPDATING.md "$STAGE/UPDATING.md"
 
 # --- zip (via python3 so we don't need the 'zip' binary) ------------------
 mkdir -p dist
@@ -141,6 +142,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
         'roms/ports/Snap FE (Set As Default).sh',
         'roms/ports/Snap FE (Restore EmulationStation).sh',
         'INSTALL.txt',
+        'UPDATING.md',
     }
     missing = sorted(required - names)
     wrapped = [n for n in names if n.startswith('SnapFE-Alpha-')]
