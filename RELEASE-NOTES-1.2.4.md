@@ -18,6 +18,8 @@ presentation while preserving the layout and controls from 1.2.3.
   asset location instead of leaving a blank tile.
 - Replaced contextless boot quotes with a short, auditable selection of
   attributed moments from landmark GDC and E3 presentations.
+- Windows `Zone.Identifier` metadata is removed during packaging and background
+  scans, and deleting a wallpaper also removes its identifier sidecars.
 
 ## Updating
 

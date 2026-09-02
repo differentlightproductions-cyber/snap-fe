@@ -15,6 +15,11 @@ BIN=snapos_ui.aarch64
 [[ -f "$BIN" ]] || { echo "build first:  ./build-knulli.sh --sysroot ~/knulli-sysroot" >&2; exit 1; }
 [[ -d assets ]] || { echo "no assets/ here?" >&2; exit 1; }
 
+# Windows sometimes exposes download-origin ADS metadata as literal files when
+# the repository is opened through WSL. Remove those sidecars from the backend
+# before staging; they are never user artwork and must not enter a release ZIP.
+find assets -type f -name '*:Zone.Identifier' -delete 2>/dev/null || true
+
 # Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.4
 RELEASE="${1:-1.2.4}"
 VER="Alpha-${RELEASE}"

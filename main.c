@@ -8662,6 +8662,16 @@ int list_backgrounds_for_platform(int platform, char filenames[][256], int max_c
     struct dirent *entry;
     int count = 0;
     while ((entry = readdir(d)) != NULL && count < max_count) {
+        // Windows may materialize NTFS download metadata as a visible
+        // "photo.jpg:Zone.Identifier" sidecar on Linux/FAT filesystems.
+        // It is not artwork; purge it during every background scan so it can
+        // never appear in the picker or survive an imported wallpaper.
+        if (strstr(entry->d_name, ":Zone.Identifier")) {
+            char metadata_path[1024];
+            snprintf(metadata_path, sizeof metadata_path, "%s/%s", dirpath, entry->d_name);
+            remove(metadata_path);
+            continue;
+        }
         if (has_ext(entry->d_name, ".png") || has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
             snprintf(filenames[count], 256, "%s", entry->d_name);
             count++;
@@ -8778,7 +8788,7 @@ static void rename_selected_background(void) {
 static void delete_selected_background(void) {
     if (background_picker_selected <= 0 || background_picker_selected > background_file_count) return;
     int bi = background_picker_selected - 1;
-    char filename[256], title[128], dir[700], path[980], sidecar[1000];
+    char filename[256], title[128], dir[700], path[980], sidecar[1000], zone[1024];
     snprintf(filename, sizeof filename, "%s", background_files[bi]);
     snprintf(title, sizeof title, "%.127s", background_titles[bi][0] ? background_titles[bi] : filename);
     snprintf(dir, sizeof dir, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
@@ -8789,6 +8799,10 @@ static void delete_selected_background(void) {
         return;
     }
     remove(sidecar);
+    snprintf(zone, sizeof zone, "%s:Zone.Identifier", path);
+    remove(zone);
+    snprintf(zone, sizeof zone, "%s:Zone.Identifier", sidecar);
+    remove(zone);
     if (!strcmp(platform_bg_choice[bg_picker_platform], filename)) {
         platform_bg_choice[bg_picker_platform][0] = '\0';
         settings_dirty = 1;
