@@ -7341,10 +7341,20 @@ static SDL_Surface *load_scaled_surface(const char *path, int max_px) {
         // SDL_image 2.8 on the H700 includes its NanoSVG-backed sized loader.
         // Rasterize vectors directly at the cache's requested working size so
         // changing tile dimensions never magnifies a tiny source bitmap.
+        //
+        // The sized loader only exists from SDL_image 2.6. Desktop dev machines
+        // often ship 2.0.x, where an unguarded call is a link error and the
+        // whole desktop build documented in BUILD.md fails. Fall back to the
+        // generic loader there (older SDL_image simply won't decode SVG, and
+        // callers already fall back to the bundled PNG copies).
         SDL_RWops *rw = SDL_RWFromFile(path, "rb");
         if (rw) {
+#if SDL_IMAGE_VERSION_ATLEAST(2, 6, 0)
             int svg_px = max_px > 0 ? max_px : 512;
             s = IMG_LoadSizedSVG_RW(rw, svg_px, svg_px);
+#else
+            s = IMG_Load_RW(rw, 0);
+#endif
             SDL_RWclose(rw);
         }
     } else {
@@ -9195,6 +9205,103 @@ void ensure_platform_icons_loaded(SDL_Renderer *ren, int style) {
 // icon cover-filling the entire card with nothing showing behind it, or a
 // colored chip plus the fallback name label if no icon file exists for the
 // active theme yet -- so the result can later be rotated as a single unit.
+// Typographic stand-in for a system that has no artwork yet. Deliberate rather
+// than blank: a rounded plate in theme colours carrying the short name, plus as
+// much of full name / maker / year / form as actually fits.
+//
+// Everything is measured before it is drawn and the whole thing is clipped to
+// the plate, because these slots range from a ~40px list icon to a 190x280
+// carousel card and a fixed layout either overflows the small ones or wastes
+// the large ones. Lines are dropped from the bottom up when height runs out,
+// and the short name steps down a font size rather than being ellipsized --
+// "GENE..." is worse than smaller text that says "GENESIS".
+static void draw_platform_placeholder(SDL_Renderer *ren, int p, SDL_Rect r, int selected) {
+    if (p < 0 || p >= PLATFORM_COUNT || r.w <= 2 || r.h <= 2) return;
+    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+
+    SDL_Color plate = selected ? th->accent1 : th->select_bg;
+    fill_rounded(ren, r, r.w < 60 ? 5 : 10, plate.r, plate.g, plate.b, selected ? 240 : 215);
+
+    int lum = (plate.r * 54 + plate.g * 183 + plate.b * 19) >> 8;
+    SDL_Color ink = lum > 128 ? (SDL_Color){ 20, 20, 24, 255 } : (SDL_Color){ 244, 244, 248, 255 };
+    SDL_Color sub = lum > 128 ? (SDL_Color){ 20, 20, 24, 175 } : (SDL_Color){ 244, 244, 248, 170 };
+
+    SDL_BlendMode pbm; SDL_GetRenderDrawBlendMode(ren, &pbm);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, selected ? 255 : 150);
+    SDL_RenderDrawRect(ren, &r);
+
+    SDL_Rect prev_clip; SDL_bool had_clip = SDL_RenderIsClipEnabled(ren);
+    SDL_RenderGetClipRect(ren, &prev_clip);
+    SDL_RenderSetClipRect(ren, &r);   // nothing may escape the plate
+
+    int pad  = r.w < 60 ? 3 : 8;
+    int availw = r.w - pad * 2, availh = r.h - pad * 2;
+
+    // Largest font whose rendering of the short code fits untruncated.
+    TTF_Font *cand[3] = { font_big, font_small_bold ? font_small_bold : font_small, font_label };
+    SDL_Texture *tag = NULL; int tw = 0, tgh = 0;
+    for (int i = 0; i < 3; i++) {
+        if (!cand[i]) continue;
+        int mw = 0, mh = 0;
+        if (TTF_SizeUTF8(cand[i], platform_short[p], &mw, &mh) != 0) continue;
+        if (mw <= availw && mh <= availh) {
+            tag = render_text(ren, cand[i], platform_short[p], ink);
+            if (tag) SDL_QueryTexture(tag, NULL, NULL, &tw, &tgh);
+            break;
+        }
+    }
+    if (!tag) {   // even the smallest face is too wide -- let it shrink to fit
+        tag = render_text_fit(ren, font_label, platform_short[p], ink, availw);
+        if (tag) SDL_QueryTexture(tag, NULL, NULL, &tw, &tgh);
+    }
+
+    // Optional lines, richest first; each is kept only if it still fits.
+    char meta[96];
+    snprintf(meta, sizeof meta, "%s  -  %s", platform_maker[p], platform_year[p]);
+    const char *opt[3] = { platform_names[p], meta, platform_form[p] };
+    SDL_Texture *ot[3] = { NULL, NULL, NULL };
+    int ow[3] = { 0, 0, 0 }, oh[3] = { 0, 0, 0 }, used = tgh, nopt = 0;
+
+    int rule_h = (availh >= tgh + 14 && r.w >= 70) ? 2 : 0;
+    int gap    = r.w < 70 ? 3 : 6;
+    if (rule_h) used += gap + rule_h;
+
+    for (int i = 0; i < 3 && font_label; i++) {
+        int mw = 0, mh = 0;
+        if (TTF_SizeUTF8(font_label, opt[i], &mw, &mh) != 0) break;
+        if (used + gap + mh > availh) break;   // out of height -- nothing below fits either
+        if (mw > availw) continue;             // too wide: skip it, a shorter line may still fit.
+                                               // "SNES / NINTENDO - 1990" beats "SUPER NINTE...".
+        SDL_Texture *t = render_text_fit(ren, font_label, opt[i], sub, availw);
+        if (!t) break;
+        ot[nopt] = t;
+        SDL_QueryTexture(t, NULL, NULL, &ow[nopt], &oh[nopt]);
+        used += gap + oh[nopt];
+        nopt++;
+    }
+
+    int y = r.y + (r.h - used) / 2;
+    if (y < r.y + pad) y = r.y + pad;
+    if (tag) SDL_RenderCopy(ren, tag, NULL, &(SDL_Rect){ r.x + r.w / 2 - tw / 2, y, tw, tgh });
+    y += tgh;
+    if (rule_h) {
+        y += gap;
+        int rw = r.w / 3;
+        SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 235);
+        SDL_RenderFillRect(ren, &(SDL_Rect){ r.x + r.w / 2 - rw / 2, y, rw, rule_h });
+        y += rule_h;
+    }
+    for (int i = 0; i < nopt; i++) {
+        y += gap;
+        SDL_RenderCopy(ren, ot[i], NULL, &(SDL_Rect){ r.x + r.w / 2 - ow[i] / 2, y, ow[i], oh[i] });
+        y += oh[i];
+    }
+
+    SDL_RenderSetClipRect(ren, had_clip ? &prev_clip : NULL);
+    SDL_SetRenderDrawBlendMode(ren, pbm);
+}
+
 void ensure_platform_cards_built(SDL_Renderer *ren, int cw, int ch) {
     if (platform_card_cache_theme == theme_idx && platform_card_cache_w == cw && platform_card_cache_h == ch
         && platform_card_cache[0]) return;
@@ -9222,15 +9329,9 @@ void ensure_platform_cards_built(SDL_Renderer *ren, int cw, int ch) {
             SDL_RenderCopy(ren, platform_icon_cache[p], NULL, &fit);
             SDL_RenderSetClipRect(ren, NULL);
         } else {
-            // No icon yet: the card slot still takes up the same size/space
-            // for layout purposes, but with nothing to frame there's no
-            // reason to force a rectangular chip -- just the name, floating
-            // on the transparent texture (the full-screen art behind it
-            // shows through around it).
-            SDL_Texture *lbl = render_text(ren, font_label, platform_names[p], g_ui_text);
-            int lw, lh;
-            SDL_QueryTexture(lbl, NULL, NULL, &lw, &lh);
-            SDL_RenderCopy(ren, lbl, NULL, &(SDL_Rect){ cw/2 - lw/2, ch/2 - lh/2, lw, lh });
+            // No icon yet: draw the designed stand-in rather than a bare label
+            // floating on a transparent card.
+            draw_platform_placeholder(ren, p, full, 0);
         }
 
         SDL_SetRenderTarget(ren, NULL);
@@ -16918,14 +17019,7 @@ int main(int argc, char *argv[]) {
                         SDL_RenderCopy(ren, platform_icon_cache[p], NULL, &fit);
                         SDL_RenderSetClipRect(ren, NULL);
                     } else {
-                        SDL_Color fill = selected ? th->accent1 : th->select_bg;
-                        SDL_SetRenderDrawColor(ren, fill.r, fill.g, fill.b, selected ? 235 : 220);
-                        SDL_RenderFillRect(ren, &box_bounds);
-                        SDL_Texture *badge = render_text_fit(ren, font_small_bold,
-                            platform_short[p], selected ? th->bg : g_ui_text, cell_w - 16);
-                        int bw2, bh2; SDL_QueryTexture(badge, NULL, NULL, &bw2, &bh2);
-                        SDL_RenderCopy(ren, badge, NULL,
-                            &(SDL_Rect){ cx + (cell_w - bw2)/2, cy + (box_h - bh2)/2, bw2, bh2 });
+                        draw_platform_placeholder(ren, p, box_bounds, selected);
                     }
 
                     SDL_Color bc = selected ? th->accent2 : g_ui_text;
@@ -17073,6 +17167,10 @@ int main(int argc, char *argv[]) {
                         SDL_Rect fit = img_aspect(cover_rect_for_texture(platform_icon_cache[p], ib));
                         SDL_RenderSetClipRect(ren, &iclip);
                         SDL_RenderCopy(ren, platform_icon_cache[p], NULL, &fit);
+                        SDL_RenderSetClipRect(ren, &lclip);
+                    } else if (!platform_icon_cache[p] && SDL_IntersectRect(&ib, &lclip, &iclip)) {
+                        SDL_RenderSetClipRect(ren, &iclip);
+                        draw_platform_placeholder(ren, p, ib, selp);
                         SDL_RenderSetClipRect(ren, &lclip);
                     }
                     int bl = (barc.r*54 + barc.g*183 + barc.b*19) >> 8;
@@ -18822,6 +18920,8 @@ int main(int argc, char *argv[]) {
                         SDL_RenderSetClipRect(ren, &ib);
                         SDL_RenderCopy(ren, platform_icon_cache[p], NULL, &fit);
                         SDL_RenderSetClipRect(ren, NULL);
+                    } else {
+                        draw_platform_placeholder(ren, p, ib, selected);
                     }
                     SDL_Texture *name = render_text_fit(ren, font_label, platform_names[p], selected ? g_ui_text : g_ui_dim, row.w - 105);
                     int nw, nh; SDL_QueryTexture(name, NULL, NULL, &nw, &nh);
