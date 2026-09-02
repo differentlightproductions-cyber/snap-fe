@@ -126,96 +126,89 @@ int wrap_text(TTF_Font *font, const char *text, int max_width, char lines[MAX_LI
 static void snap_release_video(SDL_Window **win, SDL_Renderer **ren);
 static void snap_acquire_video(SDL_Window **win, SDL_Renderer **ren);
 
+// --- The system table ---------------------------------------------------------
+// ONE row per console. This used to be ten hand-maintained parallel arrays that
+// all had to stay exactly the same length and order; a single miscount silently
+// shifted every system after it. They are now generated from this table, so
+// adding a console is adding one line here and nothing else.
+//
+// Fields: NAME, ROM DIR, MAKER, YEAR, SHORT, FORM, EXTENSIONS, ALT DIR, CORE, BLURB
+//   ALT DIR : Knulli sometimes names a folder differently from our slug
+//             (genesis -> megadrive). NULL when it matches.
+//   CORE    : libretro .so to force. NULL hands the choice to Knulli's
+//             emulatorlauncher, which is how standalone (non-RetroArch)
+//             emulators like PPSSPP, Flycast and ScummVM get used.
+#define PLATFORM_TABLE(X) \
+    X("GAME BOY ADVANCE",               "gba",           "NINTENDO",       "2001", "GBA",     "PORTABLE", ".gba;.zip;.7z",                           NULL,         "mgba_libretro.so",              "A 32-bit handheld with a backlit-ready screen and a library of over a thousand titles.") \
+    X("GAME BOY COLOR",                 "gbc",           "NINTENDO",       "1998", "GBC",     "PORTABLE", ".gbc;.zip;.7z",                           NULL,         "mgba_libretro.so",              "A color follow-up to the original Game Boy, fully backward compatible with GB cartridges.") \
+    X("GAME BOY",                       "gb",            "NINTENDO",       "1989", "GB",      "PORTABLE", ".gb;.zip;.7z",                            NULL,         "mgba_libretro.so",              "The original Game Boy. Monochrome display, legendary battery life, where it all started.") \
+    X("NINTENDO ENTERTAINMENT SYSTEM",  "nes",           "NINTENDO",       "1983", "NES",     "CONSOLE",  ".nes;.fds;.zip;.7z",                      NULL,         "fceumm_libretro.so",            "The 8-bit home console that revived the industry, home to Mario, Zelda, and Metroid.") \
+    X("SUPER NINTENDO",                 "snes",          "NINTENDO",       "1990", "SNES",    "CONSOLE",  ".sfc;.smc;.zip;.7z",                      NULL,         "snes9x2010_libretro.so",        "The 16-bit successor to the NES, with Mode 7 scaling and a landmark RPG library.") \
+    X("SEGA GENESIS",                   "genesis",       "SEGA",           "1988", "GENESIS", "CONSOLE",  ".md;.gen;.bin;.smd;.68k;.sgd;.zip;.7z",   "megadrive",  "genesis_plus_gx_libretro.so",   "Sega's 16-bit console. Blast processing, arcade ports, and Sonic the Hedgehog.") \
+    X("NINTENDO 64",                    "n64",           "NINTENDO",       "1996", "N64",     "CONSOLE",  ".n64;.z64;.v64;.zip;.7z",                 NULL,         "mupen64plus_next_libretro.so",  "Nintendo's 64-bit machine that brought 3D gaming home, with the analog stick and Rumble Pak.") \
+    X("SONY PLAYSTATION",               "psx",           "SONY",           "1994", "PS1",     "CONSOLE",  ".cue;.bin;.chd;.pbp;.m3u;.iso;.img;.mdf;.ecm", "playstation", "pcsx_rearmed_libretro.so",      "Sony's CD-based debut. Full-motion video, 3D polygons, and one of the deepest libraries ever.") \
+    X("SEGA MASTER SYSTEM",             "mastersystem",  "SEGA",           "1985", "SMS",     "CONSOLE",  ".sms;.bin;.zip;.7z",                      "sms",        "genesis_plus_gx_libretro.so",   "Sega's 8-bit console -- a giant in Europe and Brazil and the NES's main rival abroad.") \
+    X("SEGA GAME GEAR",                 "gamegear",      "SEGA",           "1990", "GG",      "PORTABLE", ".gg;.bin;.zip;.7z",                       NULL,         "genesis_plus_gx_libretro.so",   "Sega's colour handheld: a portable Master System with a backlit landscape screen.") \
+    X("PC ENGINE / TURBOGRAFX-16",      "pcengine",      "NEC",            "1987", "PCE",     "CONSOLE",  ".pce;.sgx;.cue;.chd;.zip;.7z",            "tg16",       "mednafen_pce_fast_libretro.so", "NEC's compact powerhouse. HuCards, arcade-perfect ports, and the first CD-ROM add-on.") \
+    X("NEO GEO",                        "neogeo",        "SNK",            "1990", "NEOGEO",  "CONSOLE",  ".zip;.7z;.neo",                           NULL,         "fbneo_libretro.so",             "The arcade board you could own. SNK's 2D fighters and run-and-guns with zero compromises.") \
+    X("ATARI 2600",                     "atari2600",     "ATARI",          "1977", "2600",    "CONSOLE",  ".a26;.bin;.zip;.7z",                      NULL,         "stella2014_libretro.so",        "The console that started the industry -- woodgrain, one-button joysticks, and the cartridge.") \
+    X("ARCADE",                         "fbneo",         "FINALBURN NEO",  "1979", "ARCADE",  "ARCADE",   ".zip;.7z",                                "arcade",     "fbneo_libretro.so",             "Coin-op history via FinalBurn Neo: Capcom, SNK, Sega and Konami on their original hardware.")
+
 const char *platform_names[] = {
-    "GAME BOY ADVANCE", "GAME BOY COLOR", "GAME BOY", "NINTENDO ENTERTAINMENT SYSTEM",
-    "SUPER NINTENDO", "SEGA GENESIS", "NINTENDO 64", "SONY PLAYSTATION",
-    "SEGA MASTER SYSTEM", "SEGA GAME GEAR", "PC ENGINE / TURBOGRAFX-16", "NEO GEO",
-    "ATARI 2600", "ARCADE"
+#define X(n,d,mk,y,sh,f,e,da,c,b) n,
+    PLATFORM_TABLE(X)
+#undef X
 };
-const char *platform_dirs[]  = {
-    "gba", "gbc", "gb", "nes", "snes", "genesis", "n64", "psx",
-    "mastersystem", "gamegear", "pcengine", "neogeo", "atari2600", "fbneo"
+const char *platform_dirs[] = {
+#define X(n,d,mk,y,sh,f,e,da,c,b) d,
+    PLATFORM_TABLE(X)
+#undef X
 };
 const char *platform_maker[] = {
-    "NINTENDO", "NINTENDO", "NINTENDO", "NINTENDO", "NINTENDO", "SEGA", "NINTENDO", "SONY",
-    "SEGA", "SEGA", "NEC", "SNK", "ATARI", "FINALBURN NEO"
+#define X(n,d,mk,y,sh,f,e,da,c,b) mk,
+    PLATFORM_TABLE(X)
+#undef X
 };
-const char *platform_year[]  = {
-    "2001", "1998", "1989", "1983", "1990", "1988", "1996", "1994",
-    "1985", "1990", "1987", "1990", "1977", "1979"
-};
-const char *platform_blurb[] = {
-    "A 32-bit handheld with a backlit-ready screen and a library of over a thousand titles.",
-    "A color follow-up to the original Game Boy, fully backward compatible with GB cartridges.",
-    "The original Game Boy. Monochrome display, legendary battery life, where it all started.",
-    "The 8-bit home console that revived the industry, home to Mario, Zelda, and Metroid.",
-    "The 16-bit successor to the NES, with Mode 7 scaling and a landmark RPG library.",
-    "Sega's 16-bit console. Blast processing, arcade ports, and Sonic the Hedgehog.",
-    "Nintendo's 64-bit machine that brought 3D gaming home, with the analog stick and Rumble Pak.",
-    "Sony's CD-based debut. Full-motion video, 3D polygons, and one of the deepest libraries ever.",
-    "Sega's 8-bit console -- a giant in Europe and Brazil and the NES's main rival abroad.",
-    "Sega's colour handheld: a portable Master System with a backlit landscape screen.",
-    "NEC's compact powerhouse. HuCards, arcade-perfect ports, and the first CD-ROM add-on.",
-    "The arcade board you could own. SNK's 2D fighters and run-and-guns with zero compromises.",
-    "The console that started the industry -- woodgrain, one-button joysticks, and the cartridge.",
-    "Coin-op history via FinalBurn Neo: Capcom, SNK, Sega and Konami on their original hardware."
+const char *platform_year[] = {
+#define X(n,d,mk,y,sh,f,e,da,c,b) y,
+    PLATFORM_TABLE(X)
+#undef X
 };
 // Short labels for tight spots (the Grid view's under-box captions).
 const char *platform_short[] = {
-    "GBA", "GBC", "GB", "NES", "SNES", "GENESIS", "N64", "PS1",
-    "SMS", "GG", "PCE", "NEOGEO", "2600", "ARCADE"
+#define X(n,d,mk,y,sh,f,e,da,c,b) sh,
+    PLATFORM_TABLE(X)
+#undef X
 };
 // Shown next to the year on the platform detail panel ("2001 * PORTABLE").
-const char *platform_form[]  = {
-    "PORTABLE", "PORTABLE", "PORTABLE", "CONSOLE", "CONSOLE", "CONSOLE", "CONSOLE", "CONSOLE",
-    "CONSOLE", "PORTABLE", "CONSOLE", "CONSOLE", "CONSOLE", "ARCADE"
+const char *platform_form[] = {
+#define X(n,d,mk,y,sh,f,e,da,c,b) f,
+    PLATFORM_TABLE(X)
+#undef X
 };
 // ROM extensions accepted per platform, semicolon-separated, lowercase, leading
 // dot. .zip/.7z included because Batocera/Knulli stores most ROMs compressed.
 const char *platform_exts[] = {
-    ".gba;.zip;.7z",
-    ".gbc;.zip;.7z",
-    ".gb;.zip;.7z",
-    ".nes;.fds;.zip;.7z",
-    ".sfc;.smc;.zip;.7z",
-    ".md;.gen;.bin;.smd;.68k;.sgd;.zip;.7z",
-    ".n64;.z64;.v64;.zip;.7z",
-    ".cue;.bin;.chd;.pbp;.m3u;.iso;.img;.mdf;.ecm",
-    ".sms;.bin;.zip;.7z",
-    ".gg;.bin;.zip;.7z",
-    ".pce;.sgx;.cue;.chd;.zip;.7z",
-    ".zip;.7z;.neo",
-    ".a26;.bin;.zip;.7z",
-    ".zip;.7z"
+#define X(n,d,mk,y,sh,f,e,da,c,b) e,
+    PLATFORM_TABLE(X)
+#undef X
 };
-// Alternate ROM-folder name per platform. Batocera/Knulli names some systems
-// differently from our canonical slug (Genesis -> "megadrive"). NULL = same.
 const char *platform_dir_alt[] = {
-    NULL, NULL, NULL, NULL, NULL, "megadrive", NULL, "playstation",
-    "sms", NULL, "tg16", NULL, NULL, "arcade"
+#define X(n,d,mk,y,sh,f,e,da,c,b) da,
+    PLATFORM_TABLE(X)
+#undef X
 };
-// libretro core (.so) each platform launches through RetroArch. Everything now
-// routes through RetroArch for one consistent input / save / fast-forward path
-// (run retroarch/setup-cores.sh to fetch these). Set an entry back to NULL to
-// send that system to the bundled standalone mGBA at mgba/build/sdl/mgba
-// instead -- that code path is still live in launch_game().
 const char *platform_core[] = {
-    "mgba_libretro.so",              // gba
-    "mgba_libretro.so",              // gbc
-    "mgba_libretro.so",              // gb
-    "fceumm_libretro.so",            // nes
-    "snes9x2010_libretro.so",        // snes
-    "genesis_plus_gx_libretro.so",   // genesis
-    "mupen64plus_next_libretro.so",  // n64
-    "pcsx_rearmed_libretro.so",      // psx
-    "genesis_plus_gx_libretro.so",   // mastersystem
-    "genesis_plus_gx_libretro.so",   // gamegear
-    "mednafen_pce_fast_libretro.so", // pcengine
-    "fbneo_libretro.so",             // neogeo
-    "stella2014_libretro.so",        // atari2600
-    "fbneo_libretro.so",             // fbneo (arcade)
+#define X(n,d,mk,y,sh,f,e,da,c,b) c,
+    PLATFORM_TABLE(X)
+#undef X
 };
-#define PLATFORM_COUNT 14
+const char *platform_blurb[] = {
+#define X(n,d,mk,y,sh,f,e,da,c,b) b,
+    PLATFORM_TABLE(X)
+#undef X
+};
+#define PLATFORM_COUNT ((int)(sizeof(platform_dirs) / sizeof(platform_dirs[0])))
 int platform_selected = 0;   // real platform index of the highlighted system
 
 // --- Which systems the console picker shows -----------------------------------
@@ -3385,7 +3378,7 @@ const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", 
 // visible while all new downloads use the unified slugs above.
 const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL };
 int scrape_art_enabled[ART_TYPE_COUNT] = {1, 0, 0, 0, 0, 0, 0}; // 2D Box Art on by default
-int scrape_system_enabled[PLATFORM_COUNT] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+int scrape_system_enabled[PLATFORM_COUNT] = { [0 ... PLATFORM_COUNT - 1] = 1 };
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
 int art_dropdown_open = 0;
 int display_dropdown_open = 0;
@@ -4014,12 +4007,21 @@ const CoreOpt sys_cores_sms[]  = { {"Genesis Plus GX","genesis_plus_gx_libretro.
 const CoreOpt sys_cores_pce[]  = { {"Beetle PCE Fast","mednafen_pce_fast_libretro.so"}, {"Beetle PCE","mednafen_pce_libretro.so"} };
 const CoreOpt sys_cores_fbn[]  = { {"FinalBurn Neo","fbneo_libretro.so"}, {"MAME 2003-Plus","mame2003_plus_libretro.so"} };
 const CoreOpt sys_cores_a26[]  = { {"Stella 2014","stella2014_libretro.so"}, {"Stella","stella_libretro.so"} };
+// Curated alternative cores, offered in Settings > Per-System. Only the systems
+// listed here get a Core picker; every other system uses its table default and
+// shows "Core: Default". Indices are by ROM dir so the list cannot drift when
+// new systems are appended to PLATFORM_TABLE.
 const CoreOpt *sys_cores[PLATFORM_COUNT]  = {
-    sys_cores_gba, sys_cores_gbx, sys_cores_gbx, sys_cores_nes, sys_cores_snes, sys_cores_md,
-    sys_cores_n64, sys_cores_psx, sys_cores_sms, sys_cores_sms, sys_cores_pce, sys_cores_fbn,
-    sys_cores_a26, sys_cores_fbn
+    [0]  = sys_cores_gba,  [1]  = sys_cores_gbx, [2]  = sys_cores_gbx,
+    [3]  = sys_cores_nes,  [4]  = sys_cores_snes,[5]  = sys_cores_md,
+    [6]  = sys_cores_n64,  [7]  = sys_cores_psx, [8]  = sys_cores_sms,
+    [9]  = sys_cores_sms,  [10] = sys_cores_pce, [11] = sys_cores_fbn,
+    [12] = sys_cores_a26,  [13] = sys_cores_fbn,
 };
-const int      sys_cores_n[PLATFORM_COUNT] = { 3, 3, 3, 3, 3, 3, 2, 3, 3, 3, 2, 2, 2, 2 };
+const int      sys_cores_n[PLATFORM_COUNT] = {
+    [0]=3, [1]=3, [2]=3, [3]=3, [4]=3, [5]=3, [6]=2,
+    [7]=3, [8]=3, [9]=3, [10]=2, [11]=2, [12]=2, [13]=2,
+};
 
 int platform_index_for_dir(const char *dir); // defined later
 
@@ -4033,6 +4035,11 @@ int syscfg_from_platform = 0; // entered via C on the platform screen (skip the 
 int syscfg_aspect_for(int p)   { return sys_override[p].aspect   ? sys_override[p].aspect - 1   : game_aspect_idx; }
 int syscfg_rotation_for(int p) { return sys_override[p].rotation ? sys_override[p].rotation - 1 : game_rotation_idx; }
 const char* resolve_core_file(int p) {
+    // Systems without a curated alternative-core list just use the table's
+    // default. NULL there is meaningful: it hands the choice to Knulli's
+    // emulatorlauncher, which is how standalone emulators get selected.
+    if (p < 0 || p >= PLATFORM_COUNT) return NULL;
+    if (!sys_cores[p] || sys_cores_n[p] <= 0) return platform_core[p];
     int c = sys_override[p].core;
     if (c < 0 || c >= sys_cores_n[p]) c = 0;
     return sys_cores[p][c].file;
@@ -14275,7 +14282,7 @@ int main(int argc, char *argv[]) {
                                 sys_override[p].rotation = (sys_override[p].rotation + dir + n) % n;
                             } else if (syscfg_sel == 2) {
                                 int n = sys_cores_n[p];
-                                sys_override[p].core = (sys_override[p].core + dir + n) % n;
+                                if (n > 0) sys_override[p].core = (sys_override[p].core + dir + n) % n;
                             }
                             if (syscfg_sel <= 2) save_system_overrides();
                         }
@@ -18531,7 +18538,10 @@ int main(int argc, char *argv[]) {
                 int a = sys_override[p].aspect, r = sys_override[p].rotation, c = sys_override[p].core;
                 snprintf(rows[0], sizeof(rows[0]), "Aspect Ratio: %s", a == 0 ? "Global" : game_aspect_names[a - 1]);
                 snprintf(rows[1], sizeof(rows[1]), "Game Rotation: %s", r == 0 ? "Global" : game_rotation_names[r - 1]);
-                snprintf(rows[2], sizeof(rows[2]), "Core: %s%s", sys_cores[p][c].label, c == 0 ? " (default)" : "");
+                if (sys_cores[p] && sys_cores_n[p] > 0)
+                    snprintf(rows[2], sizeof(rows[2]), "Core: %s%s", sys_cores[p][c].label, c == 0 ? " (default)" : "");
+                else
+                    snprintf(rows[2], sizeof(rows[2]), "Core: Default");
                 snprintf(rows[3], sizeof(rows[3]), "Restore This System");
                 for (int i = 0; i < SYSCFG_EDIT_ROWS; i++) {
                     int sel = (i == syscfg_sel);
