@@ -3423,19 +3423,33 @@ int settings_visible_rows() {
 
 // --- Art types: a unified set the scraper maps per-source. TheGamesDB has no
 // true 3D box (falls back to the front 2D box) or "mix"; ScreenScraper has all.
-#define ART_TYPE_COUNT 8
-// Cartridge is appended rather than inserted so a saved display_art_idx from an
-// older build still means the same thing. ScreenScraper calls the physical
+#define ART_TYPE_COUNT 9
+// Cartridge and Video Snap are appended rather than inserted so a saved
+// display_art_idx from an older build still means the same thing. ScreenScraper calls the physical
 // media "support"; TheGamesDB has no equivalent, so TGDB users always fall back
 // to the drawn cartridge.
 #define ART_TYPE_CARTRIDGE 7
-const char *art_type_names[] = { "2D Box Art", "3D Box Art", "Screenshot", "Title Screen", "Logo", "Fan Art", "Mix", "Cartridge" };
-const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge" };
+// Video snaps are MP4. They are scrapeable and used as the carousel
+// backdrop via an extracted still, but they are not a Display Art
+// choice -- there is nothing to show as a cover.
+#define ART_TYPE_VIDEO 8
+const char *art_type_names[] = { "2D Box Art", "3D Box Art", "Screenshot", "Title Screen", "Logo", "Fan Art", "Mix", "Cartridge", "Video Snap" };
+const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge", "video" };
 // Older builds used TheGamesDB's folder names. Keep those existing scrapes
 // visible while all new downloads use the unified slugs above.
-const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL, NULL };
+const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL, NULL, NULL };
 int scrape_art_enabled[ART_TYPE_COUNT] = { [0] = 1 }; // 2D Box Art on by default
 int scrape_system_enabled[PLATFORM_COUNT] = { [0 ... PLATFORM_COUNT - 1] = 1 };
+// TheGamesDB has no mix, no cartridge ("support") and no video media, so those
+// options are hidden while it is the selected source rather than being offered
+// and silently returning nothing. scrape_source: 0 = TheGamesDB, 1 = ScreenScraper.
+extern int scrape_source;   // defined below with the other scrape settings
+static int art_type_supported(int i) {
+    if (i < 0 || i >= ART_TYPE_COUNT) return 0;
+    if (scrape_source == 0)
+        return !(i == 6 /*mix*/ || i == ART_TYPE_CARTRIDGE || i == ART_TYPE_VIDEO);
+    return 1;
+}
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
 int art_dropdown_open = 0;
 int display_dropdown_open = 0;
@@ -3611,12 +3625,18 @@ int build_account_rows(int *row_type, int *row_extra) {
         row_type[idx] = ROW_ART_HEADER; row_extra[idx] = 0; idx++;
         if (art_dropdown_open) {
             row_type[idx] = ROW_SCRAPE_DESC; row_extra[idx] = 0; idx++;
-            for (int i = 0; i < 4; i++) { row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++; }
-            row_type[idx] = ROW_ART_ITEM; row_extra[idx] = ART_TYPE_CARTRIDGE; idx++;   // primary, not an extra
+            for (int i = 0; i < 4; i++) {
+                if (!art_type_supported(i)) continue;
+                row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++;
+            }
+            if (art_type_supported(ART_TYPE_CARTRIDGE)) {   // primary, not an extra
+                row_type[idx] = ROW_ART_ITEM; row_extra[idx] = ART_TYPE_CARTRIDGE; idx++;
+            }
             row_type[idx] = ROW_ART_EXTRAS_HEADER; row_extra[idx] = 0; idx++;
             if (scrape_extras_open)
                 for (int i = 4; i < ART_TYPE_COUNT; i++) {
                     if (i == ART_TYPE_CARTRIDGE) continue;   // already listed above
+                    if (!art_type_supported(i)) continue;
                     row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++;
                 }
         }
@@ -3720,6 +3740,7 @@ int build_game_rows(int *row_type, int *row_extra) {
     row_type[idx] = ROW_G_DISPLAY_ART_HEADER; row_extra[idx] = 0; idx++;
     if (display_dropdown_open)
         for (int i = 0; i < ART_TYPE_COUNT; i++) {
+            if (i == ART_TYPE_VIDEO) continue;   // scrape-only: nothing to show as a cover
             row_type[idx] = ROW_G_DISPLAY_ART_ITEM; row_extra[idx] = i; idx++;
         }
     row_type[idx] = ROW_G_SHOW_DESC; row_extra[idx] = 0; idx++;
@@ -7899,7 +7920,8 @@ void run_scrape() {
     char types_arg[256] = "";
     int first = 1;
     for (int i = 0; i < ART_TYPE_COUNT; i++) {
-        if (scrape_art_enabled[i]) {
+        // Never request a type the selected source cannot serve.
+        if (scrape_art_enabled[i] && art_type_supported(i)) {
             if (!first) strncat(types_arg, ",", sizeof(types_arg) - strlen(types_arg) - 1);
             strncat(types_arg, art_type_slugs[i], sizeof(types_arg) - strlen(types_arg) - 1);
             first = 0;
@@ -9473,7 +9495,10 @@ static const CartSpec *cart_spec_for(int p) {
 }
 
 // Draw a cartridge for platform `p` filling `box`, with `title` on the label.
-static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const char *title) {
+// `prominent` drives the outline strength: the selected cart keeps a firm
+// accent edge, the rest a faint one, so a fan of carts has a clear subject
+// instead of reading as one continuous strip.
+static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const char *title, int prominent) {
     if (box.w < 8 || box.h < 8) return box;
     const CartSpec *c = cart_spec_for(p);
     Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
@@ -9487,6 +9512,22 @@ static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const cha
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
     int rad = (int)(bw * c->shoulder);
+    // Outline first, as the same shape grown slightly, so it follows the cart's
+    // real silhouette -- notch included -- instead of boxing it in.
+    {
+        int g = prominent ? (b.w > 90 ? 3 : 2) : 2;
+        Uint8 oa = prominent ? 235 : 80;
+        SDL_Rect ob = { b.x - g, b.y - g, b.w + g*2, b.h + g*2 };
+        SDL_Color oc = th->accent2;
+        if (c->notch) {
+            int on  = (int)(ob.w * 0.24f);
+            int onh = (int)(ob.h * 0.16f); if (onh < rad + 2) onh = rad + 2;
+            fill_rounded(ren, (SDL_Rect){ ob.x, ob.y, ob.w - on, onh + rad }, rad + g, oc.r, oc.g, oc.b, oa);
+            fill_rounded(ren, (SDL_Rect){ ob.x, ob.y + onh, ob.w, ob.h - onh }, rad + g, oc.r, oc.g, oc.b, oa);
+        } else {
+            fill_rounded(ren, ob, rad + g, oc.r, oc.g, oc.b, oa);
+        }
+    }
     if (c->notch) {
         // Game Boy family: the top-right corner is cut away. Build the body out
         // of two rects so the notch is genuinely absent -- painting the corner
@@ -9562,6 +9603,65 @@ static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const cha
 
     SDL_SetRenderDrawBlendMode(ren, pbm);
     return b;
+}
+
+// Backdrop behind the highlighted game in the Games Carousel.
+//
+// ScreenScraper's video snaps are MP4 and SDL has no decoder, so a still is
+// pulled out of the clip once with ffmpeg (which Knulli ships) and cached
+// beside it; from then on the still is just another image. Order is video snap,
+// then screenshot, then title screen, then nothing -- callers draw the theme
+// background when this returns NULL.
+static SDL_Texture *game_backdrop_art(SDL_Renderer *ren, int idx) {
+    if (idx < 0 || idx >= game_count) return NULL;
+    static char     bd_key[832] = "";
+    static int      bd_gen = -1;
+    static unsigned bd_epoch = 0;
+    static SDL_Texture *bd_tex = NULL;
+
+    char key[832];
+    snprintf(key, sizeof key, "%s|%s", games[idx].platform_dir, games[idx].path);
+    if (strcmp(bd_key, key) == 0 && bd_gen == art_gen && bd_epoch == renderer_epoch)
+        return bd_tex;
+    if (bd_tex && bd_epoch == renderer_epoch) SDL_DestroyTexture(bd_tex);
+    bd_tex = NULL;
+    snprintf(bd_key, sizeof bd_key, "%s", key);
+    bd_gen = art_gen; bd_epoch = renderer_epoch;
+
+    const char *pdir = games[idx].platform_dir, *raw = games[idx].raw_filename;
+    char still[900], clip[900];
+    snprintf(still, sizeof still, "%s/boxart/%s/video/%s.frame.png", sn_data_root(), pdir, raw);
+
+    FILE *f = fopen(still, "rb");
+    if (f) { fclose(f); bd_tex = load_scaled_texture(ren, still, 1024); if (bd_tex) return bd_tex; }
+
+    // No still yet: if the snap itself is there, extract one in the background
+    // and use a fallback this time round. Only attempted once per game per run.
+    static char tried[8][832]; static int tried_n = 0;
+    int already = 0;
+    for (int i = 0; i < tried_n; i++) if (strcmp(tried[i], key) == 0) { already = 1; break; }
+    if (!already) {
+        const char *vext[] = { ".mp4", ".webm", ".avi" };
+        for (unsigned v = 0; v < sizeof(vext)/sizeof(vext[0]); v++) {
+            snprintf(clip, sizeof clip, "%s/boxart/%s/video/%s%s", sn_data_root(), pdir, raw, vext[v]);
+            FILE *c = fopen(clip, "rb");
+            if (!c) continue;
+            fclose(c);
+            char cmd[2100];
+            snprintf(cmd, sizeof cmd,
+                     "( command -v ffmpeg >/dev/null 2>&1 && ffmpeg -y -ss 1 -i '%s' -frames:v 1 "
+                     "-vf scale=960:-1 '%s' >/dev/null 2>&1 ) &", clip, still);
+            system(cmd);
+            if (tried_n < 8) snprintf(tried[tried_n++], 832, "%s", key);
+            break;
+        }
+    }
+
+    // Screenshot, then title screen.
+    SDL_Surface *sf = load_cached_art_surface(pdir, raw, 2);          // screenshot
+    if (!sf) sf = load_cached_art_surface(pdir, raw, 3);              // title screen
+    if (sf) bd_tex = tex_from_surface(ren, sf);
+    return bd_tex;
 }
 
 void ensure_platform_cards_built(SDL_Renderer *ren, int cw, int ch) {
@@ -15513,7 +15613,8 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_CONSOLE_VIEW) {
                                 platform_view_style = (platform_view_style + dir + VIEW_STYLE_COUNT) % VIEW_STYLE_COUNT;
                             } else if (rt == ROW_DISP_ART_HEADER || rt == ROW_DISP_ART_ITEM) {
-                                display_art_idx = (display_art_idx + dir + ART_TYPE_COUNT) % ART_TYPE_COUNT;
+                                do { display_art_idx = (display_art_idx + dir + ART_TYPE_COUNT) % ART_TYPE_COUNT; }
+                                while (display_art_idx == ART_TYPE_VIDEO);
                                 free_games(ren);
                                 rescan_active_games(ren, font_label);
                             } else if (rt == ROW_DISP_SHOW_EMPTY) {
@@ -19441,16 +19542,42 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, m, NULL, &mdst);
             } else if (platform_view_style == 1) {
                 // Games Carousel -- the library shaped like the Systems Carousel
-                // you arrived from, with each game shown as its cartridge:
-                // the scraped "Cartridge" art if the user has it, otherwise one
+                // you arrived from, each game shown as its cartridge: the
+                // scraped "Cartridge" art when the user has it, otherwise one
                 // drawn for that system with the title on the label.
                 SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                int gsel = (selected >= 0 && selected < game_count) ? selected : 0;
 
-                // Small ring cache so the visible cards are not re-decoded per
-                // frame. Keyed on the ROM path plus art_gen, for the same reason
-                // the List panel is: row indices are reused across rescans.
-                #define GCART_CAP 10
-                static struct { char key[832]; SDL_Texture *tex; int gen; } gcart[GCART_CAP];
+                // ---- backdrop for the highlighted game ----
+                // Video snap frame first, then screenshot, then title screen,
+                // then nothing. Heavily dimmed so the carts stay the subject.
+                {
+                    SDL_Texture *bgt = game_backdrop_art(ren, gsel);
+                    if (bgt) {
+                        SDL_Rect cover = cover_rect_for_texture(bgt, (SDL_Rect){ 0, 0, WIN_W, WIN_H });
+                        SDL_RenderCopy(ren, bgt, NULL, &cover);
+                        // Knock it well back: this is a backdrop, and the carts
+                        // have to stay legible over it on light themes too, where
+                        // a light veil barely touches a bright screenshot.
+                        SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 208);
+                        SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+                        SDL_SetRenderDrawColor(ren, 0, 0, 0, 40);
+                        SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+                        // STATE_MENU draws the logo and the sort/options line
+                        // before this branch runs, so a full-screen backdrop
+                        // wipes them. Put them back on top.
+                        draw_dock_logo(ren, font_small);
+                        SDL_Texture *so2 = render_text_fit(ren, font_label, sortline, th->accent2, WIN_W - 32);
+                        int sow2, soh2; SDL_QueryTexture(so2, NULL, NULL, &sow2, &soh2);
+                        SDL_RenderCopy(ren, so2, NULL, &(SDL_Rect){ WIN_W - sow2 - 16, 52, sow2, soh2 });
+                    }
+                }
+
+                // Visible cards are cached: decoding art every frame would stall
+                // scrolling. Keyed on the ROM path plus art_gen, because row
+                // indices are reused across rescans.
+                #define GCART_CAP 12
+                static struct { char key[832]; SDL_Texture *tex; SDL_Texture *sil; int gen; } gcart[GCART_CAP];
                 static unsigned gcart_epoch = 0;
                 static int gcart_n = 0;
                 if (gcart_epoch != renderer_epoch) {   // renderer went away with RetroArch
@@ -19458,88 +19585,100 @@ int main(int argc, char *argv[]) {
                 }
 
                 int cw = 150, chh = 200;
-                int cy = WIN_H / 2 - chh / 2 + 6;
-                int half = 2;                      // cards either side of centre
+                int cy = WIN_H / 2 - chh / 2 - 6;
+                int half = 2;
 
-                Uint32 cel = SDL_GetTicks() - selection_transition_start_1x1;
-                float ct = cel >= (Uint32)CAROUSEL_TRANSITION_MS ? 1.0f : (float)cel / CAROUSEL_TRANSITION_MS;
-                ct = 1.0f - (1.0f - ct) * (1.0f - ct);
                 if (selected != last_rendered_selected_1x1) {
                     selection_transition_start_1x1 = anim_start();
                     last_rendered_selected_1x1 = selected;
                 }
 
-                for (int off = half; off >= -half; off--) {
-                    int gi2 = selected + off;
-                    if (gi2 < 0 || gi2 >= game_count) continue;
-                    int centre = (off == 0);
-                    float d = (float)(off < 0 ? -off : off);
-                    float scale = centre ? 1.0f : (1.0f - 0.16f * d);
-                    int w2 = (int)(cw * scale), h2 = (int)(chh * scale);
-                    int x2 = WIN_W / 2 - w2 / 2 + (int)(off * (cw * 0.78f));
-                    int y2 = cy + (int)((chh - h2) * 0.55f);
-                    SDL_Rect cr = { x2, y2, w2, h2 };
+                // Outermost first, selected LAST. Drawing +2..-2 in order put the
+                // left-hand cards on top of the selected one, which is what made
+                // them bleed together instead of the centre standing proud.
+                for (int d = half; d >= 0; d--) {
+                    for (int side = 0; side < 2; side++) {
+                        if (d == 0 && side) continue;          // centre drawn once
+                        int off  = side ? d : -d;
+                        int gi2  = gsel + off;
+                        if (gi2 < 0 || gi2 >= game_count) continue;
+                        int centre = (off == 0);
 
-                    // Resolve this game's cartridge art once and keep it.
-                    char key[832];
-                    snprintf(key, sizeof key, "%s|%s", games[gi2].platform_dir, games[gi2].path);
-                    SDL_Texture *ct2 = NULL;
-                    int found = 0;
-                    for (int k = 0; k < gcart_n; k++)
-                        if (gcart[k].gen == art_gen && strcmp(gcart[k].key, key) == 0) { ct2 = gcart[k].tex; found = 1; break; }
-                    if (!found) {
-                        ct2 = tex_from_surface(ren, load_cached_art_surface(
-                                  games[gi2].platform_dir, games[gi2].raw_filename, ART_TYPE_CARTRIDGE));
-                        int slot = gcart_n < GCART_CAP ? gcart_n++ : (gi2 % GCART_CAP);
-                        if (gcart_n > GCART_CAP) gcart_n = GCART_CAP;
-                        if (slot < GCART_CAP) {
-                            if (gcart[slot].tex) SDL_DestroyTexture(gcart[slot].tex);
-                            snprintf(gcart[slot].key, sizeof gcart[slot].key, "%s", key);
-                            gcart[slot].tex = ct2; gcart[slot].gen = art_gen;
+                        float ad = (float)d;
+                        float scale = centre ? 1.0f : (1.0f - 0.20f * ad);
+                        int w2 = (int)(cw * scale), h2 = (int)(chh * scale);
+                        // Wide enough spacing that neighbours sit beside the
+                        // selected cart rather than under it.
+                        int x2 = WIN_W / 2 - w2 / 2 + (int)(off * (cw * 0.88f));
+                        int y2 = cy + (int)((chh - h2) * 0.5f);
+                        SDL_Rect cr = { x2, y2, w2, h2 };
+
+                        char key[832];
+                        snprintf(key, sizeof key, "%s|%s", games[gi2].platform_dir, games[gi2].path);
+                        SDL_Texture *ct2 = NULL, *sil = NULL;
+                        int found = 0;
+                        for (int k = 0; k < gcart_n; k++)
+                            if (gcart[k].gen == art_gen && strcmp(gcart[k].key, key) == 0) {
+                                ct2 = gcart[k].tex; sil = gcart[k].sil; found = 1; break;
+                            }
+                        if (!found) {
+                            SDL_Surface *sf = load_cached_art_surface(games[gi2].platform_dir,
+                                                                      games[gi2].raw_filename, ART_TYPE_CARTRIDGE);
+                            if (sf) {
+                                // Silhouette of the art's own alpha -- drawn a
+                                // little larger behind it, that is an outline
+                                // that follows the cartridge's real shape.
+                                sil = make_silhouette_shadow(ren, sf);
+                                ct2 = tex_from_surface(ren, sf);
+                            }
+                            int slot = gcart_n < GCART_CAP ? gcart_n++ : (gi2 % GCART_CAP);
+                            if (slot < GCART_CAP) {
+                                if (gcart[slot].tex) SDL_DestroyTexture(gcart[slot].tex);
+                                if (gcart[slot].sil) SDL_DestroyTexture(gcart[slot].sil);
+                                snprintf(gcart[slot].key, sizeof gcart[slot].key, "%s", key);
+                                gcart[slot].tex = ct2; gcart[slot].sil = sil; gcart[slot].gen = art_gen;
+                            }
                         }
-                    }
 
-                    SDL_Rect body = cr;
-                    if (ct2) {
-                        body = fit_rect_for_texture(ct2, cr);
-                        if (!centre) SDL_SetTextureAlphaMod(ct2, 150);
-                        SDL_RenderCopy(ren, ct2, NULL, &body);
-                        SDL_SetTextureAlphaMod(ct2, 255);
-                    } else {
-                        // Nothing scraped -- draw the system's cartridge instead.
-                        // Every cart gets its title, not just the centre one, or
-                        // the shelf is a row of identical blank labels.
-                        int pidx = platform_index_for_dir(games[gi2].platform_dir);
-                        body = draw_cartridge(ren, cr, pidx, games[gi2].title);
-                    }
-                    if (!centre) {
-                        // Recede with black rather than the theme background --
-                        // on a light theme a bg-coloured veil washes the cart out
-                        // to a featureless white slab.
-                        SDL_SetRenderDrawColor(ren, 0, 0, 0, 66);
-                        SDL_RenderFillRect(ren, &body);
-                    }
-                    if (centre) {
-                        for (int b = 0; b < 2; b++) {
-                            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
-                            SDL_RenderDrawRect(ren, &(SDL_Rect){ body.x - 4 - b, body.y - 4 - b,
-                                                                 body.w + 8 + b*2, body.h + 8 + b*2 });
+                        SDL_Rect body = cr;
+                        if (ct2) {
+                            body = fit_rect_for_texture(ct2, cr);
+                            if (sil) {   // shape-matched outline
+                                int g = centre ? 3 : 2;
+                                SDL_SetTextureBlendMode(sil, SDL_BLENDMODE_BLEND);
+                                SDL_SetTextureColorMod(sil, th->accent2.r, th->accent2.g, th->accent2.b);
+                                SDL_SetTextureAlphaMod(sil, centre ? 235 : 90);
+                                SDL_RenderCopy(ren, sil, NULL,
+                                    &(SDL_Rect){ body.x - g, body.y - g, body.w + g*2, body.h + g*2 });
+                                SDL_SetTextureAlphaMod(sil, 255);
+                                SDL_SetTextureColorMod(sil, 255, 255, 255);
+                            }
+                            if (!centre) SDL_SetTextureAlphaMod(ct2, 205);
+                            SDL_RenderCopy(ren, ct2, NULL, &body);
+                            SDL_SetTextureAlphaMod(ct2, 255);
+                        } else {
+                            int pidx = platform_index_for_dir(games[gi2].platform_dir);
+                            body = draw_cartridge(ren, cr, pidx, games[gi2].title, centre);
+                        }
+                        if (!centre) {
+                            // Recede with black, not the theme background -- a
+                            // bg-coloured veil washes carts out on light themes.
+                            SDL_SetRenderDrawColor(ren, 0, 0, 0, 92);
+                            SDL_RenderFillRect(ren, &body);
                         }
                     }
                 }
-                (void)ct;
 
-                // Title + position under the fan.
                 {
-                    int gi3 = (selected >= 0 && selected < game_count) ? selected : 0;
-                    SDL_Texture *tt2 = render_text_fit(ren, font_small, games[gi3].title, g_ui_text, WIN_W - 60);
+                    SDL_Texture *tt2 = render_text_fit(ren, font_small, games[gsel].title, g_ui_text, WIN_W - 60);
                     int tw5, th5; SDL_QueryTexture(tt2, NULL, NULL, &tw5, &th5);
-                    int ty2 = cy + chh + 16;
+                    int ty2 = cy + chh + 14;
+                    draw_hud_backing(ren, (SDL_Rect){ WIN_W/2 - tw5/2 - 8, ty2 - 3, tw5 + 16, th5 + 6 });
                     SDL_RenderCopy(ren, tt2, NULL, &(SDL_Rect){ WIN_W/2 - tw5/2, ty2, tw5, th5 });
-                    char pos[32]; snprintf(pos, sizeof pos, "%d / %d", gi3 + 1, game_count);
+                    char pos[32]; snprintf(pos, sizeof pos, "%d / %d", gsel + 1, game_count);
                     SDL_Texture *pt2 = render_text(ren, font_label, pos, g_ui_dim);
                     int pw2, ph2; SDL_QueryTexture(pt2, NULL, NULL, &pw2, &ph2);
-                    SDL_RenderCopy(ren, pt2, NULL, &(SDL_Rect){ WIN_W/2 - pw2/2, ty2 + th5 + 5, pw2, ph2 });
+                    SDL_RenderCopy(ren, pt2, NULL, &(SDL_Rect){ WIN_W/2 - pw2/2, ty2 + th5 + 4, pw2, ph2 });
                 }
                 #undef GCART_CAP
 
