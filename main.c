@@ -9453,6 +9453,7 @@ static void draw_platform_placeholder(SDL_Renderer *ren, int p, SDL_Rect r, int 
 // these are recognisable stand-ins, not replicas.
 typedef struct {
     const char *dir;          // ROM dir, NULL terminates the table
+    unsigned char media;      // CART_MEDIA_*
     float aspect;             // body width / height
     float shoulder;           // top corner radius, fraction of body width
     unsigned char notch;      // 1 = cut the top-right corner (Game Boy family)
@@ -9460,22 +9461,55 @@ typedef struct {
     float lx, ly, lw, lh;     // label rect, fractions of the body
     SDL_Color body, label;
 } CartSpec;
+#define CART_MEDIA_CART 0
+#define CART_MEDIA_DISC 1     // CD/GD/UMD systems get a disc, not a cartridge
 
 static const CartSpec cart_specs[] = {
-    // dir            aspect shoulder notch ridge   lx    ly    lw    lh   body                     label
-    { "nes",           0.92f, 0.06f, 0, 1, 0.10f,0.10f,0.80f,0.46f, {188,186,178,255}, {236,232,222,255} },
-    { "snes",          0.86f, 0.22f, 0, 1, 0.12f,0.20f,0.76f,0.44f, {176,174,170,255}, {232,230,226,255} },
-    { "n64",           1.05f, 0.14f, 0, 1, 0.12f,0.16f,0.76f,0.44f, { 74, 74, 78,255}, {226,224,218,255} },
-    { "gb",            0.80f, 0.10f, 1, 1, 0.11f,0.14f,0.78f,0.48f, {150,150,148,255}, {228,226,220,255} },
-    { "gbc",           0.80f, 0.10f, 1, 1, 0.11f,0.14f,0.78f,0.48f, { 96,152,196,255}, {232,232,228,255} },
-    { "gba",           1.02f, 0.10f, 1, 1, 0.10f,0.14f,0.80f,0.50f, { 92, 92, 98,255}, {230,228,222,255} },
-    { "genesis",       0.80f, 0.26f, 0, 1, 0.12f,0.24f,0.76f,0.42f, { 60, 60, 64,255}, {224,222,216,255} },
-    { "mastersystem",  0.78f, 0.08f, 0, 0, 0.10f,0.10f,0.80f,0.56f, { 56, 56, 60,255}, {222,220,214,255} },
-    { "gamegear",      0.94f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 70, 70, 74,255}, {226,224,218,255} },
-    { "neogeo",        1.18f, 0.08f, 0, 1, 0.09f,0.14f,0.82f,0.50f, { 46, 48, 54,255}, {220,218,212,255} },
-    { "atari2600",     1.00f, 0.10f, 0, 1, 0.12f,0.30f,0.76f,0.40f, { 52, 48, 44,255}, {214,206,190,255} },
-    { "virtualboy",    0.88f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {132, 40, 44,255}, {226,222,216,255} },
-    { NULL,            0.88f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {110,110,116,255}, {228,226,220,255} },
+    // dir             media aspect shldr ntch rdg   lx    ly    lw    lh   body                     label
+    { "nes",           0, 0.92f, 0.06f, 0, 1, 0.10f,0.10f,0.80f,0.46f, {188,186,178,255}, {236,232,222,255} },
+    { "snes",          0, 0.86f, 0.22f, 0, 1, 0.12f,0.20f,0.76f,0.44f, {176,174,170,255}, {232,230,226,255} },
+    { "n64",           0, 1.05f, 0.14f, 0, 1, 0.12f,0.16f,0.76f,0.44f, { 74, 74, 78,255}, {226,224,218,255} },
+    { "gb",            0, 0.80f, 0.10f, 1, 1, 0.11f,0.14f,0.78f,0.48f, {150,150,148,255}, {228,226,220,255} },
+    { "gbc",           0, 0.80f, 0.10f, 1, 1, 0.11f,0.14f,0.78f,0.48f, { 96,152,196,255}, {232,232,228,255} },
+    { "gba",           0, 1.02f, 0.10f, 1, 1, 0.10f,0.14f,0.80f,0.50f, { 92, 92, 98,255}, {230,228,222,255} },
+    { "genesis",       0, 0.80f, 0.26f, 0, 1, 0.12f,0.24f,0.76f,0.42f, { 60, 60, 64,255}, {224,222,216,255} },
+    { "sega32x",       0, 0.80f, 0.26f, 0, 1, 0.12f,0.24f,0.76f,0.42f, { 46, 46, 52,255}, {224,222,216,255} },
+    { "mastersystem",  0, 0.78f, 0.08f, 0, 0, 0.10f,0.10f,0.80f,0.56f, { 56, 56, 60,255}, {222,220,214,255} },
+    { "sg1000",        0, 0.78f, 0.08f, 0, 0, 0.10f,0.10f,0.80f,0.56f, { 64, 58, 58,255}, {222,220,214,255} },
+    { "gamegear",      0, 0.94f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 70, 70, 74,255}, {226,224,218,255} },
+    { "neogeo",        0, 1.18f, 0.08f, 0, 1, 0.09f,0.14f,0.82f,0.50f, { 46, 48, 54,255}, {220,218,212,255} },
+    { "atari2600",     0, 1.00f, 0.10f, 0, 1, 0.12f,0.30f,0.76f,0.40f, { 52, 48, 44,255}, {214,206,190,255} },
+    { "atari5200",     0, 1.06f, 0.10f, 0, 1, 0.12f,0.28f,0.76f,0.42f, { 58, 54, 50,255}, {216,208,192,255} },
+    { "atari7800",     0, 1.00f, 0.10f, 0, 1, 0.12f,0.28f,0.76f,0.42f, { 48, 46, 44,255}, {214,206,190,255} },
+    { "virtualboy",    0, 0.88f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {132, 40, 44,255}, {226,222,216,255} },
+    { "lynx",          0, 1.12f, 0.14f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 44, 44, 48,255}, {224,222,216,255} },
+    { "wswan",         0, 0.96f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {112,112,108,255}, {230,228,222,255} },
+    { "wswanc",        0, 0.96f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 84,110,150,255}, {230,228,222,255} },
+    { "ngp",           0, 0.94f, 0.16f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 66, 70, 78,255}, {228,226,220,255} },
+    { "ngpc",          0, 0.94f, 0.16f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 56,100,140,255}, {228,226,220,255} },
+    { "pokemini",      0, 0.86f, 0.16f, 0, 1, 0.12f,0.18f,0.76f,0.46f, { 96,110, 96,255}, {228,228,220,255} },
+    { "supervision",   0, 0.90f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 78, 78, 84,255}, {226,224,218,255} },
+    { "colecovision",  0, 0.86f, 0.08f, 0, 1, 0.10f,0.12f,0.80f,0.50f, { 52, 50, 54,255}, {222,218,208,255} },
+    { "intellivision", 0, 0.92f, 0.08f, 0, 0, 0.10f,0.12f,0.80f,0.54f, { 62, 54, 44,255}, {220,214,200,255} },
+    { "vectrex",       0, 0.88f, 0.10f, 0, 1, 0.11f,0.14f,0.78f,0.50f, { 44, 44, 48,255}, {224,220,212,255} },
+    { "msx1",          0, 0.96f, 0.10f, 0, 1, 0.10f,0.14f,0.80f,0.50f, { 58, 58, 64,255}, {226,224,216,255} },
+    { "msx2",          0, 0.96f, 0.10f, 0, 1, 0.10f,0.14f,0.80f,0.50f, { 50, 54, 66,255}, {226,224,216,255} },
+    { "fds",           0, 1.00f, 0.06f, 0, 0, 0.10f,0.12f,0.80f,0.54f, {196,190,176,255}, {236,232,222,255} },
+    // HuCards are credit-card thin and wide.
+    { "pcengine",      0, 1.55f, 0.06f, 0, 0, 0.08f,0.14f,0.84f,0.56f, { 62, 62, 68,255}, {228,226,220,255} },
+    { "supergrafx",    0, 1.55f, 0.06f, 0, 0, 0.08f,0.14f,0.84f,0.56f, { 54, 54, 62,255}, {228,226,220,255} },
+    { "c64",           0, 1.10f, 0.08f, 0, 1, 0.10f,0.16f,0.80f,0.48f, {186,176,150,255}, {232,228,216,255} },
+    // --- disc media: the body/label colours below are the disc face and its
+    //     printed area; aspect is forced square by the disc renderer.
+    { "psx",           1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {206,208,214,255}, {240,240,244,255} },
+    { "saturn",        1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {202,206,214,255}, {238,238,242,255} },
+    { "dreamcast",     1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {214,210,206,255}, {242,240,238,255} },
+    { "segacd",        1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {204,206,212,255}, {238,238,242,255} },
+    { "pcenginecd",    1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {204,206,212,255}, {238,238,242,255} },
+    { "neogeocd",      1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {200,202,210,255}, {236,236,240,255} },
+    { "psp",           1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {196,200,210,255}, {234,236,242,255} },
+    { "3do",           1, 1.00f, 0.0f, 0, 0, 0,0,0,0, {204,206,212,255}, {238,238,242,255} },
+    { NULL,            0, 0.88f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {110,110,116,255}, {228,226,220,255} },
 };
 
 static const CartSpec *cart_spec_for(int p) {
@@ -9495,6 +9529,58 @@ static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const cha
     if (box.w < 8 || box.h < 8) return box;
     const CartSpec *c = cart_spec_for(p);
     Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+
+    // Disc systems get a disc. A cartridge silhouette would be nonsense for a
+    // PlayStation or a Saturn, and a blank CD-R with the title written across
+    // it is what a game with no scraped media actually looks like.
+    if (c->media == CART_MEDIA_DISC) {
+        int side = box.w < box.h ? box.w : box.h;
+        int cx = box.x + box.w / 2, cyy = box.y + box.h / 2;
+        int Rr = side / 2;
+        SDL_BlendMode dbm; SDL_GetRenderDrawBlendMode(ren, &dbm);
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        #define DISC_C(rr, R_, G_, B_, A_)             fill_rounded(ren, (SDL_Rect){ cx - (rr), cyy - (rr), (rr) * 2, (rr) * 2 }, (rr), R_, G_, B_, A_)
+        int g = prominent ? 3 : 2;
+        DISC_C(Rr, th->accent2.r, th->accent2.g, th->accent2.b, prominent ? 235 : 80);  // rim
+        DISC_C(Rr - g, c->body.r, c->body.g, c->body.b, 255);                            // disc face
+        DISC_C((int)(Rr * 0.86f), c->label.r, c->label.g, c->label.b, 255);              // printable area
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 26);
+        DISC_C((int)(Rr * 0.34f), 150, 152, 160, 255);                                   // clear hub ring
+        DISC_C((int)(Rr * 0.24f), c->label.r, c->label.g, c->label.b, 255);              // stacking ring
+        DISC_C((int)(Rr * 0.11f), 28, 28, 32, 255);                                      // centre hole
+
+        if (title && title[0] && font_label && Rr > 34) {
+            SDL_Color ink = { 34, 32, 30, 255 };
+            int availw = (int)(Rr * 1.34f);
+            int lh = TTF_FontHeight(font_label);
+            char lines[2][96]; int nl = 0; char cur[96] = "";
+            const char *w = title;
+            while (*w && nl < 2) {
+                const char *e = w; while (*e && *e != ' ') e++;
+                char word[64]; int wl = (int)(e - w); if (wl > 63) wl = 63;
+                memcpy(word, w, wl); word[wl] = 0;
+                char test[96]; snprintf(test, sizeof test, "%s%s%s", cur, cur[0] ? " " : "", word);
+                int mw = 0, mh = 0; TTF_SizeUTF8(font_label, test, &mw, &mh);
+                if (mw > availw && cur[0]) { snprintf(lines[nl++], 96, "%s", cur); snprintf(cur, sizeof cur, "%s", word); }
+                else snprintf(cur, sizeof cur, "%s", test);
+                w = *e ? e + 1 : e;
+            }
+            if (cur[0] && nl < 2) snprintf(lines[nl++], 96, "%s", cur);
+            // Above the hub, so the text never collides with the centre hole.
+            int ty = cyy - (int)(Rr * 0.40f) - nl * (lh + 1) / 2;
+            for (int i = 0; i < nl; i++) {
+                SDL_Texture *t = render_text_fit(ren, font_label, lines[i], ink, availw);
+                if (!t) continue;
+                int tw, thh; SDL_QueryTexture(t, NULL, NULL, &tw, &thh);
+                SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ cx - tw / 2, ty, tw, thh });
+                ty += lh + 1;
+            }
+        }
+        if (!prominent) DISC_C(Rr, 0, 0, 0, 92);   // dim the disc, not its bounding box
+        #undef DISC_C
+        SDL_SetRenderDrawBlendMode(ren, dbm);
+        return (SDL_Rect){ cx - Rr, cyy - Rr, Rr * 2, Rr * 2 };
+    }
 
     // Fit the body's aspect inside the box.
     int bw = box.w, bh = (int)(bw / c->aspect);
@@ -9594,6 +9680,18 @@ static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const cha
         }
     }
 
+    if (!prominent) {
+        // Recede along the cart's own shape. Filling the bounding rect would
+        // paint a grey slab around anything that is not a plain rectangle.
+        if (c->notch) {
+            int n2 = (int)(b.w * 0.24f);
+            int nh2 = (int)(b.h * 0.16f); if (nh2 < rad + 2) nh2 = rad + 2;
+            fill_rounded(ren, (SDL_Rect){ b.x, b.y, b.w - n2, nh2 + rad }, rad, 0, 0, 0, 92);
+            fill_rounded(ren, (SDL_Rect){ b.x, b.y + nh2, b.w, b.h - nh2 }, rad, 0, 0, 0, 92);
+        } else {
+            fill_rounded(ren, b, rad, 0, 0, 0, 92);
+        }
+    }
     SDL_SetRenderDrawBlendMode(ren, pbm);
     return b;
 }
@@ -9712,6 +9810,13 @@ static SDL_Rect draw_cartridge_donor(SDL_Renderer *ren, SDL_Rect box, CartDonor 
             SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ lab.x + lab.w / 2 - tw / 2, ty, tw, thh });
             ty += lh + 1;
         }
+    }
+    if (!prominent) {
+        SDL_SetTextureColorMod(d->sil, 0, 0, 0);
+        SDL_SetTextureAlphaMod(d->sil, 92);
+        SDL_RenderCopy(ren, d->sil, NULL, &b);
+        SDL_SetTextureColorMod(d->sil, 255, 255, 255);
+        SDL_SetTextureAlphaMod(d->sil, 255);
     }
     SDL_SetRenderDrawBlendMode(ren, pbm);
     return b;
@@ -19840,7 +19945,7 @@ int main(int argc, char *argv[]) {
                                 SDL_SetTextureAlphaMod(sil, 255);
                                 SDL_SetTextureColorMod(sil, 255, 255, 255);
                             }
-                            if (!centre) SDL_SetTextureAlphaMod(ct2, 205);
+                            if (!centre) SDL_SetTextureAlphaMod(ct2, 165);
                             SDL_RenderCopy(ren, ct2, NULL, &body);
                             SDL_SetTextureAlphaMod(ct2, 255);
                         } else {
@@ -19850,12 +19955,6 @@ int main(int argc, char *argv[]) {
                                 body = draw_cartridge_donor(ren, cr, dn, pidx, games[gi2].title, centre);
                             else
                                 body = draw_cartridge(ren, cr, pidx, games[gi2].title, centre);
-                        }
-                        if (!centre) {
-                            // Recede with black, not the theme background -- a
-                            // bg-coloured veil washes carts out on light themes.
-                            SDL_SetRenderDrawColor(ren, 0, 0, 0, 92);
-                            SDL_RenderFillRect(ren, &body);
                         }
                     }
                 }
