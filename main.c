@@ -7556,7 +7556,8 @@ static SDL_Texture *load_scaled_texture(SDL_Renderer *ren, const char *path, int
 // descriptions live in <roms>/<system>/gamelist.xml + images/. Parse it once
 // per system and map ROM basename -> absolute image path + description so Snap
 // FE shows exactly what ES had, no re-scrape needed.
-typedef struct { char base[160]; char img[420]; char desc[900]; } GLEntry;
+typedef struct { char base[160]; char name[160]; char img[420]; char desc[900];
+                unsigned char hidden; } GLEntry;
 static GLEntry *gl_cache = NULL;
 static int  gl_cache_n = 0;
 static char gl_cache_plat[24] = "\x01";   // impossible sentinel so first call loads
@@ -7623,7 +7624,13 @@ static void gl_load(const char *platform_dir) {
             char save = *end; *end = '\0';
 
             char rel[420] = "", img[420] = "", desc[900] = "";
+            char nm[160] = "", hid[16] = "";
             gl_field(g, "path", rel, sizeof rel);
+            gl_field(g, "name", nm, sizeof nm);
+            // ES marks engine data and other non-games hidden -- Knulli ships
+            // prboom.wad that way, since it is PrBoom's own resource file and
+            // not something you can launch.
+            gl_field(g, "hidden", hid, sizeof hid);
             if (!gl_field(g, "image", img, sizeof img))
                 if (!gl_field(g, "thumbnail", img, sizeof img))
                     gl_field(g, "boxback", img, sizeof img);
@@ -7643,7 +7650,9 @@ static void gl_load(const char *platform_dir) {
                 else              snprintf(e->img, sizeof e->img, "%s/%s/%s", roots[r], platform_dir, ip);
             }
             snprintf(e->desc, sizeof e->desc, "%s", desc);
-            if (e->base[0] && (e->img[0] || e->desc[0])) gl_cache_n++;
+            snprintf(e->name, sizeof e->name, "%s", nm);
+            e->hidden = (unsigned char)(strcasecmp(hid, "true") == 0 || strcmp(hid, "1") == 0);
+            if (e->base[0] && (e->img[0] || e->desc[0] || e->name[0] || e->hidden)) gl_cache_n++;
         }
         free(buf);
     }
@@ -8340,6 +8349,16 @@ static void scan_add(const char *full, const char *name, void *ud) {
     strip_ext(name, games[i].raw_filename, sizeof(games[i].raw_filename));
     RomInfo info; parse_rom_filename(games[i].raw_filename, &info);
     snprintf(games[i].title, sizeof(games[i].title), "%.127s", info.title);
+    // Prefer what the system's gamelist.xml calls this, and honour <hidden>.
+    // Filenames like "doom1_shareware" or "fix_it_felix_64" are shipping
+    // defaults on Knulli, and the curated name is always the better label.
+    {
+        GLEntry ge;
+        if (gl_find(platform_dirs[c->p], games[i].raw_filename, &ge)) {
+            if (ge.hidden) return;
+            if (ge.name[0]) snprintf(games[i].title, sizeof(games[i].title), "%.127s", ge.name);
+        }
+    }
     if (c->search_lc && !ci_contains(games[i].title, c->search_lc)) return;
     snprintf(games[i].region, sizeof(games[i].region), "%s", info.region);
     snprintf(games[i].languages, sizeof(games[i].languages), "%s", info.languages);
@@ -9097,7 +9116,8 @@ void ensure_carousel_bg_loaded(SDL_Renderer *ren, int platform) {
         if (d) {
             struct dirent *entry;
             while ((entry = readdir(d)) != NULL) {
-                if (has_ext(entry->d_name, ".png") || has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
+                if (has_ext(entry->d_name, ".svg") || has_ext(entry->d_name, ".png") ||
+                    has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
                     char path[900];
                     snprintf(path, sizeof(path), "%s/%s", dirpath, entry->d_name);
                     platform_bg_cache[platform] = load_scaled_texture(ren, path, 1024);
@@ -9265,10 +9285,14 @@ void ensure_platform_icons_loaded(SDL_Renderer *ren, int style) {
         if (!d) continue;
         struct dirent *entry;
         while ((entry = readdir(d)) != NULL) {
-            if (has_ext(entry->d_name, ".png") || has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
+            if (has_ext(entry->d_name, ".svg") || has_ext(entry->d_name, ".png") ||
+                has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
                 char path[900];
                 snprintf(path, sizeof(path), "%.643s/%.255s", dirpath, entry->d_name);
-                platform_icon_cache[p] = IMG_LoadTexture(ren, path);
+                // Through load_scaled_texture, not IMG_LoadTexture: an SVG must
+                // be rasterized at a working size or it comes back at its
+                // intrinsic 24-48px and is then stretched across the tile.
+                platform_icon_cache[p] = load_scaled_texture(ren, path, 512);
                 if (platform_icon_cache[p]) break;
             }
         }
@@ -19141,7 +19165,12 @@ int main(int argc, char *argv[]) {
 
         } else if (state == STATE_GAMEOPTS) {
             int gi = (selected >= 0 && selected < game_count) ? selected : 0;
-            int has_search = in_all_games_view ? 1 : 0;
+            // Must match the STATE_GAMEOPTS input handler exactly. It treats
+            // Search as always present; this drew it only in All Games, so in a
+            // single system's library the panel showed 3 rows while the handler
+            // indexed 4 -- selecting "Delete Game" ran ROW_SEARCH and opened the
+            // keyboard instead of asking to confirm.
+            int has_search = 1;
             int nrows = has_search ? 4 : 3;
 
             SDL_Texture *title = render_text_fit(ren, font_small,
@@ -19177,9 +19206,8 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ px + 24, ry, rw, rh });
                 ry += 40;
             }
-            SDL_Texture *hint = render_text(ren, font_label, "A: Choose    B: Back", g_ui_dim);
-            int hw2, hh2; SDL_QueryTexture(hint, NULL, NULL, &hw2, &hh2);
-            SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hw2/2, py + ph - hh2 - 12, hw2, hh2 });
+            // No footer hint here: it was drawn inside the panel and collided
+            // with the "Back" row, which already says the same thing.
 
         } else if (state == STATE_MENU) {
             draw_dock_logo(ren, font_small);
