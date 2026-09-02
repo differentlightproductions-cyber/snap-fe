@@ -75,7 +75,7 @@ done
     ! -name '*:Zone.Identifier' ! -name '.DS_Store' \
     ! -iname '*.key' ! -iname 'settings.cfg' ! -iname '*.cfg' ! -iname '*.dat' \
     ! -iname '*.srm' ! -iname '*.sav' ! -iname '*.state*' \
-    \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.png' -o -iname '*.jpg' \
+    \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.svg' -o -iname '*.png' -o -iname '*.jpg' \
        -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.wav' \
        -o -iname '*.ogg' -o -iname '*.mp3' -o -iname '*.flac' -o -iname '*.txt' \) \
     -exec install -D -m 0644 '{}' "$DEST/assets/{}" ';' )

@@ -828,7 +828,7 @@ const char *home_view_names[HOME_VIEW_COUNT] = { "Informational (Default)", "App
 int home_view_idx = 0;
 
 #define HOME_ICON_PACK_COUNT 2
-const char *home_icon_pack_names[HOME_ICON_PACK_COUNT] = { "Simple", "Pixel Art" };
+const char *home_icon_pack_names[HOME_ICON_PACK_COUNT] = { "Simple", "(AI Art) Pixel Art" };
 const char *home_icon_pack_dirs[HOME_ICON_PACK_COUNT] = { "simple", "pixel-art" };
 int home_icon_pack_idx = 0;
 
@@ -3952,7 +3952,7 @@ static void settings_close_all_groups(void) {
 // through settings.cfg) so the sizing code in Carousel/Grid doesn't need
 // touching and the setting can come back later without re-deriving it.
 #define VIEW_STYLE_COUNT 5
-const char *view_style_names[VIEW_STYLE_COUNT] = { "Single Card", "Carousel", "Grid", "List", "Bookshelf" };
+const char *view_style_names[VIEW_STYLE_COUNT] = { "Single Card", "Carousel", "Grid", "List", "(AI Art) Bookshelf" };
 #define VIEW_STYLE_BOOKSHELF 4
 int platform_view_style = 1; // Carousel out of the box
 int bookshelf_sort = 0;      // 0 = A-Z, 1 = Z-A, 2 = release year (persisted)
@@ -7329,7 +7329,20 @@ void parse_rom_filename(const char *filename_no_ext, RomInfo *out) {
 // Decode + CPU-downscale to <= max_px on the longest side. Pure surface work,
 // no renderer -- safe to call from the background art thread.
 static SDL_Surface *load_scaled_surface(const char *path, int max_px) {
-    SDL_Surface *s = IMG_Load(path);
+    SDL_Surface *s = NULL;
+    if (has_ext(path, ".svg")) {
+        // SDL_image 2.8 on the H700 includes its NanoSVG-backed sized loader.
+        // Rasterize vectors directly at the cache's requested working size so
+        // changing tile dimensions never magnifies a tiny source bitmap.
+        SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+        if (rw) {
+            int svg_px = max_px > 0 ? max_px : 512;
+            s = IMG_LoadSizedSVG_RW(rw, svg_px, svg_px);
+            SDL_RWclose(rw);
+        }
+    } else {
+        s = IMG_Load(path);
+    }
     if (!s) return NULL;
     int longest = s->w > s->h ? s->w : s->h;
     if (max_px > 0 && longest > max_px) {
@@ -9037,8 +9050,8 @@ SDL_Texture *book_spine_icon[PLATFORM_COUNT] = { 0 };
 int bookshelf_assets_tried = 0;
 
 static SDL_Texture *try_load_img(SDL_Renderer *ren, const char *stem, int maxdim) {
-    const char *exts[] = { ".png", ".jpg", ".jpeg" };
-    for (int i = 0; i < 3; i++) {
+    const char *exts[] = { ".svg", ".png", ".jpg", ".jpeg" };
+    for (int i = 0; i < 4; i++) {
         char path[700];
         snprintf(path, sizeof path, "%s%s", stem, exts[i]);
         FILE *f = fopen(path, "rb");
@@ -9053,7 +9066,7 @@ static SDL_Texture *try_load_img_dir(SDL_Renderer *ren, const char *dirpath, int
     struct dirent *entry;
     SDL_Texture *t = NULL;
     while (!t && (entry = readdir(d)) != NULL) {
-        if (has_ext(entry->d_name, ".png") || has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
+        if (has_ext(entry->d_name, ".svg") || has_ext(entry->d_name, ".png") || has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
             char path[900];
             snprintf(path, sizeof path, "%.640s/%.255s", dirpath, entry->d_name);
             t = load_scaled_texture(ren, path, maxdim);
@@ -11697,7 +11710,7 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
 // ===================================================================== //
 //  "App Focused" home layout -- a grid of tappable tiles                //
 // ===================================================================== //
-// Icons: assets/icons/home/<slug>.{png,jpg,jpeg}  (any of the three).
+// Icons: assets/icons/home/<pack>/<slug>.{svg,png,jpg,jpeg}; vectors win.
 // The resume tile and favourite tiles show the game's real cover art.
 #define HOME_GRID_COLS 4
 #define HOME_GRID_ROWS 2
