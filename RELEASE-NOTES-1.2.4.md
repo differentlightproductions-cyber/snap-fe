@@ -8,8 +8,8 @@ presentation while preserving the layout and controls from 1.2.3.
 - Added **Simple** and **Pixel Art** icon packs under separate asset folders.
 - The new Simple pack is the default; the complete 1.2.3 illustrated set is
   preserved as Pixel Art.
-- User-facing labels now identify the illustrated choices as **(AI Art) Pixel
-  Art** and **(AI Art) Bookshelf**.
+- User-facing labels now identify the illustrated choices as **Pixel Art (AI
+  Art)** and **Bookshelf (AI Art)**.
 - Added **Settings > Display > Home > App Icon Pack**. The selected pack is
   saved and can be changed with A or left/right.
 - Simple icons automatically follow the active theme's text color for readable
