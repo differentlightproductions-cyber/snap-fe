@@ -1,0 +1,40 @@
+# Line-ending policy.
+#
+# This repo lives on an NTFS path but is edited and built from WSL, so the
+# working tree must be LF as well as the index. Without this, Windows-side
+# tooling rewrites files as CRLF and every file shows up as 100% modified
+# (main.c alone diffed +18484/-18484 with zero real content changes), and any
+# .sh that picks up CRLF fails on Linux with "bad interpreter".
+
+* text=auto eol=lf
+
+# Text -- always LF, both in the repo and on disk.
+*.c        text eol=lf
+*.h        text eol=lf
+*.py       text eol=lf
+*.sh       text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
+*.cfg      text eol=lf
+*.conf     text eol=lf
+*.json     text eol=lf
+*.svg      text eol=lf
+*.desktop  text eol=lf
+
+# Binary -- never converted, never diffed as text.
+*.ttf      binary
+*.otf      binary
+*.wav      binary
+*.ogg      binary
+*.mp3      binary
+*.flac     binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.bmp      binary
+*.ico      binary
+*.zip      binary
+*.gz       binary
+*.so       binary
+*.aarch64  binary
