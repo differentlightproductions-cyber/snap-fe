@@ -3952,7 +3952,7 @@ static void settings_close_all_groups(void) {
 // through settings.cfg) so the sizing code in Carousel/Grid doesn't need
 // touching and the setting can come back later without re-deriving it.
 #define VIEW_STYLE_COUNT 5
-const char *view_style_names[VIEW_STYLE_COUNT] = { "Single Card", "Carousel", "Grid", "List", "Bookshelf (AI Art)" };
+const char *view_style_names[VIEW_STYLE_COUNT] = { "Single Card", "Carousel (AI Art)", "Grid", "List", "Bookshelf (AI Art)" };
 #define VIEW_STYLE_BOOKSHELF 4
 int platform_view_style = 1; // Carousel out of the box
 int bookshelf_sort = 0;      // 0 = A-Z, 1 = Z-A, 2 = release year (persisted)
