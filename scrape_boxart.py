@@ -48,11 +48,11 @@ TGDB_KEY_PATH = os.path.join(CONFIG_DIR, "thegamesdb.key")
 SS_CFG_PATH = os.path.join(CONFIG_DIR, "screenscraper.cfg")
 
 # Unified art slugs -- must match art_type_slugs[] in main.c.
-ALL_ART_TYPES = ["box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge", "video"]
+ALL_ART_TYPES = ["box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge"]
 ART_TYPE_DISPLAY = {
     "box2d": "2D Box Art", "box3d": "3D Box Art", "screenshot": "Screenshot",
     "titlescreen": "Title Screen", "logo": "Logo", "fanart": "Fan Art", "mix": "Mix",
-    "cartridge": "Cartridge", "video": "Video Snap",
+    "cartridge": "Cartridge",
 }
 
 # Folder short-name -> (TheGamesDB platform name, ScreenScraper system id).
@@ -96,7 +96,6 @@ TGDB_MAP = {
     "fanart": ("fanart", None),
     "mix": (None, None),            # TGDB has nothing mix-like
     "cartridge": (None, None),      # nor cartridge/"support" media
-    "video": (None, None),          # nor video snaps
 }
 # slug -> ordered list of acceptable ScreenScraper media "type" values
 SS_MAP = {
@@ -110,9 +109,6 @@ SS_MAP = {
     # first, then the 3D render if that is all the game has.
     "cartridge": ["support-2D", "support-3D"],
     "mix": ["mixrbv2", "mixrbv1"],
-    # Video snaps. "normalized" is the levelled re-encode, which is the
-    # better source for a still frame; fall back to the raw capture.
-    "video": ["video-normalized", "video"],
 }
 SS_REGION_PREF = ["wor", "us", "ss", "eu", "jp"]  # preferred order for regional media variants
 
@@ -148,10 +144,8 @@ def clean_title(filename):
 
 
 def already_cached(art_dir, base):
-    # Video snaps land as .mp4/.webm; without them here "Only Scrape Missing"
-    # would re-download every clip on every run.
     return any(os.path.exists(os.path.join(art_dir, base + e))
-              for e in (".jpg", ".jpeg", ".png", ".mp4", ".webm", ".avi"))
+              for e in (".jpg", ".jpeg", ".png"))
 
 
 class ScrapeError(Exception):
@@ -649,12 +643,7 @@ def main():
             continue
 
         ext = os.path.splitext(url.split("?", 1)[0])[1].lower()
-        if slug == "video":
-            # Video snaps are clips, not images -- forcing .png here would save
-            # an MP4 under a name nothing can open.
-            if ext not in (".mp4", ".webm", ".avi"):
-                ext = ".mp4"
-        elif ext not in (".jpg", ".jpeg", ".png"):
+        if ext not in (".jpg", ".jpeg", ".png"):
             ext = ".png"
         dest = os.path.join(BOXART_BASE, short, slug, base + ext)
         try:

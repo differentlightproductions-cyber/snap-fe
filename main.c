@@ -3423,21 +3423,17 @@ int settings_visible_rows() {
 
 // --- Art types: a unified set the scraper maps per-source. TheGamesDB has no
 // true 3D box (falls back to the front 2D box) or "mix"; ScreenScraper has all.
-#define ART_TYPE_COUNT 9
-// Cartridge and Video Snap are appended rather than inserted so a saved
-// display_art_idx from an older build still means the same thing. ScreenScraper calls the physical
+#define ART_TYPE_COUNT 8
+// Cartridge is appended rather than inserted so a saved display_art_idx from an
+// older build still means the same thing. ScreenScraper calls the physical
 // media "support"; TheGamesDB has no equivalent, so TGDB users always fall back
 // to the drawn cartridge.
 #define ART_TYPE_CARTRIDGE 7
-// Video snaps are MP4. They are scrapeable and used as the carousel
-// backdrop via an extracted still, but they are not a Display Art
-// choice -- there is nothing to show as a cover.
-#define ART_TYPE_VIDEO 8
-const char *art_type_names[] = { "2D Box Art", "3D Box Art", "Screenshot", "Title Screen", "Logo", "Fan Art", "Mix", "Cartridge", "Video Snap" };
-const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge", "video" };
+const char *art_type_names[] = { "2D Box Art", "3D Box Art", "Screenshot", "Title Screen", "Logo", "Fan Art", "Mix", "Cartridge" };
+const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge" };
 // Older builds used TheGamesDB's folder names. Keep those existing scrapes
 // visible while all new downloads use the unified slugs above.
-const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL, NULL, NULL };
+const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL, NULL };
 int scrape_art_enabled[ART_TYPE_COUNT] = { [0] = 1 }; // 2D Box Art on by default
 int scrape_system_enabled[PLATFORM_COUNT] = { [0 ... PLATFORM_COUNT - 1] = 1 };
 // TheGamesDB has no mix, no cartridge ("support") and no video media, so those
@@ -3447,7 +3443,7 @@ extern int scrape_source;   // defined below with the other scrape settings
 static int art_type_supported(int i) {
     if (i < 0 || i >= ART_TYPE_COUNT) return 0;
     if (scrape_source == 0)
-        return !(i == 6 /*mix*/ || i == ART_TYPE_CARTRIDGE || i == ART_TYPE_VIDEO);
+        return !(i == 6 /*mix*/ || i == ART_TYPE_CARTRIDGE);
     return 1;
 }
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
@@ -3739,10 +3735,7 @@ int build_game_rows(int *row_type, int *row_extra) {
     }
     row_type[idx] = ROW_G_DISPLAY_ART_HEADER; row_extra[idx] = 0; idx++;
     if (display_dropdown_open)
-        for (int i = 0; i < ART_TYPE_COUNT; i++) {
-            if (i == ART_TYPE_VIDEO) continue;   // scrape-only: nothing to show as a cover
-            row_type[idx] = ROW_G_DISPLAY_ART_ITEM; row_extra[idx] = i; idx++;
-        }
+        for (int i = 0; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_G_DISPLAY_ART_ITEM; row_extra[idx] = i; idx++; }
     row_type[idx] = ROW_G_SHOW_DESC; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_G_ROMS; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_G_BG_HEADER; row_extra[idx] = 0; idx++;
@@ -9724,63 +9717,73 @@ static SDL_Rect draw_cartridge_donor(SDL_Renderer *ren, SDL_Rect box, CartDonor 
     return b;
 }
 
-// Backdrop behind the highlighted game in the Games Carousel.
+// Backdrops behind the highlighted game in the Games Carousel: the game's
+// screenshot, then its title screen, then nothing (callers just show the theme
+// background).
 //
-// ScreenScraper's video snaps are MP4 and SDL has no decoder, so a still is
-// pulled out of the clip once with ffmpeg (which Knulli ships) and cached
-// beside it; from then on the still is just another image. Order is video snap,
-// then screenshot, then title screen, then nothing -- callers draw the theme
-// background when this returns NULL.
+// Kept in a small ring rather than a single slot. With one slot, every step
+// through the carousel threw away the neighbour you were about to come back to
+// and decoded it again on the main thread, which is what made scrolling
+// stutter. A handful of entries covers the visible window both ways.
+#define BD_CAP 7
+static struct { char key[832]; SDL_Texture *tex; int gen; } bd_ring[BD_CAP];
+static int      bd_n = 0;
+static unsigned bd_epoch = 0;
+
+static void bd_reset_if_stale(void) {
+    if (bd_epoch != renderer_epoch) { memset(bd_ring, 0, sizeof bd_ring); bd_n = 0; bd_epoch = renderer_epoch; }
+}
+static void game_key_of(int idx, char *out, size_t n) {
+    snprintf(out, n, "%s|%s", games[idx].platform_dir, games[idx].path);
+}
+// Decode and store one game's backdrop. Returns 1 if it did real work, so a
+// caller can budget itself to a single decode per frame. A miss is cached too,
+// otherwise games with no screenshot get retried on every single frame.
+static int backdrop_load(SDL_Renderer *ren, int idx) {
+    if (idx < 0 || idx >= game_count) return 0;
+    bd_reset_if_stale();
+    char key[832]; game_key_of(idx, key, sizeof key);
+    for (int i = 0; i < bd_n; i++)
+        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return 0;
+
+    SDL_Surface *sf = load_cached_art_surface(games[idx].platform_dir, games[idx].raw_filename, 2); // screenshot
+    if (!sf) sf = load_cached_art_surface(games[idx].platform_dir, games[idx].raw_filename, 3);     // title screen
+
+    int slot = (bd_n < BD_CAP) ? bd_n++ : (idx % BD_CAP);
+    if (bd_ring[slot].tex) SDL_DestroyTexture(bd_ring[slot].tex);
+    snprintf(bd_ring[slot].key, sizeof bd_ring[slot].key, "%s", key);
+    bd_ring[slot].tex = sf ? tex_from_surface(ren, sf) : NULL;
+    bd_ring[slot].gen = art_gen;
+    return 1;
+}
 static SDL_Texture *game_backdrop_art(SDL_Renderer *ren, int idx) {
     if (idx < 0 || idx >= game_count) return NULL;
-    static char     bd_key[832] = "";
-    static int      bd_gen = -1;
-    static unsigned bd_epoch = 0;
-    static SDL_Texture *bd_tex = NULL;
-
-    char key[832];
-    snprintf(key, sizeof key, "%s|%s", games[idx].platform_dir, games[idx].path);
-    if (strcmp(bd_key, key) == 0 && bd_gen == art_gen && bd_epoch == renderer_epoch)
-        return bd_tex;
-    if (bd_tex && bd_epoch == renderer_epoch) SDL_DestroyTexture(bd_tex);
-    bd_tex = NULL;
-    snprintf(bd_key, sizeof bd_key, "%s", key);
-    bd_gen = art_gen; bd_epoch = renderer_epoch;
-
-    const char *pdir = games[idx].platform_dir, *raw = games[idx].raw_filename;
-    char still[900], clip[900];
-    snprintf(still, sizeof still, "%s/boxart/%s/video/%s.frame.png", sn_data_root(), pdir, raw);
-
-    FILE *f = fopen(still, "rb");
-    if (f) { fclose(f); bd_tex = load_scaled_texture(ren, still, 1024); if (bd_tex) return bd_tex; }
-
-    // No still yet: if the snap itself is there, extract one in the background
-    // and use a fallback this time round. Only attempted once per game per run.
-    static char tried[8][832]; static int tried_n = 0;
-    int already = 0;
-    for (int i = 0; i < tried_n; i++) if (strcmp(tried[i], key) == 0) { already = 1; break; }
-    if (!already) {
-        const char *vext[] = { ".mp4", ".webm", ".avi" };
-        for (unsigned v = 0; v < sizeof(vext)/sizeof(vext[0]); v++) {
-            snprintf(clip, sizeof clip, "%s/boxart/%s/video/%s%s", sn_data_root(), pdir, raw, vext[v]);
-            FILE *c = fopen(clip, "rb");
-            if (!c) continue;
-            fclose(c);
-            char cmd[2100];
-            snprintf(cmd, sizeof cmd,
-                     "( command -v ffmpeg >/dev/null 2>&1 && ffmpeg -y -ss 1 -i '%s' -frames:v 1 "
-                     "-vf scale=960:-1 '%s' >/dev/null 2>&1 ) &", clip, still);
-            system(cmd);
-            if (tried_n < 8) snprintf(tried[tried_n++], 832, "%s", key);
-            break;
+    bd_reset_if_stale();
+    char key[832]; game_key_of(idx, key, sizeof key);
+    for (int i = 0; i < bd_n; i++)
+        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return bd_ring[i].tex;
+    backdrop_load(ren, idx);
+    for (int i = 0; i < bd_n; i++)
+        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return bd_ring[i].tex;
+    return NULL;
+}
+// Warm the neighbours the carousel is about to reach -- at most one decode per
+// call, so a frame is never held up by it.
+static void backdrop_prefetch(SDL_Renderer *ren, int centre) {
+    for (int d = 1; d <= 3; d++)
+        for (int side = 0; side < 2; side++) {
+            int i = side ? centre + d : centre - d;
+            if (i < 0 || i >= game_count) continue;
+            if (backdrop_load(ren, i)) return;
         }
+}
+// Bulk warm, for use while a loading screen is already on screen so the first
+// scroll through the carousel is not paying for every decode.
+static void backdrop_warm(SDL_Renderer *ren, int centre, int count) {
+    for (int d = 0; d < count && d < game_count; d++) {
+        int i = (centre + d) % game_count;
+        backdrop_load(ren, i);
     }
-
-    // Screenshot, then title screen.
-    SDL_Surface *sf = load_cached_art_surface(pdir, raw, 2);          // screenshot
-    if (!sf) sf = load_cached_art_surface(pdir, raw, 3);              // title screen
-    if (sf) bd_tex = tex_from_surface(ren, sf);
-    return bd_tex;
 }
 
 void ensure_platform_cards_built(SDL_Renderer *ren, int cw, int ch) {
@@ -14792,6 +14795,13 @@ int main(int argc, char *argv[]) {
                         library_search[0] = '\0';   // fresh per-system visit, no stale filter
                         scan_games(ren, font_label, platform_selected);
                         selected = 0;
+                        // The loading screen is already up, so spend it decoding
+                        // the backdrops the carousel is about to want instead of
+                        // paying for them one hitch at a time while scrolling.
+                        if (platform_view_style == 1) {
+                            draw_progress(ren, "Loading games", 0.92f);
+                            backdrop_warm(ren, 0, BD_CAP);
+                        }
                         if (platform_view_style == VIEW_STYLE_BOOKSHELF) {
                             book_prev_sel = 0; book_flip_dir = 0; book_flip_start = 0;
                             book_open_start = anim_start();
@@ -15732,8 +15742,7 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_CONSOLE_VIEW) {
                                 platform_view_style = (platform_view_style + dir + VIEW_STYLE_COUNT) % VIEW_STYLE_COUNT;
                             } else if (rt == ROW_DISP_ART_HEADER || rt == ROW_DISP_ART_ITEM) {
-                                do { display_art_idx = (display_art_idx + dir + ART_TYPE_COUNT) % ART_TYPE_COUNT; }
-                                while (display_art_idx == ART_TYPE_VIDEO);
+                                display_art_idx = (display_art_idx + dir + ART_TYPE_COUNT) % ART_TYPE_COUNT;
                                 free_games(ren);
                                 rescan_active_games(ren, font_label);
                             } else if (rt == ROW_DISP_SHOW_EMPTY) {
@@ -19728,12 +19737,17 @@ int main(int argc, char *argv[]) {
                 // Ease between arrangements the way the Systems Carousel does.
                 // This used to snap: the transition timer was started but never
                 // actually read, so every card jumped straight to its new slot.
-                static int    gcar_last = -1, gcar_prev = -1;
+                static int    gcar_last = -1;
                 static Uint32 gcar_t0 = 0;
+                static float  gcar_from = 0.0f, gcar_centre = 0.0f;
                 if (gsel != gcar_last) {
-                    gcar_prev = (gcar_last < 0) ? gsel : gcar_last;
-                    gcar_last = gsel;
-                    gcar_t0 = anim_start();
+                    // Start the next move from where the fan actually IS, not
+                    // from the previous index. Held-down scrolling used to
+                    // restart each step from a stale integer, so the motion
+                    // stuttered instead of flowing through.
+                    gcar_from  = (gcar_last < 0) ? (float)gsel : gcar_centre;
+                    gcar_last  = gsel;
+                    gcar_t0    = anim_start();
                 }
                 float ct = 1.0f;
                 if (!reduce_motion) {
@@ -19741,7 +19755,12 @@ int main(int argc, char *argv[]) {
                     ct = cel >= (Uint32)CAROUSEL_TRANSITION_MS ? 1.0f : (float)cel / CAROUSEL_TRANSITION_MS;
                     ct = 1.0f - (1.0f - ct) * (1.0f - ct);      // ease-out
                 }
-                float centre_f = (float)gcar_prev + ((float)gsel - (float)gcar_prev) * ct;
+                gcar_centre = gcar_from + ((float)gsel - gcar_from) * ct;
+                float centre_f = gcar_centre;
+
+                // Keep the neighbours decoded, one per frame so this never
+                // costs a visible hitch.
+                backdrop_prefetch(ren, gsel);
 
                 // Collect the window, then draw farthest-first so the selected
                 // cart lands on top -- drawing left-to-right put the left-hand
