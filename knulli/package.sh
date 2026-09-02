@@ -158,3 +158,20 @@ PY
 echo
 echo ">> $OUT  ($(du -h "$OUT" | cut -f1))"
 python3 -c "import zipfile,sys; [print('    ', i.filename) for i in zipfile.ZipFile(sys.argv[1]).infolist()]" "$OUT"
+
+# Create a checksum that remains usable after both files are downloaded into
+# the same directory. Do not embed the local `dist/` prefix in its filename.
+CHECKSUM="dist/SHA256SUMS-${RELEASE}.txt"
+HASH="$(sha256sum "$OUT" | awk '{print $1}')"
+printf '%s  %s\n' "$HASH" "$(basename "$OUT")" > "$CHECKSUM"
+echo ">> $CHECKSUM"
+
+# On Nick's Windows/WSL development machine, always export a clean handoff
+# folder before GitHub is opened. Other Linux build hosts simply keep dist/.
+if command -v powershell.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+  PS_EXPORT="$(wslpath -w "$(pwd)/prepare-release-windows.ps1")"
+  if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS_EXPORT" -Version "$RELEASE"; then
+    echo "WARNING: release built, but Windows Downloads export failed." >&2
+    echo "Run prepare-release-windows.ps1 manually for version $RELEASE." >&2
+  fi
+fi
