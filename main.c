@@ -3423,13 +3423,18 @@ int settings_visible_rows() {
 
 // --- Art types: a unified set the scraper maps per-source. TheGamesDB has no
 // true 3D box (falls back to the front 2D box) or "mix"; ScreenScraper has all.
-#define ART_TYPE_COUNT 7
-const char *art_type_names[] = { "2D Box Art", "3D Box Art", "Screenshot", "Title Screen", "Logo", "Fan Art", "Mix" };
-const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix" };
+#define ART_TYPE_COUNT 8
+// Cartridge is appended rather than inserted so a saved display_art_idx from an
+// older build still means the same thing. ScreenScraper calls the physical
+// media "support"; TheGamesDB has no equivalent, so TGDB users always fall back
+// to the drawn cartridge.
+#define ART_TYPE_CARTRIDGE 7
+const char *art_type_names[] = { "2D Box Art", "3D Box Art", "Screenshot", "Title Screen", "Logo", "Fan Art", "Mix", "Cartridge" };
+const char *art_type_slugs[] = { "box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge" };
 // Older builds used TheGamesDB's folder names. Keep those existing scrapes
 // visible while all new downloads use the unified slugs above.
-const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL };
-int scrape_art_enabled[ART_TYPE_COUNT] = {1, 0, 0, 0, 0, 0, 0}; // 2D Box Art on by default
+const char *art_type_legacy_slugs[] = { "boxart", NULL, NULL, NULL, "clearlogo", NULL, NULL, NULL };
+int scrape_art_enabled[ART_TYPE_COUNT] = { [0] = 1 }; // 2D Box Art on by default
 int scrape_system_enabled[PLATFORM_COUNT] = { [0 ... PLATFORM_COUNT - 1] = 1 };
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
 int art_dropdown_open = 0;
@@ -3607,9 +3612,13 @@ int build_account_rows(int *row_type, int *row_extra) {
         if (art_dropdown_open) {
             row_type[idx] = ROW_SCRAPE_DESC; row_extra[idx] = 0; idx++;
             for (int i = 0; i < 4; i++) { row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++; }
+            row_type[idx] = ROW_ART_ITEM; row_extra[idx] = ART_TYPE_CARTRIDGE; idx++;   // primary, not an extra
             row_type[idx] = ROW_ART_EXTRAS_HEADER; row_extra[idx] = 0; idx++;
             if (scrape_extras_open)
-                for (int i = 4; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++; }
+                for (int i = 4; i < ART_TYPE_COUNT; i++) {
+                    if (i == ART_TYPE_CARTRIDGE) continue;   // already listed above
+                    row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++;
+                }
         }
         row_type[idx] = ROW_ONLY_MISSING; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_SCRAPE_NOW; row_extra[idx] = 0; idx++;
@@ -9418,6 +9427,142 @@ static void draw_platform_placeholder(SDL_Renderer *ren, int p, SDL_Rect r, int 
     SDL_SetRenderDrawBlendMode(ren, pbm);
 }
 
+// --- Drawn cartridges ---------------------------------------------------------
+// Fallback art for a game with no scraped cartridge image. Drawn rather than
+// shipped as files because the label has to carry the game's title, and
+// NanoSVG (what SDL_image uses for .svg) cannot render text -- so a vector file
+// could only ever give a blank cart.
+//
+// Twelve systems get a silhouette that actually reads as their cartridge;
+// everything else uses the generic one. Proportions are deliberately loose --
+// these are recognisable stand-ins, not replicas.
+typedef struct {
+    const char *dir;          // ROM dir, NULL terminates the table
+    float aspect;             // body width / height
+    float shoulder;           // top corner radius, fraction of body width
+    unsigned char notch;      // 1 = cut the top-right corner (Game Boy family)
+    unsigned char ridges;     // 1 = draw grip ridges down the lower body
+    float lx, ly, lw, lh;     // label rect, fractions of the body
+    SDL_Color body, label;
+} CartSpec;
+
+static const CartSpec cart_specs[] = {
+    // dir            aspect shoulder notch ridge   lx    ly    lw    lh   body                     label
+    { "nes",           0.92f, 0.06f, 0, 1, 0.10f,0.10f,0.80f,0.46f, {188,186,178,255}, {236,232,222,255} },
+    { "snes",          0.86f, 0.22f, 0, 1, 0.12f,0.20f,0.76f,0.44f, {176,174,170,255}, {232,230,226,255} },
+    { "n64",           1.05f, 0.14f, 0, 1, 0.12f,0.16f,0.76f,0.44f, { 74, 74, 78,255}, {226,224,218,255} },
+    { "gb",            0.80f, 0.10f, 1, 1, 0.11f,0.14f,0.78f,0.48f, {150,150,148,255}, {228,226,220,255} },
+    { "gbc",           0.80f, 0.10f, 1, 1, 0.11f,0.14f,0.78f,0.48f, { 96,152,196,255}, {232,232,228,255} },
+    { "gba",           1.02f, 0.10f, 1, 1, 0.10f,0.14f,0.80f,0.50f, { 92, 92, 98,255}, {230,228,222,255} },
+    { "genesis",       0.80f, 0.26f, 0, 1, 0.12f,0.24f,0.76f,0.42f, { 60, 60, 64,255}, {224,222,216,255} },
+    { "mastersystem",  0.78f, 0.08f, 0, 0, 0.10f,0.10f,0.80f,0.56f, { 56, 56, 60,255}, {222,220,214,255} },
+    { "gamegear",      0.94f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, { 70, 70, 74,255}, {226,224,218,255} },
+    { "neogeo",        1.18f, 0.08f, 0, 1, 0.09f,0.14f,0.82f,0.50f, { 46, 48, 54,255}, {220,218,212,255} },
+    { "atari2600",     1.00f, 0.10f, 0, 1, 0.12f,0.30f,0.76f,0.40f, { 52, 48, 44,255}, {214,206,190,255} },
+    { "virtualboy",    0.88f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {132, 40, 44,255}, {226,222,216,255} },
+    { NULL,            0.88f, 0.12f, 0, 1, 0.11f,0.16f,0.78f,0.48f, {110,110,116,255}, {228,226,220,255} },
+};
+
+static const CartSpec *cart_spec_for(int p) {
+    const CartSpec *gen = NULL;
+    for (const CartSpec *c = cart_specs; ; c++) {
+        if (!c->dir) { gen = c; break; }
+        if (p >= 0 && p < PLATFORM_COUNT && strcmp(c->dir, platform_dirs[p]) == 0) return c;
+    }
+    return gen;
+}
+
+// Draw a cartridge for platform `p` filling `box`, with `title` on the label.
+static void draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const char *title) {
+    if (box.w < 8 || box.h < 8) return;
+    const CartSpec *c = cart_spec_for(p);
+    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+
+    // Fit the body's aspect inside the box.
+    int bw = box.w, bh = (int)(bw / c->aspect);
+    if (bh > box.h) { bh = box.h; bw = (int)(bh * c->aspect); }
+    SDL_Rect b = { box.x + (box.w - bw) / 2, box.y + (box.h - bh) / 2, bw, bh };
+
+    SDL_BlendMode pbm; SDL_GetRenderDrawBlendMode(ren, &pbm);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+
+    int rad = (int)(bw * c->shoulder);
+    if (c->notch) {
+        // Game Boy family: the top-right corner is cut away. Build the body out
+        // of two rects so the notch is genuinely absent -- painting the corner
+        // with the theme background would show as a wrong-coloured block
+        // wherever a system backdrop or another card sits behind the cart.
+        int n  = (int)(b.w * 0.24f);
+        int nh = (int)(b.h * 0.16f);
+        if (nh < rad + 2) nh = rad + 2;
+        fill_rounded(ren, (SDL_Rect){ b.x, b.y, b.w - n, nh + rad }, rad,
+                     c->body.r, c->body.g, c->body.b, 255);
+        fill_rounded(ren, (SDL_Rect){ b.x, b.y + nh, b.w, b.h - nh }, rad,
+                     c->body.r, c->body.g, c->body.b, 255);
+    } else {
+        fill_rounded(ren, b, rad, c->body.r, c->body.g, c->body.b, 255);
+    }
+
+    // A darker base so the body does not read as one flat slab.
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 46);
+    SDL_RenderFillRect(ren, &(SDL_Rect){ b.x, b.y + (int)(b.h * 0.80f), b.w, (int)(b.h * 0.20f) });
+
+    if (c->ridges) {
+        int ry = b.y + (int)(b.h * 0.84f), rh = (int)(b.h * 0.10f);
+        if (rh < 2) rh = 2;
+        int step = bw / 9 > 3 ? bw / 9 : 3;
+        for (int x = b.x + step; x < b.x + b.w - step; x += step) {
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 70);
+            SDL_RenderFillRect(ren, &(SDL_Rect){ x, ry, step / 3 > 1 ? step / 3 : 1, rh });
+        }
+    }
+
+    // Label + title.
+    SDL_Rect lab = { b.x + (int)(b.w * c->lx), b.y + (int)(b.h * c->ly),
+                     (int)(b.w * c->lw), (int)(b.h * c->lh) };
+    fill_rounded(ren, lab, rad / 2, c->label.r, c->label.g, c->label.b, 255);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 60);
+    SDL_RenderDrawRect(ren, &lab);
+    // A thin accent band across the top of the label, themed so the cart still
+    // belongs to the current look.
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 210);
+    SDL_RenderFillRect(ren, &(SDL_Rect){ lab.x, lab.y, lab.w, lab.h > 24 ? 3 : 2 });
+
+    if (title && title[0] && lab.w > 26 && lab.h > 16 && font_label) {
+        SDL_Color ink = { 32, 30, 28, 255 };
+        int pad = 5, avail = lab.w - pad * 2;
+        int lh = TTF_FontHeight(font_label);
+        int maxlines = (lab.h - 8) / (lh + 1);
+        if (maxlines < 1) maxlines = 1;
+        if (maxlines > 3) maxlines = 3;
+        // Greedy wrap into the label, ellipsising only the final line.
+        char lines[3][96]; int nl = 0; char cur[96] = "";
+        const char *w = title;
+        while (*w && nl < maxlines) {
+            const char *e = w; while (*e && *e != ' ') e++;
+            char word[64]; int wl = (int)(e - w); if (wl > 63) wl = 63;
+            memcpy(word, w, wl); word[wl] = 0;
+            char test[96]; snprintf(test, sizeof test, "%s%s%s", cur, cur[0] ? " " : "", word);
+            int mw = 0, mh = 0; TTF_SizeUTF8(font_label, test, &mw, &mh);
+            if (mw > avail && cur[0]) { snprintf(lines[nl++], 96, "%s", cur); snprintf(cur, sizeof cur, "%s", word); }
+            else snprintf(cur, sizeof cur, "%s", test);
+            w = *e ? e + 1 : e;
+        }
+        if (cur[0] && nl < maxlines) snprintf(lines[nl++], 96, "%s", cur);
+        int ty = lab.y + (lab.h - nl * (lh + 1)) / 2 + 2;
+        if (ty < lab.y + 5) ty = lab.y + 5;
+        for (int i = 0; i < nl; i++) {
+            SDL_Texture *t = render_text_fit(ren, font_label, lines[i], ink, avail);
+            if (!t) continue;
+            int tw, thh; SDL_QueryTexture(t, NULL, NULL, &tw, &thh);
+            SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ lab.x + lab.w / 2 - tw / 2, ty, tw, thh });
+            ty += lh + 1;
+        }
+    }
+
+    SDL_SetRenderDrawBlendMode(ren, pbm);
+}
+
 void ensure_platform_cards_built(SDL_Renderer *ren, int cw, int ch) {
     static unsigned card_gen = 0;
     if (platform_card_cache_theme == theme_idx && platform_card_cache_w == cw && platform_card_cache_h == ch
@@ -14862,7 +15007,10 @@ int main(int argc, char *argv[]) {
                     if (game_count > 0) {
                         if (e.key.keysym.sym == SDLK_RIGHT) selected = (selected + 1) % game_count;
                         if (e.key.keysym.sym == SDLK_LEFT) selected = (selected - 1 + game_count) % game_count;
-                        int nav_cols = active_game_cols();
+                        // The List layout is a single column, so a grid row step would
+                        // skip a whole screenful per press.
+                        int nav_cols = (platform_view_style == 3 || platform_view_style == 1)
+                                       ? 1 : active_game_cols();
                         if (e.key.keysym.sym == SDLK_DOWN) {
                             int target = selected + nav_cols;
                             selected = (target < game_count) ? target : game_count - 1;
@@ -14881,7 +15029,7 @@ int main(int argc, char *argv[]) {
                                 last_rendered_page_start = -1;
                             }
                         }
-                        if (e.key.keysym.sym == SDLK_s && in_all_games_view) {
+                        if (e.key.keysym.sym == SDLK_s) {
                             library_sort_idx = (library_sort_idx + 1) % LIBRARY_SORT_COUNT;
                             sort_games(library_sort_idx);
                             selected = 0;
@@ -16907,6 +17055,103 @@ int main(int argc, char *argv[]) {
                     SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, ow, oh });
                 }
                 SDL_RenderSetScale(ren, sx, sy);
+            } else if (platform_view_style == 1) {
+                // Games Carousel -- the library shaped like the Systems Carousel
+                // you arrived from, with each game shown as its cartridge:
+                // the scraped "Cartridge" art if the user has it, otherwise one
+                // drawn for that system with the title on the label.
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+
+                // Small ring cache so the visible cards are not re-decoded per
+                // frame. Keyed on the ROM path plus art_gen, for the same reason
+                // the List panel is: row indices are reused across rescans.
+                #define GCART_CAP 10
+                static struct { char key[832]; SDL_Texture *tex; int gen; } gcart[GCART_CAP];
+                static unsigned gcart_epoch = 0;
+                static int gcart_n = 0;
+                if (gcart_epoch != renderer_epoch) {   // renderer went away with RetroArch
+                    memset(gcart, 0, sizeof gcart); gcart_n = 0; gcart_epoch = renderer_epoch;
+                }
+
+                int cw = 150, chh = 200;
+                int cy = WIN_H / 2 - chh / 2 + 6;
+                int half = 2;                      // cards either side of centre
+
+                Uint32 cel = SDL_GetTicks() - selection_transition_start_1x1;
+                float ct = cel >= (Uint32)CAROUSEL_TRANSITION_MS ? 1.0f : (float)cel / CAROUSEL_TRANSITION_MS;
+                ct = 1.0f - (1.0f - ct) * (1.0f - ct);
+                if (selected != last_rendered_selected_1x1) {
+                    selection_transition_start_1x1 = anim_start();
+                    last_rendered_selected_1x1 = selected;
+                }
+
+                for (int off = half; off >= -half; off--) {
+                    int gi2 = selected + off;
+                    if (gi2 < 0 || gi2 >= game_count) continue;
+                    int centre = (off == 0);
+                    float d = (float)(off < 0 ? -off : off);
+                    float scale = centre ? 1.0f : (1.0f - 0.16f * d);
+                    int w2 = (int)(cw * scale), h2 = (int)(chh * scale);
+                    int x2 = WIN_W / 2 - w2 / 2 + (int)(off * (cw * 0.78f));
+                    int y2 = cy + (int)((chh - h2) * 0.55f);
+                    SDL_Rect cr = { x2, y2, w2, h2 };
+
+                    // Resolve this game's cartridge art once and keep it.
+                    char key[832];
+                    snprintf(key, sizeof key, "%s|%s", games[gi2].platform_dir, games[gi2].path);
+                    SDL_Texture *ct2 = NULL;
+                    int found = 0;
+                    for (int k = 0; k < gcart_n; k++)
+                        if (gcart[k].gen == art_gen && strcmp(gcart[k].key, key) == 0) { ct2 = gcart[k].tex; found = 1; break; }
+                    if (!found) {
+                        ct2 = tex_from_surface(ren, load_cached_art_surface(
+                                  games[gi2].platform_dir, games[gi2].raw_filename, ART_TYPE_CARTRIDGE));
+                        int slot = gcart_n < GCART_CAP ? gcart_n++ : (gi2 % GCART_CAP);
+                        if (gcart_n > GCART_CAP) gcart_n = GCART_CAP;
+                        if (slot < GCART_CAP) {
+                            if (gcart[slot].tex) SDL_DestroyTexture(gcart[slot].tex);
+                            snprintf(gcart[slot].key, sizeof gcart[slot].key, "%s", key);
+                            gcart[slot].tex = ct2; gcart[slot].gen = art_gen;
+                        }
+                    }
+
+                    if (ct2) {
+                        SDL_Rect fit = fit_rect_for_texture(ct2, cr);
+                        if (!centre) SDL_SetTextureAlphaMod(ct2, 150);
+                        SDL_RenderCopy(ren, ct2, NULL, &fit);
+                        SDL_SetTextureAlphaMod(ct2, 255);
+                    } else {
+                        // Nothing scraped -- draw the system's cartridge instead.
+                        int pidx = platform_index_for_dir(games[gi2].platform_dir);
+                        draw_cartridge(ren, cr, pidx, centre ? games[gi2].title : "");
+                        if (!centre) {
+                            SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 105);
+                            SDL_RenderFillRect(ren, &cr);
+                        }
+                    }
+                    if (centre) {
+                        for (int b = 0; b < 2; b++) {
+                            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+                            SDL_RenderDrawRect(ren, &(SDL_Rect){ cr.x - 5 - b, cr.y - 5 - b, cr.w + 10 + b*2, cr.h + 10 + b*2 });
+                        }
+                    }
+                }
+                (void)ct;
+
+                // Title + position under the fan.
+                {
+                    int gi3 = (selected >= 0 && selected < game_count) ? selected : 0;
+                    SDL_Texture *tt2 = render_text_fit(ren, font_small, games[gi3].title, g_ui_text, WIN_W - 60);
+                    int tw5, th5; SDL_QueryTexture(tt2, NULL, NULL, &tw5, &th5);
+                    int ty2 = cy + chh + 16;
+                    SDL_RenderCopy(ren, tt2, NULL, &(SDL_Rect){ WIN_W/2 - tw5/2, ty2, tw5, th5 });
+                    char pos[32]; snprintf(pos, sizeof pos, "%d / %d", gi3 + 1, game_count);
+                    SDL_Texture *pt2 = render_text(ren, font_label, pos, g_ui_dim);
+                    int pw2, ph2; SDL_QueryTexture(pt2, NULL, NULL, &pw2, &ph2);
+                    SDL_RenderCopy(ren, pt2, NULL, &(SDL_Rect){ WIN_W/2 - pw2/2, ty2 + th5 + 5, pw2, ph2 });
+                }
+                #undef GCART_CAP
+
             } else if (platform_view_style == 3) {
                 // List view: its own dedicated backdrop, never the per-system ones.
                 ensure_listview_bg(ren);
@@ -19254,8 +19499,8 @@ int main(int argc, char *argv[]) {
             draw_dock_logo(ren, font_small);
             int menu_cols = active_game_cols();
             int menu_rows = active_game_rows();
+            char sortline[110];
             {
-                char sortline[110];
                 if (in_favorites_view && library_search[0])
                     snprintf(sortline, sizeof(sortline), "FAVORITES  \xC2\xB7  \"%s\"  \xC2\xB7  %s", library_search, library_sort_names[library_sort_idx % LIBRARY_SORT_COUNT]);
                 else if (in_favorites_view)
@@ -19265,13 +19510,17 @@ int main(int argc, char *argv[]) {
                 else if (in_all_games_view)
                     snprintf(sortline, sizeof(sortline), "Sort: %s  (X)   \xC2\xB7   Select: Options", library_sort_names[library_sort_idx % LIBRARY_SORT_COUNT]);
                 else if (library_search[0])
-                    snprintf(sortline, sizeof(sortline), "\"%s\"   (Select: Options)", library_search);
+                    snprintf(sortline, sizeof(sortline), "\"%s\"  \xC2\xB7  Sort: %s (X)  \xC2\xB7  Select: Options",
+                             library_search, library_sort_names[library_sort_idx % LIBRARY_SORT_COUNT]);
                 else
-                    snprintf(sortline, sizeof(sortline), "Select: Options");
-                SDL_Texture *so = render_text_fit(ren, font_label, sortline, th->accent2, WIN_W - 32);
-                int sow, soh;
-                SDL_QueryTexture(so, NULL, NULL, &sow, &soh);
-                SDL_RenderCopy(ren, so, NULL, &(SDL_Rect){ WIN_W - sow - 16, 52, sow, soh });
+                    snprintf(sortline, sizeof(sortline), "Sort: %s  (X)   \xC2\xB7   Select: Options",
+                             library_sort_names[library_sort_idx % LIBRARY_SORT_COUNT]);
+                if (platform_view_style != 3) {   // List draws this above its own list
+                    SDL_Texture *so = render_text_fit(ren, font_label, sortline, th->accent2, WIN_W - 32);
+                    int sow, soh;
+                    SDL_QueryTexture(so, NULL, NULL, &sow, &soh);
+                    SDL_RenderCopy(ren, so, NULL, &(SDL_Rect){ WIN_W - sow - 16, 52, sow, soh });
+                }
             }
             if (game_count == 0) {
                 char msg[256];
@@ -19306,7 +19555,15 @@ int main(int argc, char *argv[]) {
                 // ---- left: the game list ----
                 int row_h = 44, list_x = 26;
                 int list_w = split - list_x - 28;
-                int list_top = 74, list_bot = WIN_H - 34;
+                // Sort / options live above the list rather than floating over
+                // the art panel; they cost one row of list height.
+                int hdr_y = 60;
+                SDL_Texture *hdr = render_text_fit(ren, font_label, sortline, th->accent2, list_w);
+                int hdw, hdh; SDL_QueryTexture(hdr, NULL, NULL, &hdw, &hdh);
+                SDL_RenderCopy(ren, hdr, NULL, &(SDL_Rect){ list_x, hdr_y, hdw, hdh });
+                SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 90);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ list_x, hdr_y + hdh + 5, list_w, 1 });
+                int list_top = hdr_y + hdh + 13, list_bot = WIN_H - 34;
                 int view_h = list_bot - list_top;
                 int content_h = row_h * game_count;
                 int sel_y = selected * row_h;
@@ -19355,11 +19612,18 @@ int main(int argc, char *argv[]) {
 
                 // Art + description are rebuilt only when the selection, the
                 // chosen art type or the renderer changes -- not every frame.
-                static int      d_sel = -1, d_type = -99;
+                static int      d_type = -99, d_gen = -1;
                 static unsigned d_epoch = 0;
                 static SDL_Texture *d_tex = NULL;
                 static char d_desc[900] = "";
-                if (d_sel != gi || d_type != gm_art_type || d_epoch != renderer_epoch) {
+                static char d_key[832] = "";
+                // Identity, not row number: games[] is re-sorted and refilled per
+                // system, so index N is a different ROM after a rescan -- that is
+                // how art and text leaked between games and across systems.
+                char key_now[832];
+                snprintf(key_now, sizeof key_now, "%s|%s", games[gi].platform_dir, games[gi].path);
+                if (strcmp(d_key, key_now) != 0 || d_type != gm_art_type ||
+                    d_epoch != renderer_epoch || d_gen != art_gen) {
                     if (d_tex && d_epoch == renderer_epoch) SDL_DestroyTexture(d_tex);
                     d_tex = NULL;
                     if (gm_art_type < 0) {
@@ -19371,7 +19635,8 @@ int main(int argc, char *argv[]) {
                             load_cached_art_surface(games[gi].platform_dir, games[gi].raw_filename, gm_art_type));
                     }
                     load_cached_description(games[gi].platform_dir, games[gi].raw_filename, d_desc, sizeof d_desc);
-                    d_sel = gi; d_type = gm_art_type; d_epoch = renderer_epoch;
+                    snprintf(d_key, sizeof d_key, "%s", key_now);
+                    d_type = gm_art_type; d_epoch = renderer_epoch; d_gen = art_gen;
                     gm_desc_scroll = 0;
                 }
                 SDL_Texture *art = d_tex ? d_tex : game_art(ren, gi);

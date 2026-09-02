@@ -48,10 +48,11 @@ TGDB_KEY_PATH = os.path.join(CONFIG_DIR, "thegamesdb.key")
 SS_CFG_PATH = os.path.join(CONFIG_DIR, "screenscraper.cfg")
 
 # Unified art slugs -- must match art_type_slugs[] in main.c.
-ALL_ART_TYPES = ["box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix"]
+ALL_ART_TYPES = ["box2d", "box3d", "screenshot", "titlescreen", "logo", "fanart", "mix", "cartridge"]
 ART_TYPE_DISPLAY = {
     "box2d": "2D Box Art", "box3d": "3D Box Art", "screenshot": "Screenshot",
     "titlescreen": "Title Screen", "logo": "Logo", "fanart": "Fan Art", "mix": "Mix",
+    "cartridge": "Cartridge",
 }
 
 # Folder short-name -> (TheGamesDB platform name, ScreenScraper system id).
@@ -103,6 +104,9 @@ SS_MAP = {
     "titlescreen": ["sstitle"],
     "logo": ["wheel", "wheel-hd", "screenmarquee"],
     "fanart": ["fanart"],
+    # ScreenScraper calls the physical media "support": a flat label scan
+    # first, then the 3D render if that is all the game has.
+    "cartridge": ["support-2D", "support-3D"],
     "mix": ["mixrbv2", "mixrbv1"],
 }
 SS_REGION_PREF = ["wor", "us", "ss", "eu", "jp"]  # preferred order for regional media variants
