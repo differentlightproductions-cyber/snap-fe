@@ -259,6 +259,13 @@ int g_plat[PLATFORM_COUNT];
 int g_nplat = PLATFORM_COUNT;
 int g_sel_ord = 0;            // ordinal of platform_selected within g_plat[0..g_nplat)
 int g_prev_ord = 0;          // ordinal of carousel_prev_selected (for the fan transition)
+// Bumped only when the *visible* set changes. The per-system asset loaders key
+// their caches on it so they can skip hidden systems and still reload when
+// "Show Systems Without Games" is toggled. With 53 systems in the table and
+// typically a handful installed, walking every one cost real boot time and GPU
+// memory for cards that were never drawn.
+unsigned g_plat_gen = 1;
+int g_plat_ready = 0;   // has rebuild_visible_platforms_ex2 populated g_plat[] yet?
 int plat_list_scroll = 0;    // List view: px the fixed-row-height list is scrolled down
 
 // Per-platform background art cache -- one slot per system, loaded once and
@@ -8503,6 +8510,29 @@ void rebuild_visible_platforms_ex2(int force_counts, SDL_Renderer *ren) {
     else         { g_sel_ord = ord; }
     g_prev_ord = g_sel_ord;
     carousel_prev_selected = platform_selected;
+
+    // Only a genuine change to the visible set invalidates the asset caches --
+    // this runs on ordinary navigation too, and bumping unconditionally would
+    // rebuild every card each time.
+    g_plat_ready = 1;
+    static int prev_n = -1;
+    static int prev_set[PLATFORM_COUNT];
+    int changed = (prev_n != g_nplat);
+    if (!changed) for (int i = 0; i < g_nplat; i++) if (prev_set[i] != g_plat[i]) { changed = 1; break; }
+    if (changed) {
+        prev_n = g_nplat;
+        for (int i = 0; i < g_nplat; i++) prev_set[i] = g_plat[i];
+        g_plat_gen++;
+    }
+}
+// g_plat[] is only ever filled in by rebuild_visible_platforms_ex2, and it is a
+// zero-initialised global. Until that has run at least once, a membership test
+// would wrongly report only system 0 as visible, so treat "not computed yet" as
+// everything visible rather than silently skipping every other system's assets.
+static int platform_is_visible(int p) {
+    if (!g_plat_ready) return 1;
+    for (int i = 0; i < g_nplat; i++) if (g_plat[i] == p) return 1;
+    return 0;
 }
 void rebuild_visible_platforms_ex(int force_counts) { rebuild_visible_platforms_ex2(force_counts, NULL); }
 
@@ -9132,8 +9162,10 @@ static SDL_Texture *try_load_img_dir(SDL_Renderer *ren, const char *dirpath, int
     return t;
 }
 void ensure_bookshelf_assets(SDL_Renderer *ren) {
-    if (bookshelf_assets_tried) return;
+    static unsigned shelf_gen = 0;
+    if (bookshelf_assets_tried && shelf_gen == g_plat_gen) return;
     bookshelf_assets_tried = 1;
+    shelf_gen = g_plat_gen;
     const char *root = sn_data_root();
     char stem[600];
 
@@ -9144,8 +9176,11 @@ void ensure_bookshelf_assets(SDL_Renderer *ren) {
         bookshelf_bg = try_load_img(ren, stem, 1280);
     }
 
+    int done = 0;
     for (int p = 0; p < PLATFORM_COUNT; p++) {
-        load_prog((float)p / PLATFORM_COUNT);
+        if (book_spine_icon[p]) { SDL_DestroyTexture(book_spine_icon[p]); book_spine_icon[p] = NULL; }
+        if (!platform_is_visible(p)) continue;
+        load_prog((float)(++done) / (g_nplat > 0 ? g_nplat : 1));
         snprintf(stem, sizeof stem, "%s/assets/icons/bookshelf/%s", root, platform_dirs[p]);
         book_spine_icon[p] = try_load_img_dir(ren, stem, 520);
         if (!book_spine_icon[p]) {       // fallback: old fixed-name location
@@ -9211,14 +9246,18 @@ void list_preview_build(SDL_Renderer *ren, int platform) {
 // given style in one pass and remembers which style that was, so it's a
 // cheap no-op every frame until the view style actually changes.
 void ensure_platform_icons_loaded(SDL_Renderer *ren, int style) {
-    if (platform_icon_cache_style == style) return;
+    static unsigned loaded_gen = 0;
+    if (platform_icon_cache_style == style && loaded_gen == g_plat_gen) return;
+    loaded_gen = g_plat_gen;
 
     char home[256];
     snprintf(home, sizeof(home), "%s", sn_data_root());
 
+    int done = 0;
     for (int p = 0; p < PLATFORM_COUNT; p++) {
-        load_prog((float)p / PLATFORM_COUNT);
         if (platform_icon_cache[p]) { SDL_DestroyTexture(platform_icon_cache[p]); platform_icon_cache[p] = NULL; }
+        if (!platform_is_visible(p)) continue;   // hidden -> never drawn, don't pay for it
+        load_prog((float)(++done) / (g_nplat > 0 ? g_nplat : 1));
 
         char dirpath[700];
         snprintf(dirpath, sizeof(dirpath), "%s/assets/icons/%s/%s", home, icon_style_slugs[style], platform_dirs[p]);
@@ -9342,13 +9381,17 @@ static void draw_platform_placeholder(SDL_Renderer *ren, int p, SDL_Rect r, int 
 }
 
 void ensure_platform_cards_built(SDL_Renderer *ren, int cw, int ch) {
+    static unsigned card_gen = 0;
     if (platform_card_cache_theme == theme_idx && platform_card_cache_w == cw && platform_card_cache_h == ch
-        && platform_card_cache[0]) return;
+        && card_gen == g_plat_gen && platform_card_cache[platform_selected]) return;
+    card_gen = g_plat_gen;
 
     ensure_platform_icons_loaded(ren, ICON_STYLE_CAROUSEL);
+    int done = 0;
     for (int p = 0; p < PLATFORM_COUNT; p++) {
-        load_prog((float)p / PLATFORM_COUNT);
         if (platform_card_cache[p]) { SDL_DestroyTexture(platform_card_cache[p]); platform_card_cache[p] = NULL; }
+        if (!platform_is_visible(p)) continue;   // a card that is never drawn is ~200KB of VRAM wasted
+        load_prog((float)(++done) / (g_nplat > 0 ? g_nplat : 1));
 
         SDL_Texture *card = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, cw, ch);
         if (!card) continue;
