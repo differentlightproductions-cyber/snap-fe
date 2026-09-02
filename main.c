@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.4"
+#define SNAPFE_VERSION "Alpha Build 1.2.5"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.

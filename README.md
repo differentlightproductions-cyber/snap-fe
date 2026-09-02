@@ -5,8 +5,29 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.4.** It launches RetroArch / libretro games right
-now — not every emulator or system Knulli supports. Expect alpha rough edges.
+**Current release: Alpha 1.2.5.** Not every emulator or system Knulli supports
+is wired up yet. Expect alpha rough edges.
+
+### 1.2.5 highlights
+
+- **53 systems, up from 14** — handhelds, 8/16-bit consoles, CD systems, home
+  computers, MAME, ScummVM, DOS and standalone game ports. Systems better served
+  by a standalone emulator (PSP, Dreamcast, Saturn, MAME, ScummVM, DOS) let
+  Knulli's `emulatorlauncher` pick it.
+- Ten libretro core filenames never matched what Knulli ships, including the
+  defaults for SNES, N64, Atari 2600, Genesis, Master System, Game Gear and PC
+  Engine — which also made the per-system Core override do nothing on them.
+- **Games List** and **Games Carousel**: opening a system now mirrors the
+  Systems View you picked it from, the carousel showing games as cartridges.
+- **Cartridge art** is scrapeable (ScreenScraper `support-2D`/`3D`). Games
+  without it get one drawn — borrowing the outline of a real one where the
+  system has any, and a disc for CD systems.
+- Delete Game opened the search keyboard instead of confirming; X did not sort
+  inside a single system's library; `gamelist.xml` names and hidden entries were
+  ignored. All fixed.
+- Brightness can reach **Off** again, and Display Art says when the active view
+  supplies its own art.
+- "Console View" is now "Systems View".
 
 ### 1.2.4 App icon packs and boot quote cleanup
 
@@ -130,54 +151,6 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
   shutdown has a matching short animation. WallHaven provides optional SFW
   wallpaper search and downloads with an API key stored only on the device.
 
-### 1.1.8 highlights
-
-- App Focused Home is now a strict, paged 4x2 layout. Press Y to enter its
-  jiggle mode, Y again to pick up an app, and A to confirm its placement while
-  staying in edit mode for another move. Movement between pages is supported.
-- The Game settings tab now contains Games Folder, Display Art, and Show
-  Descriptions. Display Art refreshes the library only after Save and only when
-  the saved art type actually changed.
-- Battery and Night controls are separate collapsible groups, and all remaining
-  test-build PC-key prompts have been replaced with handheld ABXY/D-pad labels.
-- CPU Performance Mode has a visible `PERF` status badge, Top Bar underlines
-  adapt to the selected backdrop color, and a Dark Purple theme is included.
-- Link Play protects its controls footer and shows the seven or eight games that
-  fit the current font size while keeping the full list scrollable.
-- Block Roll now contains ten solvable stages. The Mini Games browser shows five
-  legible games at a time and scrolls to the rest.
-- The 1.1.7 in-game lid sleep/wake and post-game renderer-cache hotfixes remain
-  included in this release.
-
-### 1.1.7 hotfix
-
-- Closing the RG34XX-SP lid during a RetroArch game now pauses the emulator,
-  enters Snap FE deep rest, and resumes the same session when the lid opens.
-- The lid watcher now follows the real AXP hall-sensor input device rather than
-  the game-controller event node, so it remains active while Snap FE gives the
-  display to RetroArch.
-- Returning from a game now rebuilds cover-art, shadow, Home-widget, and app-grid
-  GPU caches instead of occasionally showing corrupted or overlapping artwork.
-
-### 1.1.6 highlights
-
-- Favorites is now its own Home button and has an independent game-layout
-  setting; Surprise Me navigation, rapid-input handling, and art layout were
-  repaired.
-- App Focused Home is a compact phone-style grid with bundled placeholder art
-  and hold-X reordering.
-- Link Play is organized by console and supports GB/GBC plus supported GBA
-  cable/Wireless Adapter modes using packaged Gambatte and gpSP cores.
-- Brightness persists into RetroArch games, scraping can be stopped, free
-  system backgrounds can be browsed over Wi-Fi, and RetroAchievements has an
-  achievements-book view.
-- Night mode, power-save theme restoration, low-battery colors/icon, art
-  shadows, Favorites card clipping, Radio layout, and build labeling were
-  corrected.
-- The release ZIP now extracts directly to the SHARE root, validates runtime
-  compatibility before taking over, records useful install logs, and uses a
-  glibc 2.34-compatible ARM64 binary for pinned Knulli releases.
-
 ## What it is / what it isn't
 
 - **A standalone program** (`snapos_ui`), written in C with SDL2. It is **not a
@@ -211,7 +184,7 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.2.4.zip`—not GitHub's
+Download the release asset named `SnapFE-Alpha-1.2.5.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
