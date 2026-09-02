@@ -17475,8 +17475,13 @@ int main(int argc, char *argv[]) {
                 Uint32 hint_age = SDL_GetTicks() - platform_enter_time;
                 if (hint_age < 10000) {
                     float ha = hint_age > 8800 ? (10000 - hint_age) / 1200.0f : 1.0f;
-                    SDL_Texture *hl = render_text(ren, font_label,
-                        "D-pad Browse   A Games   Select System Settings   X View   Y Options", g_ui_dim);
+                    // Must be width-limited: this string is wider than the
+                    // panel at the default font, and right-aligning an
+                    // over-wide texture pushes x negative so it clipped off
+                    // both edges instead of ellipsising.
+                    SDL_Texture *hl = render_text_fit(ren, font_label,
+                        "D-pad Browse   A Games   Select System Settings   X View   Y Options",
+                        g_ui_dim, WIN_W - 36);
                     int hw3, hh3; SDL_QueryTexture(hl, NULL, NULL, &hw3, &hh3);
                     SDL_SetTextureAlphaMod(hl, (Uint8)(210 * ha));
                     SDL_RenderCopy(ren, hl, NULL, &(SDL_Rect){ WIN_W - hw3 - 18, WIN_H - hh3 - 14, hw3, hh3 });
@@ -21381,7 +21386,85 @@ int main(int argc, char *argv[]) {
                 0, 3, 7, 9, 1, 3, 2, 3, 2, 0, 4, 4, 3, 3, 3, 3, 9, 1, 3, 3, 4,
                 3, 0, 5, 3, 9, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0
             };
-            const int PROMO_STEPS = (int)(sizeof(pnames)/sizeof(pnames[0]));
+
+            // --- extended tour -------------------------------------------
+            // The hand-built stops above cover the feature set once each. These
+            // sweep the same screens across themes, fonts, view styles and art
+            // types so the gallery shows the range instead of one look repeated.
+            typedef struct {
+                const char *name;
+                signed char kind;   // 0 Home 1 Systems 2 Library 3 Book 4 Settings 5 Radio 6 Mini
+                signed char theme, font, view, art, cols, rows, extra;
+            } PromoExtra;
+            static const PromoExtra pextra[] = {
+    { "systems-carousel-t02-modern", 1, 2, 0, 1, -1, -1, -1, -1 },
+    { "systems-carousel-t05-condensed", 1, 5, 2, 1, -1, -1, -1, -1 },
+    { "systems-carousel-t08-serif", 1, 8, 4, 1, -1, -1, -1, -1 },
+    { "systems-carousel-t11-terminal", 1, 11, 6, 1, -1, -1, -1, -1 },
+    { "systems-carousel-t14-modern", 1, 14, 0, 1, -1, -1, -1, -1 },
+    { "systems-carousel-t01-condensed", 1, 1, 2, 1, -1, -1, -1, -1 },
+    { "systems-grid-t04-serif", 1, 4, 4, 2, -1, -1, -1, -1 },
+    { "systems-grid-t07-terminal", 1, 7, 6, 2, -1, -1, -1, -1 },
+    { "systems-grid-t10-modern", 1, 10, 0, 2, -1, -1, -1, -1 },
+    { "systems-grid-t13-condensed", 1, 13, 2, 2, -1, -1, -1, -1 },
+    { "systems-grid-t00-serif", 1, 0, 4, 2, -1, -1, -1, -1 },
+    { "systems-grid-t03-terminal", 1, 3, 6, 2, -1, -1, -1, -1 },
+    { "systems-list-t06-modern", 1, 6, 0, 3, -1, -1, -1, -1 },
+    { "systems-list-t09-condensed", 1, 9, 2, 3, -1, -1, -1, -1 },
+    { "systems-list-t12-serif", 1, 12, 4, 3, -1, -1, -1, -1 },
+    { "systems-list-t15-terminal", 1, 15, 6, 3, -1, -1, -1, -1 },
+    { "systems-list-t02-modern", 1, 2, 0, 3, -1, -1, -1, -1 },
+    { "systems-list-t05-condensed", 1, 5, 2, 3, -1, -1, -1, -1 },
+    { "systems-single-t08-serif", 1, 8, 4, 0, -1, -1, -1, -1 },
+    { "systems-single-t11-terminal", 1, 11, 6, 0, -1, -1, -1, -1 },
+    { "systems-single-t14-modern", 1, 14, 0, 0, -1, -1, -1, -1 },
+    { "systems-single-t01-condensed", 1, 1, 2, 0, -1, -1, -1, -1 },
+    { "systems-single-t04-serif", 1, 4, 4, 0, -1, -1, -1, -1 },
+    { "systems-single-t07-terminal", 1, 7, 6, 0, -1, -1, -1, -1 },
+    { "systems-bookshelf-t10-modern", 1, 10, 0, 4, -1, -1, -1, -1 },
+    { "systems-bookshelf-t13-condensed", 1, 13, 2, 4, -1, -1, -1, -1 },
+    { "systems-bookshelf-t00-serif", 1, 0, 4, 4, -1, -1, -1, -1 },
+    { "systems-bookshelf-t03-terminal", 1, 3, 6, 4, -1, -1, -1, -1 },
+    { "systems-bookshelf-t06-modern", 1, 6, 0, 4, -1, -1, -1, -1 },
+    { "systems-bookshelf-t09-condensed", 1, 9, 2, 4, -1, -1, -1, -1 },
+    { "library-box2d-grid", 2, 1, 3, 2, 0, 1, 1, -1 },
+    { "library-box3d-grid", 2, 3, 4, 2, 1, 3, 2, -1 },
+    { "library-screenshot-grid", 2, 5, 5, 2, 2, 4, 2, -1 },
+    { "library-titlescreen-carousel", 2, 7, 6, 1, 3, -1, -1, -1 },
+    { "library-logo-list", 2, 9, 7, 3, 4, -1, -1, -1 },
+    { "library-fanart-single", 2, 11, 0, 0, 5, 1, 1, -1 },
+    { "library-mix-grid", 2, 13, 1, 2, 6, 1, 1, -1 },
+    { "library-cartridge-grid", 2, 15, 2, 2, 7, 3, 2, -1 },
+    { "library-layout-grid-0", 2, 5, 0, 2, 0, 1, 1, -1 },
+    { "library-layout-grid-1", 2, 9, 3, 2, 0, 3, 2, -1 },
+    { "library-layout-grid-2", 2, 13, 6, 2, 0, 4, 2, -1 },
+    { "library-layout-carousel-3", 2, 1, 1, 1, 0, -1, -1, -1 },
+    { "home-t00-bold", 0, 0, 1, -1, -1, -1, -1, 0 },
+    { "home-t02-condensed", 0, 2, 2, -1, -1, -1, -1, 1 },
+    { "home-t04-rounded", 0, 4, 3, -1, -1, -1, -1, 0 },
+    { "home-t06-serif", 0, 6, 4, -1, -1, -1, -1, 1 },
+    { "home-t08-sans", 0, 8, 5, -1, -1, -1, -1, 0 },
+    { "home-t10-terminal", 0, 10, 6, -1, -1, -1, -1, 1 },
+    { "home-t12-mono", 0, 12, 7, -1, -1, -1, -1, 0 },
+    { "home-t14-modern", 0, 14, 0, -1, -1, -1, -1, 1 },
+    { "book-spread-serif", 3, 1, 4, -1, -1, -1, -1, -1 },
+    { "book-info-p0", 3, 4, 4, -1, -1, -1, -1, 0 },
+    { "book-info-p1", 3, 7, 4, -1, -1, -1, -1, 1 },
+    { "book-info-p2", 3, 10, 4, -1, -1, -1, -1, 2 },
+    { "book-info-p3", 3, 13, 4, -1, -1, -1, -1, 3 },
+    { "settings-tab0-t06", 4, 6, 2, -1, -1, -1, -1, 0 },
+    { "settings-tab1-t09", 4, 9, 3, -1, -1, -1, -1, 1 },
+    { "settings-tab2-t12", 4, 12, 4, -1, -1, -1, -1, 2 },
+    { "settings-tab3-t15", 4, 15, 5, -1, -1, -1, -1, 3 },
+    { "settings-tab4-t02", 4, 2, 6, -1, -1, -1, -1, 4 },
+    { "radio-dark", 5, 11, 0, -1, -1, -1, -1, -1 },
+    { "radio-light", 5, 4, 2, -1, -1, -1, -1, -1 },
+    { "minigames-list", 6, 6, 1, -1, -1, -1, -1, -1 },
+    { "minigames-alt", 6, 13, 3, -1, -1, -1, -1, -1 },
+            };
+            const int PROMO_BASE  = (int)(sizeof(pnames)/sizeof(pnames[0]));
+            const int PROMO_EXTRA = (int)(sizeof(pextra)/sizeof(pextra[0]));
+            const int PROMO_STEPS = PROMO_BASE + PROMO_EXTRA;
             if (pstep < 0) {
                 pstep = promo_start;
                 if (pstep < 0 || pstep >= PROMO_STEPS) pstep = 0;
@@ -21397,7 +21480,7 @@ int main(int argc, char *argv[]) {
                 calendar_reminder_popup = 0; calendar_reminder_delete_confirm = 0;
                 calendar_reminder_time_picker = 0; calendar_reminder_pending_text[0] = '\0';
                 calendar_reminder_count = 0;
-                font_choice_idx = pfonts[pstep];
+                font_choice_idx = (pstep < PROMO_BASE) ? pfonts[pstep] : pextra[pstep - PROMO_BASE].font;
                 font_size_idx = 1;              // Medium: legible without crowding
                 font_bold = 0;
                 reload_fonts();
@@ -21406,6 +21489,42 @@ int main(int argc, char *argv[]) {
                 surprise_me_enabled = (pstep == 0 || pstep == 17);
                 hud_font_color_idx = (pstep == 4 || pstep == 5 || pstep == 7 ||
                                       (pstep >= 8 && pstep <= 11)) ? 1 : 0;
+                if (pstep >= PROMO_BASE) {
+                    const PromoExtra *px = &pextra[pstep - PROMO_BASE];
+                    in_favorites_view = 0; in_all_games_view = 0;   // don't inherit earlier stops
+                    library_search[0] = '\0';
+                    theme_idx = px->theme;
+                    if (px->view >= 0) platform_view_style = px->view;
+                    if (px->art  >= 0) display_art_idx    = px->art;
+                    if (px->cols >  0) grid_cols          = px->cols;
+                    if (px->rows >  0) grid_rows          = px->rows;
+                    if ((px->kind == 2 || px->kind == 3) && psapphire < 0) {
+                        free_games(ren); scan_games(ren, font_label, 0);
+                        psapphire = 0;
+                        for (int gi = 0; gi < game_count; gi++)
+                            if (strstr(games[gi].title, "Sapphire") || strstr(games[gi].raw_filename, "Sapphire")) { psapphire = gi; break; }
+                    }
+                    switch (px->kind) {
+                      case 0: state = STATE_HOME; home_view_idx = px->extra > 0 ? 1 : 0;
+                              home_selected = 0;
+                              home_widget_idx  = HOME_WIDGET_CLOCK;
+                              home_widget2_idx = HOME_WIDGET_STATS; break;
+                      case 1: state = STATE_PLATFORM; break;
+                      case 2: free_games(ren); scan_games(ren, font_label, 0);
+                              selected = (psapphire >= 0 && psapphire < game_count) ? psapphire : 0;
+                              state = STATE_MENU; break;
+                      case 3: free_games(ren); scan_games(ren, font_label, 0);
+                              selected = (psapphire >= 0 && psapphire < game_count) ? psapphire : 0;
+                              state = STATE_BOOK; book_open_start = anim_start();
+                              book_prev_sel = selected; book_flip_dir = 0;
+                              if (px->extra >= 0) { book_info_open = 1; book_info_page = px->extra; }
+                              break;
+                      case 4: state = STATE_SETTINGS; current_tab = px->extra;
+                              settings_selected = 0; settings_scroll_offset = 0; break;
+                      case 5: promo_seed_radio(); state = STATE_RADIO; break;
+                      case 6: state = STATE_MINIGAMES; mg_menu_sel = px->extra > 0 ? 1 : 0; break;
+                    }
+                } else
                 switch (pstep) {
                   case 0:  state = STATE_HOME; theme_idx = 1; home_view_idx = 0; home_selected = 0;
                            home_widget_idx = HOME_WIDGET_CLOCK; home_widget2_idx = HOME_WIDGET_STATS; break;
@@ -21548,16 +21667,18 @@ int main(int argc, char *argv[]) {
                            break;
                 }
                 carousel_transition_start = anim_start(); platform_enter_time = SDL_GetTicks();
-                if (pstep >= 4 && pstep <= 7) platform_enter_time -= 11000;
+                if ((pstep >= 4 && pstep <= 7) || pstep >= PROMO_BASE) platform_enter_time -= 11000;
                 page_transition_start = SDL_GetTicks(); selection_transition_start_1x1 = SDL_GetTicks();
             }
             // Entering STATE_PLATFORM resets the timer on its first rendered
             // frame; keep temporary help text aged out in subsequent promo frames.
-            if (pstep >= 4 && pstep <= 7 && pf > 0) platform_enter_time = SDL_GetTicks() - 11000;
+            if (((pstep >= 4 && pstep <= 7) || pstep >= PROMO_BASE) && pf > 0)
+                platform_enter_time = SDL_GetTicks() - 11000;
             pf++;
             if (pf == PSETTLE) {
                 char pp[700];
-                snprintf(pp, sizeof pp, "%s/%02d-%s.png", promo_dir, pstep + 1, pnames[pstep]);
+                snprintf(pp, sizeof pp, "%s/%03d-%s.png", promo_dir, pstep + 1,
+                         pstep < PROMO_BASE ? pnames[pstep] : pextra[pstep - PROMO_BASE].name);
                 save_screenshot(ren, pp);
                 fprintf(stderr, "promo: %s\n", pp);
             }
