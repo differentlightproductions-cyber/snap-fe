@@ -61,6 +61,8 @@ several releases.
   after 15 seconds unless confirmed.
 - "Console View" is now "Systems View".
 - Doom and Commodore 64 have artwork.
+- The controls hint on the Single Card systems view ran off both edges of
+  the screen instead of fitting to it.
 - The desktop development build compiles again on SDL_image older than 2.6.
 
 ## Updating
