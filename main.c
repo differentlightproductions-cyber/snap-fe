@@ -9605,6 +9605,125 @@ static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const cha
     return b;
 }
 
+// A system's own cartridge shape, borrowed from whatever cartridge art the user
+// has already scraped for it.
+//
+// The drawn CartSpec silhouettes are approximations. If even one game in the
+// system has real cartridge art, its alpha is a far better outline than
+// anything hand-specified -- so the first one found becomes the template for
+// every game in that system that has none, filled with the system's body colour
+// and given a plain label. make_silhouette_shadow bakes RGB white, so a colour
+// mod tints the mask to anything.
+typedef struct { char dir[24]; SDL_Texture *sil; int w, h; int tried; } CartDonor;
+static CartDonor cart_donors[12];
+static int cart_donor_n = 0;
+static unsigned cart_donor_epoch = 0;
+
+static CartDonor *cart_donor_for(SDL_Renderer *ren, const char *pdir) {
+    if (cart_donor_epoch != renderer_epoch) {   // textures died with the renderer
+        memset(cart_donors, 0, sizeof cart_donors);
+        cart_donor_n = 0; cart_donor_epoch = renderer_epoch;
+    }
+    for (int i = 0; i < cart_donor_n; i++)
+        if (strcmp(cart_donors[i].dir, pdir) == 0) return &cart_donors[i];
+    if (cart_donor_n >= (int)(sizeof(cart_donors)/sizeof(cart_donors[0]))) return NULL;
+
+    CartDonor *d = &cart_donors[cart_donor_n++];
+    snprintf(d->dir, sizeof d->dir, "%s", pdir);
+    d->sil = NULL; d->tried = 1;
+
+    char dirpath[700];
+    snprintf(dirpath, sizeof dirpath, "%s/boxart/%s/%s",
+             sn_data_root(), pdir, art_type_slugs[ART_TYPE_CARTRIDGE]);
+    DIR *dh = opendir(dirpath);
+    if (!dh) return d;
+    struct dirent *ent;
+    while ((ent = readdir(dh)) != NULL) {
+        if (!has_ext(ent->d_name, ".png") && !has_ext(ent->d_name, ".jpg") && !has_ext(ent->d_name, ".jpeg"))
+            continue;
+        char path[900];
+        snprintf(path, sizeof path, "%.640s/%.255s", dirpath, ent->d_name);
+        SDL_Surface *sf = load_scaled_surface(path, 512);
+        if (!sf) continue;
+        d->w = sf->w; d->h = sf->h;
+        d->sil = make_silhouette_shadow(ren, sf);
+        SDL_FreeSurface(sf);
+        if (d->sil) break;
+    }
+    closedir(dh);
+    return d;
+}
+
+// Draw a cart using a donor silhouette: the real shape, filled and labelled.
+// Returns the rect it occupied.
+static SDL_Rect draw_cartridge_donor(SDL_Renderer *ren, SDL_Rect box, CartDonor *d,
+                                     int p, const char *title, int prominent) {
+    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    const CartSpec *cs = cart_spec_for(p);
+
+    float ar = (d->h > 0) ? (float)d->w / (float)d->h : 1.0f;
+    int bw = box.w, bh = (int)(bw / ar);
+    if (bh > box.h) { bh = box.h; bw = (int)(bh * ar); }
+    SDL_Rect b = { box.x + (box.w - bw) / 2, box.y + (box.h - bh) / 2, bw, bh };
+
+    SDL_BlendMode pbm; SDL_GetRenderDrawBlendMode(ren, &pbm);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureBlendMode(d->sil, SDL_BLENDMODE_BLEND);
+
+    // Outline: the same mask, grown.
+    int g = prominent ? 3 : 2;
+    SDL_SetTextureColorMod(d->sil, th->accent2.r, th->accent2.g, th->accent2.b);
+    SDL_SetTextureAlphaMod(d->sil, prominent ? 235 : 80);
+    SDL_RenderCopy(ren, d->sil, NULL, &(SDL_Rect){ b.x - g, b.y - g, b.w + g*2, b.h + g*2 });
+
+    // Body: the mask tinted with this system's cartridge colour.
+    SDL_SetTextureColorMod(d->sil, cs->body.r, cs->body.g, cs->body.b);
+    SDL_SetTextureAlphaMod(d->sil, 255);
+    SDL_RenderCopy(ren, d->sil, NULL, &b);
+    SDL_SetTextureColorMod(d->sil, 255, 255, 255);
+
+    // Plain label across the middle, sized from the shape rather than the cell.
+    SDL_Rect lab = { b.x + (int)(b.w * 0.12f), b.y + (int)(b.h * 0.20f),
+                     (int)(b.w * 0.76f), (int)(b.h * 0.52f) };
+    fill_rounded(ren, lab, 4, cs->label.r, cs->label.g, cs->label.b, 255);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 55);
+    SDL_RenderDrawRect(ren, &lab);
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 205);
+    SDL_RenderFillRect(ren, &(SDL_Rect){ lab.x, lab.y, lab.w, lab.h > 24 ? 3 : 2 });
+
+    if (title && title[0] && lab.w > 26 && lab.h > 16 && font_label) {
+        SDL_Color ink = { 32, 30, 28, 255 };
+        int pad = 5, avail = lab.w - pad * 2;
+        int lh = TTF_FontHeight(font_label);
+        int maxlines = (lab.h - 8) / (lh + 1);
+        if (maxlines < 1) maxlines = 1; if (maxlines > 3) maxlines = 3;
+        char lines[3][96]; int nl = 0; char cur[96] = "";
+        const char *w = title;
+        while (*w && nl < maxlines) {
+            const char *e = w; while (*e && *e != ' ') e++;
+            char word[64]; int wl = (int)(e - w); if (wl > 63) wl = 63;
+            memcpy(word, w, wl); word[wl] = 0;
+            char test[96]; snprintf(test, sizeof test, "%s%s%s", cur, cur[0] ? " " : "", word);
+            int mw = 0, mh = 0; TTF_SizeUTF8(font_label, test, &mw, &mh);
+            if (mw > avail && cur[0]) { snprintf(lines[nl++], 96, "%s", cur); snprintf(cur, sizeof cur, "%s", word); }
+            else snprintf(cur, sizeof cur, "%s", test);
+            w = *e ? e + 1 : e;
+        }
+        if (cur[0] && nl < maxlines) snprintf(lines[nl++], 96, "%s", cur);
+        int ty = lab.y + (lab.h - nl * (lh + 1)) / 2 + 1;
+        if (ty < lab.y + 4) ty = lab.y + 4;
+        for (int i = 0; i < nl; i++) {
+            SDL_Texture *t = render_text_fit(ren, font_label, lines[i], ink, avail);
+            if (!t) continue;
+            int tw, thh; SDL_QueryTexture(t, NULL, NULL, &tw, &thh);
+            SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ lab.x + lab.w / 2 - tw / 2, ty, tw, thh });
+            ty += lh + 1;
+        }
+    }
+    SDL_SetRenderDrawBlendMode(ren, pbm);
+    return b;
+}
+
 // Backdrop behind the highlighted game in the Games Carousel.
 //
 // ScreenScraper's video snaps are MP4 and SDL has no decoder, so a still is
@@ -19584,32 +19703,81 @@ int main(int argc, char *argv[]) {
                     memset(gcart, 0, sizeof gcart); gcart_n = 0; gcart_epoch = renderer_epoch;
                 }
 
-                int cw = 150, chh = 200;
-                int cy = WIN_H / 2 - chh / 2 - 6;
-                int half = 2;
-
-                if (selected != last_rendered_selected_1x1) {
-                    selection_transition_start_1x1 = anim_start();
-                    last_rendered_selected_1x1 = selected;
+                // Size the cards from the shape they will actually hold. Real
+                // cartridge scans vary wildly -- a GBA support-2D scan is
+                // landscape, an NES cart is tall -- and a fixed cell either
+                // squashes them or leaves the fan overlapping itself.
+                float card_ar = 0.90f;
+                {
+                    CartDonor *dn0 = cart_donor_for(ren, games[gsel].platform_dir);
+                    if (dn0 && dn0->sil && dn0->h > 0) card_ar = (float)dn0->w / (float)dn0->h;
+                    else {
+                        const CartSpec *cs0 = cart_spec_for(platform_index_for_dir(games[gsel].platform_dir));
+                        card_ar = cs0->aspect;
+                    }
                 }
+                int chh = (int)(WIN_H * 0.50f);
+                int cw  = (int)(chh * card_ar);
+                int cap = (int)(WIN_W * 0.42f);
+                if (cw > cap) { cw = cap; chh = (int)(cw / card_ar); }
+                int cy = WIN_H / 2 - chh / 2 - 12;
+                // A wide cart cannot show five across a 640px panel without
+                // burying the selection; a tall one can.
+                int half = (cw > (int)(WIN_W * 0.30f)) ? 1 : 2;
 
-                // Outermost first, selected LAST. Drawing +2..-2 in order put the
-                // left-hand cards on top of the selected one, which is what made
-                // them bleed together instead of the centre standing proud.
-                for (int d = half; d >= 0; d--) {
-                    for (int side = 0; side < 2; side++) {
-                        if (d == 0 && side) continue;          // centre drawn once
-                        int off  = side ? d : -d;
-                        int gi2  = gsel + off;
-                        if (gi2 < 0 || gi2 >= game_count) continue;
-                        int centre = (off == 0);
+                // Ease between arrangements the way the Systems Carousel does.
+                // This used to snap: the transition timer was started but never
+                // actually read, so every card jumped straight to its new slot.
+                static int    gcar_last = -1, gcar_prev = -1;
+                static Uint32 gcar_t0 = 0;
+                if (gsel != gcar_last) {
+                    gcar_prev = (gcar_last < 0) ? gsel : gcar_last;
+                    gcar_last = gsel;
+                    gcar_t0 = anim_start();
+                }
+                float ct = 1.0f;
+                if (!reduce_motion) {
+                    Uint32 cel = SDL_GetTicks() - gcar_t0;
+                    ct = cel >= (Uint32)CAROUSEL_TRANSITION_MS ? 1.0f : (float)cel / CAROUSEL_TRANSITION_MS;
+                    ct = 1.0f - (1.0f - ct) * (1.0f - ct);      // ease-out
+                }
+                float centre_f = (float)gcar_prev + ((float)gsel - (float)gcar_prev) * ct;
 
-                        float ad = (float)d;
-                        float scale = centre ? 1.0f : (1.0f - 0.20f * ad);
+                // Collect the window, then draw farthest-first so the selected
+                // cart lands on top -- drawing left-to-right put the left-hand
+                // cards over it, which is what made them bleed together.
+                struct GCard { int gi; float foff; } cards[8];
+                int ncards = 0;
+                for (int gi2 = gsel - half - 1; gi2 <= gsel + half + 1 && ncards < 8; gi2++) {
+                    if (gi2 < 0 || gi2 >= game_count) continue;
+                    float fo = (float)gi2 - centre_f;
+                    if (fo < -(half + 0.75f) || fo > (half + 0.75f)) continue;
+                    cards[ncards].gi = gi2; cards[ncards].foff = fo; ncards++;
+                }
+                for (int a = 0; a < ncards; a++)               // |foff| descending
+                    for (int b2 = a + 1; b2 < ncards; b2++) {
+                        float fa = cards[a].foff < 0 ? -cards[a].foff : cards[a].foff;
+                        float fb = cards[b2].foff < 0 ? -cards[b2].foff : cards[b2].foff;
+                        if (fb > fa) { struct GCard tmp = cards[a]; cards[a] = cards[b2]; cards[b2] = tmp; }
+                    }
+
+                for (int ci = 0; ci < ncards; ci++) {
+                    {
+                        int gi2 = cards[ci].gi;
+                        float fo = cards[ci].foff;
+                        float ad = fo < 0 ? -fo : fo;
+                        int centre = (ad < 0.5f);
+
+                        float scale = 1.0f - 0.20f * ad;
+                        if (scale < 0.45f) scale = 0.45f;
                         int w2 = (int)(cw * scale), h2 = (int)(chh * scale);
                         // Wide enough spacing that neighbours sit beside the
                         // selected cart rather than under it.
-                        int x2 = WIN_W / 2 - w2 / 2 + (int)(off * (cw * 0.88f));
+                        // Wide carts need a real gap or the neighbours merge
+                        // into one dark band across the screen; narrow ones can
+                        // overlap a little for depth.
+                        float gapf = (half == 1) ? 1.02f : 0.82f;
+                        int x2 = WIN_W / 2 - w2 / 2 + (int)(fo * (cw * gapf));
                         int y2 = cy + (int)((chh - h2) * 0.5f);
                         SDL_Rect cr = { x2, y2, w2, h2 };
 
@@ -19658,7 +19826,11 @@ int main(int argc, char *argv[]) {
                             SDL_SetTextureAlphaMod(ct2, 255);
                         } else {
                             int pidx = platform_index_for_dir(games[gi2].platform_dir);
-                            body = draw_cartridge(ren, cr, pidx, games[gi2].title, centre);
+                            CartDonor *dn = cart_donor_for(ren, games[gi2].platform_dir);
+                            if (dn && dn->sil)
+                                body = draw_cartridge_donor(ren, cr, dn, pidx, games[gi2].title, centre);
+                            else
+                                body = draw_cartridge(ren, cr, pidx, games[gi2].title, centre);
                         }
                         if (!centre) {
                             // Recede with black, not the theme background -- a
