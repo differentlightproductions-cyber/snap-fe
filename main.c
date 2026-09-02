@@ -267,6 +267,12 @@ int g_prev_ord = 0;          // ordinal of carousel_prev_selected (for the fan t
 unsigned g_plat_gen = 1;
 int g_plat_ready = 0;   // has rebuild_visible_platforms_ex2 populated g_plat[] yet?
 int plat_list_scroll = 0;    // List view: px the fixed-row-height list is scrolled down
+// Games List layout (used when Systems View is List, so a system opens into a
+// browser shaped like the one you picked it from).
+int gm_list_scroll = 0;      // px the left game list is scrolled
+int gm_desc_scroll = 0;      // lines the right-hand write-up is scrolled (L2/R2)
+int gm_art_type    = -1;     // art type shown on the right; -1 = the Display Art default
+int gm_desc_more   = 0;      // set by the renderer when the write-up overflows
 
 // Per-platform background art cache -- one slot per system, loaded once and
 // kept (not swapped in/out like before), since the carousel view needs to
@@ -2531,10 +2537,10 @@ int hud_chrome_color_idx = 0;
 #define HUD_BAR_H 44 // height of the Top Bar style strip -- clears the wordmark,
                      // clock and battery/FPS text with a little breathing room
 
-// List view (Console View = List) chrome: a left-to-right fade that goes solid
+// List view (Systems View = List) chrome: a left-to-right fade that goes solid
 // behind each system's name, plus a frame around each icon. Both colours are
 // indices into hud_chrome_colors[] and are user-picked under Settings > Game
-// when Console View is List.
+// when Systems View is List.
 int list_bar_color_idx = 1;   // Slate  (index into hud_chrome_colors)
 int list_frame_color_idx = 3; // Blue   (index into hud_chrome_colors)
 int list_text_color_idx = 0;  // 0 = Auto (contrast vs bar); else font_color_values[]
@@ -3965,7 +3971,7 @@ int home_apps_mask = (1 << APP_COUNT) - 1;   // all visible
 int bg_dropdown_open = 0;
 int disp_grp_home_open = 0;     // Home
 int disp_grp_text_open = 0;     // Theme & Text
-int disp_grp_view_open = 0;     // Console View
+int disp_grp_view_open = 0;     // Systems View
 int disp_grp_hud_open = 0;      // Status Bar
 int disp_grp_screen_open = 0;   // Screen & Power
 
@@ -3985,7 +3991,7 @@ static void settings_close_all_groups(void) {
     for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
     for (int i = 0; i < BG_MAKER_COUNT; i++) bg_maker_open[i] = 0;
 }
-// Console View alone decides art and sizing for the platform picker now --
+// Systems View alone decides art and sizing for the platform picker now --
 // Card Shape (Rectangle/Square) is removed from Settings for the time
 // being; card_shape_idx stays around (always 0/Rectangle, still round-trips
 // through settings.cfg) so the sizing code in Carousel/Grid doesn't need
@@ -4002,7 +4008,7 @@ int card_shape_idx = 0;
 
 // Platform-picker Grid view layout -- independent columns/rows (1-6 each), same
 // pattern as the games grid. Systems fill the grid left-to-right, top-to-bottom;
-// only shown as a setting while Console View is set to Grid.
+// only shown as a setting while Systems View is set to Grid.
 int platform_grid_cols = 3;
 int platform_grid_rows = 2;
 
@@ -4024,6 +4030,14 @@ int platform_bg_color_idx = 1; // Slate, when mode == Solid Color
 const char *game_aspect_names[GAME_ASPECT_COUNT] = { "Core Default", "4:3", "3:2", "16:9", "Pixel Perfect" };
 const int   game_aspect_ra_index[GAME_ASPECT_COUNT] = { 22, 0, 7, 1, 21 };
 int game_aspect_idx = 0;
+// Aspect-ratio confirm flow. The setting only reaches RetroArch at launch, so
+// there is nothing live to revert -- instead we show a proportion preview and
+// auto-restore the previous value unless it is confirmed, the way Windows does
+// for a resolution change.
+int   aspect_preview_active = 0;
+int   aspect_preview_prev   = 0;
+Uint32 aspect_preview_until = 0;
+#define ASPECT_PREVIEW_MS 15000
 #define GAME_ROTATION_COUNT 4
 const char *game_rotation_names[GAME_ROTATION_COUNT] = { "Off", "90 CW", "180", "270 CW" };
 int game_rotation_idx = 0; // 0..3 -> video_rotation 0..3
@@ -4193,7 +4207,7 @@ int build_display_rows(int *row_type, int *row_extra) {
         D_ADD(ROW_DISP_FONT_COLOR, 0);
         D_ADD(ROW_DISP_RST_TEXT, 0);
     }
-    // Console View, Columns/Rows and Display Art now live under Game.
+    // Systems View, Columns/Rows and Display Art now live under Game.
     // Status Bar
     D_ADD(ROW_DISP_GRP_HUD, 0);
     if (disp_grp_hud_open) {
@@ -11033,7 +11047,7 @@ void factory_reset() {
     apply_brightness();
 }
 
-// Resets one presentation sub-group to its defaults. Console View now invokes
+// Resets one presentation sub-group to its defaults. Systems View now invokes
 // this from the Game tab; the other groups still live under Display.
 void restore_display_group(int which) {
     if (which == ROW_DISP_RST_TEXT) {
@@ -13859,6 +13873,18 @@ int main(int argc, char *argv[]) {
                     continue; // a lid key is never a normal keypress
                 }
 
+                // While the aspect preview is up it owns A and B, so the
+                // keypress never also acts on the settings row underneath.
+                if (aspect_preview_active &&
+                    (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_ESCAPE)) {
+                    last_input_time = SDL_GetTicks();
+                    if (e.key.keysym.sym == SDLK_ESCAPE) game_aspect_idx = aspect_preview_prev;
+                    aspect_preview_active = 0;
+                    settings_dirty = 1;
+                    play_click();
+                    continue;
+                }
+
                 last_input_time = SDL_GetTicks();
                 if (is_sleeping) {
                     is_sleeping = 0;
@@ -14807,6 +14833,14 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if (state == STATE_MENU) {
+                    // List layout only: L1/R1 step through this game's artwork,
+                    // L2/R2 scroll the write-up beside it.
+                    if (platform_view_style == 3 && game_count > 0) {
+                        if (e.key.keysym.sym == SDLK_e) { gm_art_type = (gm_art_type + 2) % (ART_TYPE_COUNT + 1) - 1; }
+                        if (e.key.keysym.sym == SDLK_q) { gm_art_type = (gm_art_type + ART_TYPE_COUNT + 1) % (ART_TYPE_COUNT + 1) - 1; }
+                        if (e.key.keysym.sym == SDLK_PAGEDOWN) { if (gm_desc_more) gm_desc_scroll += 3; }
+                        if (e.key.keysym.sym == SDLK_PAGEUP)   { gm_desc_scroll -= 3; if (gm_desc_scroll < 0) gm_desc_scroll = 0; }
+                    }
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
                         state = in_all_games_view ? STATE_HOME : STATE_PLATFORM;
                     }
@@ -15401,7 +15435,10 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_LAUNCHMODE) {
                                 launch_fullscreen = !launch_fullscreen;
                             } else if (rt == ROW_DISP_GAME_ASPECT) {
+                                if (!aspect_preview_active) aspect_preview_prev = game_aspect_idx;
                                 game_aspect_idx = (game_aspect_idx + dir + GAME_ASPECT_COUNT) % GAME_ASPECT_COUNT;
+                                aspect_preview_active = 1;
+                                aspect_preview_until  = SDL_GetTicks() + ASPECT_PREVIEW_MS;
                             } else if (rt == ROW_DISP_GAME_ROTATION) {
                                 game_rotation_idx = (game_rotation_idx + dir + GAME_ROTATION_COUNT) % GAME_ROTATION_COUNT;
                             } else if (rt == ROW_DISP_REDUCEMOTION) {
@@ -16282,6 +16319,10 @@ int main(int argc, char *argv[]) {
         // re-entering night mode always returns to the preset.
         {
             static int g_night_was_active = 0;
+            if (aspect_preview_active && SDL_TICKS_PASSED(SDL_GetTicks(), aspect_preview_until)) {
+                game_aspect_idx = aspect_preview_prev;   // unconfirmed -> put it back
+                aspect_preview_active = 0;
+            }
             int na = night_active_now();
             if (na && !g_night_was_active) {
                 g_pre_night_brightness = brightness_pct;
@@ -17031,7 +17072,7 @@ int main(int argc, char *argv[]) {
 
                 // Selected system's short name + game count (GBA  ·  42) in a
                 // snug pill just above the fanned cards. Theme-coloured, toggled
-                // by "System Titles" under Console View.
+                // by "System Titles" under Systems View.
                 if (carousel_titles_on) {
                     int gcp = platform_game_count_cache[platform_selected];
                     char plabel[48];
@@ -17874,7 +17915,7 @@ int main(int argc, char *argv[]) {
                             snprintf(text, sizeof(text), "%c Home Apps (%d/%d)", disp_grp_apps_open ? 'v' : '>', n, APP_COUNT); indent = 1; } break;
                         case ROW_DISP_APP_ITEM: { int a = row_extra[i]; snprintf(text, sizeof(text), "%s: %s", home_app_names[a], (home_apps_mask & (1 << a)) ? "Shown" : "Hidden"); indent = 2; } break;
                         case ROW_DISP_GRP_TEXT: snprintf(text, sizeof(text), "%c Theme & Text", disp_grp_text_open ? 'v' : '>'); indent = 0; break;
-                        case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Console View", disp_grp_view_open ? 'v' : '>'); indent = 0; break;
+                        case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Systems View", disp_grp_view_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_GRP_HUD: snprintf(text, sizeof(text), "%c Status Bar", disp_grp_hud_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_GRP_SCREEN: snprintf(text, sizeof(text), "%c Screen & Power", disp_grp_screen_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_BG_HEADER: snprintf(text, sizeof(text), "%c Background", bg_dropdown_open ? 'v' : '>'); indent = 0; break;
@@ -17889,7 +17930,7 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_PLAYER_NAME: snprintf(text, sizeof(text), "Your Name: %s", player_name[0] ? player_name : "(not set - press A)"); indent = 1; break;
                         case ROW_DISP_FONT_COLOR: snprintf(text, sizeof(text), "System Font Color: %s", font_color_names[(global_font_color_idx >= 0 && global_font_color_idx < FONT_COLOR_COUNT) ? global_font_color_idx : 0]); indent = 1; break;
 
-                        case ROW_DISP_CONSOLE_VIEW: snprintf(text, sizeof(text), "Console View: %s", view_style_names[platform_view_style]); indent = 1; break;
+                        case ROW_DISP_CONSOLE_VIEW: snprintf(text, sizeof(text), "Systems View: %s", view_style_names[platform_view_style]); indent = 1; break;
                         case ROW_DISP_ART_HEADER: snprintf(text, sizeof(text), "%c Display Art: %s", display_dropdown_open ? 'v' : '>', art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0]); indent = 1; break;
                         case ROW_DISP_ART_ITEM: {
                             int is_current = (row_extra[i] == display_art_idx);
@@ -17947,8 +17988,8 @@ int main(int argc, char *argv[]) {
                             indent = 1;
                             break;
                         case ROW_G_AUTOSAVE: snprintf(text, sizeof(text), "Auto-Save Games (60s): %s", auto_save_games ? "ON" : "OFF"); break;
-                        case ROW_G_VIEW_HEADER: snprintf(text, sizeof(text), "%c Console View", disp_grp_view_open ? 'v' : '>'); break;
-                        case ROW_G_CONSOLE_VIEW: snprintf(text, sizeof(text), "Console View: %s", view_style_names[platform_view_style]); indent = 1; break;
+                        case ROW_G_VIEW_HEADER: snprintf(text, sizeof(text), "%c Systems View", disp_grp_view_open ? 'v' : '>'); break;
+                        case ROW_G_CONSOLE_VIEW: snprintf(text, sizeof(text), "Systems View: %s", view_style_names[platform_view_style]); indent = 1; break;
                         case ROW_G_FAVORITES_VIEW: snprintf(text, sizeof(text), "Favorites View: %s", favorite_view_names[(favorites_view_idx >= 0 && favorites_view_idx < FAVORITES_VIEW_COUNT) ? favorites_view_idx : 0]); indent = 1; break;
                         case ROW_G_SHOW_EMPTY: snprintf(text, sizeof(text), "Show Systems Without Games: %s", show_empty_systems ? "ON" : "OFF"); indent = 1; break;
                         case ROW_G_CAROUSEL_TITLES: snprintf(text, sizeof(text), "System Titles: %s", carousel_titles_on ? "ON" : "OFF"); indent = 1; break;
@@ -17957,7 +17998,7 @@ int main(int argc, char *argv[]) {
                         case ROW_G_LIST_BAR_COLOR: snprintf(text, sizeof(text), "List Bar Color: %s", hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0].name); indent = 1; break;
                         case ROW_G_LIST_FRAME_COLOR: snprintf(text, sizeof(text), "List Image Frame Color: %s", hud_chrome_colors[(list_frame_color_idx >= 0 && list_frame_color_idx < HUD_CHROME_COLOR_COUNT) ? list_frame_color_idx : 0].name); indent = 1; break;
                         case ROW_G_LIST_TEXT_COLOR: snprintf(text, sizeof(text), "List Text Color: %s", list_text_color_idx == 0 ? "Auto" : font_color_names[(list_text_color_idx > 0 && list_text_color_idx < FONT_COLOR_COUNT) ? list_text_color_idx : 0]); indent = 1; break;
-                        case ROW_G_VIEW_RESTORE: snprintf(text, sizeof(text), "Restore Console View Defaults"); indent = 1; break;
+                        case ROW_G_VIEW_RESTORE: snprintf(text, sizeof(text), "Restore Systems View Defaults"); indent = 1; break;
                         case ROW_G_ART_HEADER: snprintf(text, sizeof(text), "%c Columns/Rows", game_art_dropdown_open ? 'v' : '>'); break;
                         case ROW_G_GRID_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
                         case ROW_G_GRID_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
@@ -19245,6 +19286,157 @@ int main(int argc, char *argv[]) {
                 SDL_QueryTexture(m, NULL, NULL, &mw, &mh);
                 SDL_Rect mdst = { WIN_W/2 - mw/2, WIN_H/2 - mh/2, mw, mh };
                 SDL_RenderCopy(ren, m, NULL, &mdst);
+            } else if (platform_view_style == 3) {
+                // Games List -- deliberately shaped like the Systems List you
+                // arrived from: titles down the left over a feathered scrim,
+                // and a detail panel on the right with the artwork on top, a
+                // theme-coloured rule under it, and the write-up below.
+                // L1/R1 step the artwork, L2/R2 scroll the write-up.
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                int split = (int)(WIN_W * 0.55f);
+                for (int x = 0; x < split; x += 3) {
+                    float f = 1.0f - (float)x / split;
+                    Uint8 a = (Uint8)(210 * (f * 0.7f + 0.3f));
+                    SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, a);
+                    SDL_RenderFillRect(ren, &(SDL_Rect){ x, 0, 3, WIN_H });
+                }
+                SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 90);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ split, 30, 2, WIN_H - 60 });
+
+                // ---- left: the game list ----
+                int row_h = 44, list_x = 26;
+                int list_w = split - list_x - 28;
+                int list_top = 74, list_bot = WIN_H - 34;
+                int view_h = list_bot - list_top;
+                int content_h = row_h * game_count;
+                int sel_y = selected * row_h;
+                int scroll = gm_list_scroll;
+                if (sel_y - scroll < 0) scroll = sel_y;
+                else if (sel_y + row_h - scroll > view_h) scroll = sel_y + row_h - view_h;
+                if (content_h <= view_h) scroll = 0;
+                else { if (scroll < 0) scroll = 0;
+                       if (scroll > content_h - view_h) scroll = content_h - view_h; }
+                gm_list_scroll = scroll;
+
+                HudChromeColor barc = hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0];
+                SDL_Rect lclip = { list_x - 6, list_top, list_w + 14, view_h };
+                SDL_RenderSetClipRect(ren, &lclip);
+                for (int gi2 = 0; gi2 < game_count; gi2++) {
+                    int ry = list_top + gi2 * row_h - scroll;
+                    if (ry + row_h <= list_top || ry >= list_bot) continue;
+                    int selg = (gi2 == selected);
+                    SDL_Rect rb = { list_x, ry, list_w, row_h - 7 };
+                    if (selg) {
+                        fill_rounded(ren, rb, 6, barc.r, barc.g, barc.b, 235);
+                        for (int b = 0; b < 2; b++) {
+                            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+                            SDL_RenderDrawRect(ren, &(SDL_Rect){ rb.x - b, rb.y - b, rb.w + b*2, rb.h + b*2 });
+                        }
+                    } else {
+                        fill_rounded(ren, rb, 6, barc.r, barc.g, barc.b, 70);
+                    }
+                    int bl = (barc.r*54 + barc.g*183 + barc.b*19) >> 8;
+                    SDL_Color ink = bl > 128 ? (SDL_Color){ 18,18,22,255 } : (SDL_Color){ 244,244,248,255 };
+                    SDL_Color nc = selg ? ink : mix_col(ink, (SDL_Color){ barc.r, barc.g, barc.b, 255 }, 0.35f);
+                    if (is_favorite(games[gi2].path)) {
+                        SDL_Texture *st = render_text(ren, font_label, "*", th->accent3);
+                        int sw3, sh3; SDL_QueryTexture(st, NULL, NULL, &sw3, &sh3);
+                        SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ rb.x + 10, rb.y + rb.h/2 - sh3/2, sw3, sh3 });
+                    }
+                    SDL_Texture *lt = render_text_fit(ren, font_label, games[gi2].title, nc, rb.w - 34);
+                    int lw2, lh2; SDL_QueryTexture(lt, NULL, NULL, &lw2, &lh2);
+                    SDL_RenderCopy(ren, lt, NULL, &(SDL_Rect){ rb.x + 24, rb.y + rb.h/2 - lh2/2, lw2, lh2 });
+                }
+                SDL_RenderSetClipRect(ren, NULL);
+
+                // ---- right: artwork, rule, write-up ----
+                int px = split + 20, pw = WIN_W - split - 38;
+                int gi = (selected >= 0 && selected < game_count) ? selected : 0;
+
+                // Art + description are rebuilt only when the selection, the
+                // chosen art type or the renderer changes -- not every frame.
+                static int      d_sel = -1, d_type = -99;
+                static unsigned d_epoch = 0;
+                static SDL_Texture *d_tex = NULL;
+                static char d_desc[900] = "";
+                if (d_sel != gi || d_type != gm_art_type || d_epoch != renderer_epoch) {
+                    if (d_tex && d_epoch == renderer_epoch) SDL_DestroyTexture(d_tex);
+                    d_tex = NULL;
+                    if (gm_art_type < 0) {
+                        // Default type: game_art() owns and caches that texture,
+                        // so borrow it below rather than making a second copy.
+                        d_tex = NULL;
+                    } else {
+                        d_tex = tex_from_surface(ren,
+                            load_cached_art_surface(games[gi].platform_dir, games[gi].raw_filename, gm_art_type));
+                    }
+                    load_cached_description(games[gi].platform_dir, games[gi].raw_filename, d_desc, sizeof d_desc);
+                    d_sel = gi; d_type = gm_art_type; d_epoch = renderer_epoch;
+                    gm_desc_scroll = 0;
+                }
+                SDL_Texture *art = d_tex ? d_tex : game_art(ren, gi);
+
+                int art_h = (int)(WIN_H * 0.34);
+                SDL_Rect abox = { px, 74, pw, art_h };
+                if (art && art != g_art_pending) {
+                    SDL_Rect fit = fit_rect_for_texture(art, abox);
+                    if (games[gi].box_shadow && gm_art_type < 0)
+                        draw_silhouette_shadow(ren, games[gi].box_shadow, fit, selection_shadow_color());
+                    SDL_RenderCopy(ren, art, NULL, &fit);
+                } else {
+                    SDL_Texture *na = render_text_fit(ren, font_label, "No artwork", g_ui_dim, pw);
+                    int nw2, nh2; SDL_QueryTexture(na, NULL, NULL, &nw2, &nh2);
+                    SDL_RenderCopy(ren, na, NULL, &(SDL_Rect){ px + pw/2 - nw2/2, abox.y + art_h/2 - nh2/2, nw2, nh2 });
+                }
+
+                int ry2 = abox.y + art_h + 10;
+                SDL_Texture *tt = render_text_fit(ren, font_small, games[gi].title, g_ui_text, pw);
+                int tw4, th4; SDL_QueryTexture(tt, NULL, NULL, &tw4, &th4);
+                SDL_RenderCopy(ren, tt, NULL, &(SDL_Rect){ px, ry2, tw4, th4 });
+                ry2 += th4 + 8;
+                SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 200);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ px, ry2, pw - 6, 2 });
+                ry2 += 10;
+
+                // Greedy word-wrap of the write-up, then draw from gm_desc_scroll.
+                {
+                    const char *src = d_desc[0] ? d_desc : "No description scraped for this game yet.";
+                    char lines[40][160]; int nl = 0;
+                    char cur[160] = ""; const char *w1 = src;
+                    while (*w1 && nl < 40) {
+                        const char *w2 = w1; while (*w2 && *w2 != ' ' && *w2 != '\n') w2++;
+                        char word[128]; int wl = (int)(w2 - w1); if (wl > 127) wl = 127;
+                        memcpy(word, w1, wl); word[wl] = 0;
+                        char test[160];
+                        snprintf(test, sizeof test, "%s%s%s", cur, cur[0] ? " " : "", word);
+                        int mw2 = 0, mh2 = 0; TTF_SizeUTF8(font_label, test, &mw2, &mh2);
+                        if (mw2 > pw && cur[0]) { snprintf(lines[nl++], 160, "%s", cur); snprintf(cur, sizeof cur, "%s", word); }
+                        else snprintf(cur, sizeof cur, "%s", test);
+                        if (*w2 == '\n' && nl < 40) { snprintf(lines[nl++], 160, "%s", cur); cur[0] = 0; }
+                        w1 = *w2 ? w2 + 1 : w2;
+                    }
+                    if (cur[0] && nl < 40) snprintf(lines[nl++], 160, "%s", cur);
+
+                    int lh3 = TTF_FontHeight(font_label) + 3;
+                    int room = (WIN_H - 34) - ry2;
+                    int vis = room / lh3; if (vis < 1) vis = 1;
+                    if (gm_desc_scroll > nl - 1) gm_desc_scroll = nl > 0 ? nl - 1 : 0;
+                    gm_desc_more = (gm_desc_scroll + vis) < nl;
+                    for (int i2 = gm_desc_scroll; i2 < nl && i2 < gm_desc_scroll + vis; i2++) {
+                        SDL_Texture *dl = render_text_fit(ren, font_label, lines[i2], g_ui_dim, pw);
+                        int dw2, dh2; SDL_QueryTexture(dl, NULL, NULL, &dw2, &dh2);
+                        SDL_RenderCopy(ren, dl, NULL, &(SDL_Rect){ px, ry2, dw2, dh2 });
+                        ry2 += lh3;
+                    }
+                    if (gm_desc_more || gm_desc_scroll > 0) {
+                        const char *at = (gm_art_type < 0) ? "Art" : art_type_names[gm_art_type];
+                        char fh2[96]; snprintf(fh2, sizeof fh2, "L2/R2 Scroll   L1/R1 %s", at);
+                        SDL_Texture *ft2 = render_text_fit(ren, font_label, fh2, th->accent2, pw);
+                        int fw3, fh3; SDL_QueryTexture(ft2, NULL, NULL, &fw3, &fh3);
+                        SDL_RenderCopy(ren, ft2, NULL, &(SDL_Rect){ px, WIN_H - fh3 - 14, fw3, fh3 });
+                    }
+                }
+
             } else if (menu_cols == 1 && menu_rows == 1) {
                 // Single-game view -- polished default, now with a soft shadow behind
                 // the actual image bounds and a fade when switching games.
@@ -20330,6 +20522,61 @@ int main(int argc, char *argv[]) {
         // whole UI (including those) tracks the setting. The real backlight does
         // the heavy lifting on the device; this keeps it visibly consistent.
         if (state != STATE_BOOT) brightness_dim_overlay(ren);
+
+        // --- Aspect ratio preview -------------------------------------------
+        // The setting only reaches RetroArch when a game launches, so there is
+        // no live screen change to judge. Show the proportions instead: the
+        // panel outline with the chosen ratio letterboxed inside it, over a
+        // heavy dim, and put the change back unless it is confirmed.
+        if (aspect_preview_active) {
+            SDL_BlendMode pbm; SDL_GetRenderDrawBlendMode(ren, &pbm);
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 204);              // ~80%
+            SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+
+            const double ar_f[GAME_ASPECT_COUNT] = { 1.3333, 1.3333, 1.5, 1.7778, 1.3333 };
+            int ai = (game_aspect_idx >= 0 && game_aspect_idx < GAME_ASPECT_COUNT) ? game_aspect_idx : 0;
+
+            // Panel outline, drawn to scale, with the game area inside it.
+            int fw = (int)(WIN_W * 0.52), fh = (int)(fw * (double)WIN_H / (double)WIN_W);
+            int fx = WIN_W / 2 - fw / 2, fy = (int)(WIN_H * 0.30);
+            SDL_SetRenderDrawColor(ren, 255, 255, 255, 55);
+            SDL_RenderFillRect(ren, &(SDL_Rect){ fx, fy, fw, fh });
+            SDL_SetRenderDrawColor(ren, 255, 255, 255, 120);
+            SDL_RenderDrawRect(ren, &(SDL_Rect){ fx, fy, fw, fh });
+
+            int gw = fw, gh = (int)(gw / ar_f[ai]);
+            if (gh > fh) { gh = fh; gw = (int)(gh * ar_f[ai]); }
+            SDL_Rect gr = { fx + (fw - gw) / 2, fy + (fh - gh) / 2, gw, gh };
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 150);
+            SDL_RenderFillRect(ren, &gr);
+            for (int gx = 1; gx < 4; gx++) {   // grid lines make the shape readable
+                SDL_SetRenderDrawColor(ren, 0, 0, 0, 70);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ gr.x + gr.w * gx / 4, gr.y, 1, gr.h });
+                SDL_RenderFillRect(ren, &(SDL_Rect){ gr.x, gr.y + gr.h * gx / 4, gr.w, 1 });
+            }
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+            SDL_RenderDrawRect(ren, &gr);
+
+            SDL_Color w1 = { 245, 245, 250, 255 }, w2 = { 190, 190, 200, 255 };
+            SDL_Texture *t1 = render_text(ren, font_small, game_aspect_names[ai], w1);
+            int tw1, th1; SDL_QueryTexture(t1, NULL, NULL, &tw1, &th1);
+            SDL_RenderCopy(ren, t1, NULL, &(SDL_Rect){ WIN_W/2 - tw1/2, fy - th1 - 14, tw1, th1 });
+
+            SDL_Texture *t2 = render_text_fit(ren, font_label,
+                "This is how a game will fill the screen", w2, WIN_W - 60);
+            int tw2, th2b; SDL_QueryTexture(t2, NULL, NULL, &tw2, &th2b);
+            SDL_RenderCopy(ren, t2, NULL, &(SDL_Rect){ WIN_W/2 - tw2/2, fy + fh + 14, tw2, th2b });
+
+            Uint32 now_ap = SDL_GetTicks();
+            int secs = (int)((aspect_preview_until > now_ap ? aspect_preview_until - now_ap : 0) / 1000) + 1;
+            char ap[96];
+            snprintf(ap, sizeof ap, "A  Keep      B  Revert      (reverting in %ds)", secs);
+            SDL_Texture *t3 = render_text_fit(ren, font_label, ap, w1, WIN_W - 40);
+            int tw3, th3; SDL_QueryTexture(t3, NULL, NULL, &tw3, &th3);
+            SDL_RenderCopy(ren, t3, NULL, &(SDL_Rect){ WIN_W/2 - tw3/2, fy + fh + 14 + th2b + 12, tw3, th3 });
+            SDL_SetRenderDrawBlendMode(ren, pbm);
+        }
 
         // Volume / Brightness on-screen level overlay -- above the dim so it
         // stays readable while you're turning the brightness down.
