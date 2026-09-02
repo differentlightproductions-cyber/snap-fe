@@ -609,7 +609,7 @@ const char *theme_sound_names[] = {"Theme 1", "Theme 2", "Theme 3"};
 int brightness_pct = 100;
 // Knulli reserves 0% for display-off. Keep 1% as the lowest user-selectable
 // level so the final click is the panel's real night-time minimum, not black.
-#define BRIGHT_MIN_PCT 1
+#define BRIGHT_MIN_PCT 0   // 0 = backlight fully off, an explicit step below 1%
 #define BRIGHT_STEP    5
 int night_brightness_pct = 35;   // persisted: the level Night Mode snaps to
 int g_pre_night_brightness = -1;  // brightness before Night Mode took over (-1 = not saved)
@@ -3447,6 +3447,20 @@ static int art_type_supported(int i) {
     return 1;
 }
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
+// Carousel, List and Bookshelf each supply their own art -- cartridges, the
+// detail panel's own gallery, book spines -- so Display Art does not reach a
+// system's games while one of those is the Systems View. It still drives
+// Favorites, which is always a plain grid, so the setting stays editable and
+// the row says what it is actually affecting rather than appearing broken.
+extern int platform_view_style;   // defined below with the other view state
+static const char *view_overrides_art(void) {
+    switch (platform_view_style) {
+        case 1: return "Carousel";
+        case 3: return "List";
+        case 4: return "Bookshelf";
+        default: return NULL;
+    }
+}
 int art_dropdown_open = 0;
 int display_dropdown_open = 0;
 int scrape_description = 0;
@@ -5101,23 +5115,29 @@ static void cpu_launch_boost_stop(void) {
 // generic 255-based helper collapses several high levels and makes the steps
 // inconsistent. Snap owns one precise 1%, 5%, 10% ... 100% sequence instead.
 int bright_pct_to_abs(int p) {
-    if (p < BRIGHT_MIN_PCT) p = BRIGHT_MIN_PCT;
+    if (p < 0) p = 0;
     if (p > 100) p = 100;
-    int v = (p <= BRIGHT_MIN_PCT) ? 1 : p * 200 / 100;
+    if (p == 0) return 0;          // Off -- backlight down, screen dark
+    if (p <= 1) return 1;          // 1% is the dimmest still-lit step
+    int v = p * 200 / 100;
     if (v < 1) v = 1;
     if (v > 200) v = 200;
     return v;
 }
 
 static int brightness_step_pct(int current, int dir, int amount) {
+    // Knulli's native sequence is ...10, 5, 1 on the way down and 1, 5, 10...
+    // on the way up; Off sits one step below 1 so the panel can be taken all
+    // the way down without the awkward 1 -> 6 jump on the way back.
     if (dir < 0) {
+        if (current <= 1) return 0;              // 1% -> Off
+        if (current <= amount) return 1;         // 5% -> 1%
         current -= amount;
-        if (current < BRIGHT_MIN_PCT) current = BRIGHT_MIN_PCT;
+        if (current < 0) current = 0;
     } else {
-        // Knulli's native sequence is ...10, 5, 1 on the way down and
-        // 1, 5, 10... on the way up. Avoid the awkward 1 -> 6 jump.
-        if (current <= BRIGHT_MIN_PCT) current = amount < BRIGHT_STEP ? BRIGHT_STEP : amount;
-        else current += amount;
+        if (current <= 0) return 1;              // Off -> 1%
+        if (current <= 1) return amount < BRIGHT_STEP ? BRIGHT_STEP : amount;
+        current += amount;
         if (current > 100) current = 100;
     }
     return current;
@@ -5134,7 +5154,8 @@ void apply_brightness(void) {
 #ifdef SNAPOS_TARGET_KNULLI
     int v = bright_pct_to_abs(p);
     char c[192];
-    snprintf(c, sizeof c, "LCD_BRIGHTNESS_MINIMUM=1 /usr/bin/brightness set %d >/dev/null 2>&1", v);
+    snprintf(c, sizeof c, "LCD_BRIGHTNESS_MINIMUM=%d /usr/bin/brightness set %d >/dev/null 2>&1",
+             v > 0 ? 1 : 0, v);   // the tool floors at its minimum, so Off has to lower it
     system(c);
     // Keep the system's persisted value in step too, so boot/loading screens
     // start at the exact same level. This must be synchronous: backgrounded
@@ -11692,7 +11713,7 @@ static void hotkey_volume(int dir, int step) {
 static void hotkey_brightness(int dir, int step) {
     brightness_pct = brightness_step_pct(brightness_pct, dir, step);
     // snap to the BRIGHT_STEP grid so every click lands on a clean level
-    if (brightness_pct > BRIGHT_MIN_PCT)
+    if (brightness_pct > 1)   // never let the grid snap 1% down onto Off
         brightness_pct = (brightness_pct + BRIGHT_STEP / 2) / BRIGHT_STEP * BRIGHT_STEP;
     if (brightness_pct < BRIGHT_MIN_PCT) brightness_pct = BRIGHT_MIN_PCT;
     if (brightness_pct > 100) brightness_pct = 100;
@@ -18441,7 +18462,10 @@ int main(int argc, char *argv[]) {
                             break;
                         }
 
-                        case ROW_DISP_BRIGHTNESS: snprintf(text, sizeof(text), "Brightness: %d%%", brightness_pct); indent = 1; break;
+                        case ROW_DISP_BRIGHTNESS:
+                            if (brightness_pct <= 0) snprintf(text, sizeof(text), "Brightness: Off");
+                            else snprintf(text, sizeof(text), "Brightness: %d%%", brightness_pct);
+                            indent = 1; break;
                         case ROW_DISP_AUTOSLEEP: snprintf(text, sizeof(text), "Auto-Sleep: %s", auto_sleep_labels[auto_sleep_idx]); indent = 1; break;
                         case ROW_DISP_LAUNCHMODE: snprintf(text, sizeof(text), "Launch Mode: %s", launch_fullscreen ? "Fullscreen" : "Windowed"); indent = 1; break;
                         case ROW_DISP_GAME_ASPECT: snprintf(text, sizeof(text), "Aspect Ratio: %s", game_aspect_names[(game_aspect_idx >= 0 && game_aspect_idx < GAME_ASPECT_COUNT) ? game_aspect_idx : 0]); indent = 1; break;
@@ -18485,7 +18509,13 @@ int main(int argc, char *argv[]) {
                         case ROW_G_ART_HEADER: snprintf(text, sizeof(text), "%c Columns/Rows", game_art_dropdown_open ? 'v' : '>'); break;
                         case ROW_G_GRID_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
                         case ROW_G_GRID_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
-                        case ROW_G_DISPLAY_ART_HEADER: snprintf(text, sizeof(text), "%c Display Art: %s", display_dropdown_open ? 'v' : '>', art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0]); break;
+                        case ROW_G_DISPLAY_ART_HEADER: {
+                            const char *ov = view_overrides_art();
+                            const char *an = art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0];
+                            if (ov) snprintf(text, sizeof(text), "%c Display Art: %s   (Favorites only - %s sets its own)",
+                                             display_dropdown_open ? 'v' : '>', an, ov);
+                            else    snprintf(text, sizeof(text), "%c Display Art: %s", display_dropdown_open ? 'v' : '>', an);
+                            break; }
                         case ROW_G_DISPLAY_ART_ITEM: {
                             int is_current = (row_extra[i] == display_art_idx);
                             snprintf(text, sizeof(text), "%s %s", is_current ? "*" : " ", art_type_names[row_extra[i]]);
