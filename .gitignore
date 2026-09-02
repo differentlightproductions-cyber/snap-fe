@@ -24,6 +24,7 @@ __pycache__/
 *.key
 thegamesdb.key
 _thegamesdb.key
+_VERSION
 
 # local test roms / scraped art / music — never commit
 roms/

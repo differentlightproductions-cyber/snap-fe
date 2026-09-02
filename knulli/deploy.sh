@@ -40,7 +40,17 @@ if [ -f knulli/thegamesdb.key ]; then
   cp -f knulli/thegamesdb.key ./_thegamesdb.key
   KEYSEED="_thegamesdb.key"
 fi
-tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
+# Stamp VERSION from the source constant. package.sh writes this for real
+# releases; deploy.sh used to leave it alone, so a dev deploy left whatever
+# version the last *packaged* install wrote and the device then reported a
+# release number it was not running.
+SNAPVER="$(sed -n 's/.*#define[[:space:]]\+SNAPFE_VERSION[[:space:]]\+"\(.*\)".*/\1/p' main.c | head -1)"
+[ -n "$SNAPVER" ] || SNAPVER="unknown (SNAPFE_VERSION not found in main.c)"
+printf 'Snap FE %s\nbuilt %s\nsource: knulli/deploy.sh (dev deploy, not a packaged release)\n' \
+  "$SNAPVER" "$(date -u +%FT%TZ)" > ./_VERSION
+echo "   version: $SNAPVER"
+
+tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED _VERSION assets \
   vendor/link-cores/gpsp_libretro.so vendor/link-cores/gambatte_libretro.so \
   -C knulli custom.sh \
 | ssh "$DEV" '
@@ -76,6 +86,7 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
   cp -f cores/gambatte_libretro.so /usr/lib/libretro/gambatte_libretro.so
   sync
   mv -f snapos_ui.aarch64 snapos_ui
+  mv -f _VERSION VERSION
   if [ -f _thegamesdb.key ]; then
     if [ -s config/thegamesdb.key ]; then
       rm -f _thegamesdb.key
@@ -109,6 +120,8 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED assets \
     echo "   NOTE: no exec bit (FAT /userdata). custom.sh runs it as: sh -c ./snapos_ui"
   fi
 '
+rm -f ./_VERSION
+
 echo
 echo ">> done. Reboot:  ssh $DEV reboot"
 echo "   revert:        ssh $DEV \"mv -f /userdata/system/custom.sh.pre-snapos /userdata/system/custom.sh 2>/dev/null || rm -f /userdata/system/custom.sh\""
