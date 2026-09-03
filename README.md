@@ -5,8 +5,46 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.5.** Not every emulator or system Knulli supports
+**Current release: Alpha 1.2.6.** Not every emulator or system Knulli supports
 is wired up yet. Expect alpha rough edges.
+
+### 1.2.6 highlights
+
+- **Both SD cards are visible now.** Knulli mounts exactly one card as its data
+  drive and leaves the other completely unmounted, so a second card of games
+  could not be reached by any frontend. Snap FE mounts it at startup, adds its
+  games to the library, and tells the two apart as TF1 and TF2 (the card
+  carrying `/boot` is TF1, whichever device node it came up as).
+- **Settings > Games > Storage & Games Folders** — a card list with size, mount
+  point and game count, and per-card actions: use for games, check folders,
+  create missing folders, browse, mount, eject. A blank card gets its per-system
+  folders created by copying the names your main card already uses, so Knulli's
+  `megadrive/` never ends up shadowed by an empty `genesis/`.
+- The first-run wizard can set a second card up in one press.
+- **Link Play saw only the first card** and so could not list games that the
+  library launched fine. It now scans every ROM folder. The scraper had the same
+  bug and now scrapes all of them.
+- **Link Play sessions outlive the game.** Quitting no longer ends the session
+  for both sides: discovery stays up through a game, your partner shows as being
+  in a game, and you land back in the lobby ready to start another. Leaving Link
+  Play is what ends it.
+- **In-game brightness and the Menu button work on more handhelds.** Both were
+  bound to button numbers measured on one specific device. The pad is now
+  resolved from its evdev keycodes, which are the same across these handhelds
+  even when the button *indices* are not.
+- **Full panel brightness.** 100% was mapped to 200 of the panel's 0-255 PWM
+  range, so about a fifth of it was unreachable. The flashlight was capped the
+  same way.
+- **Fix Game Titles** (Settings > Scraping, on by default) uses the name the
+  scraper matched instead of the filename, in the library, favourites and Link
+  Play. The name is saved during a normal scrape at no extra API cost.
+- Wi-Fi shows whether you are connected in a banner under the header. The old
+  fixed-height network list ran into the status line and the button hint.
+- **RG35XX-SP** added to the handheld list, and that setup step is now one
+  cycling row instead of a line per model.
+- Turning the backlight to Off no longer survives a reboot — the handheld used
+  to come back up rendering correctly behind a dark panel, with no way to see
+  the menu that would turn it back on.
 
 ### 1.2.5 highlights
 
@@ -189,7 +227,7 @@ has no SHARE drive — Knulli creates it on first boot, growing the partition to
 fill the card and formatting it exFAT so your computer can read it. Until then
 a PC sees only unreadable Linux partitions.
 
-Then download the release asset named `SnapFE-Alpha-1.2.5.zip`—not GitHub's
+Then download the release asset named `SnapFE-Alpha-1.2.6.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,

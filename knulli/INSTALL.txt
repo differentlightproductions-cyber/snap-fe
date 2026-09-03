@@ -1,12 +1,12 @@
-Snap FE - Alpha Build 1.2.5
+Snap FE - Alpha Build 1.2.6
 for Allwinner H700 Anbernic handhelds running Knulli.
-Built and tested on the RG34XX-SP and RG35XX-SP; other H700 RG XX devices
+Built and tested on the RG SP and RG35XX-SP; other H700 RG XX devices
 (RG35XX/H/Plus/Pro, RG40XX, RG28XX, CubeXX) should work but are untested.
 
 
 Install or update
 -----------------
-1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.5.zip. Do not download
+1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.6.zip. Do not download
    GitHub's automatically generated "Source code" ZIP.
 
 2. BOOT KNULLI ON THE HANDHELD ONCE FIRST, if you have not already.
@@ -57,7 +57,7 @@ On the SHARE drive, read or send these files:
    system/snapos/install.log
 
 The most common cause with 1.1.5 was extracting the version wrapper folder
-instead of putting system/ and roms/ at the root of SHARE. The 1.2.5 ZIP is
+instead of putting system/ and roms/ at the root of SHARE. The 1.2.6 ZIP is
 flat so "Extract to SHARE" now produces the correct layout automatically.
 
 
@@ -73,6 +73,23 @@ No SHARE drive on your computer?
   it as the data source in Knulli again.
 - You can skip the card entirely: with SSH or the network share enabled in
   Knulli, copy system/ and roms/ to /userdata over the network instead.
+
+
+Using a second SD card for games
+-------------------------------
+Knulli mounts only ONE card as its data drive and leaves the other one
+unmounted, so a second card full of games is invisible to any frontend until
+something mounts it. Snap FE now does that for you at startup and adds the
+card's roms folder to your library automatically.
+
+If the second card is blank, open
+
+   Settings > Games > Storage & Games Folders
+
+pick the card, and choose "Use this card for games". Snap FE creates the
+per-system folders on it, copying the names your main card already uses.
+The same screen can check for missing folders, mount or eject a card, and
+shows how many games are on each.
 
 
 Restore EmulationStation
