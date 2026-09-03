@@ -184,7 +184,12 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
 
 ## Install or update
 
-Download the release asset named `SnapFE-Alpha-1.2.5.zip`—not GitHub's
+**Boot Knulli on the handheld once before you start.** A freshly flashed card
+has no SHARE drive — Knulli creates it on first boot, growing the partition to
+fill the card and formatting it exFAT so your computer can read it. Until then
+a PC sees only unreadable Linux partitions.
+
+Then download the release asset named `SnapFE-Alpha-1.2.5.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,

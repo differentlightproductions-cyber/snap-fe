@@ -1,15 +1,26 @@
-Snap FE - Alpha Build 1.2.4
-for H700 Anbernic RG34XX-SP / RG34XX devices running Knulli
+Snap FE - Alpha Build 1.2.5
+for Allwinner H700 Anbernic handhelds running Knulli.
+Built and tested on the RG34XX-SP and RG35XX-SP; other H700 RG XX devices
+(RG35XX/H/Plus/Pro, RG40XX, RG28XX, CubeXX) should work but are untested.
 
 
 Install or update
 -----------------
-1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.4.zip. Do not download
+1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.5.zip. Do not download
    GitHub's automatically generated "Source code" ZIP.
 
-2. Turn the handheld off and put the Knulli SD card in your computer.
+2. BOOT KNULLI ON THE HANDHELD ONCE FIRST, if you have not already.
 
-3. Open the drive named SHARE and extract the contents of this ZIP DIRECTLY
+   There is no SHARE drive on a freshly flashed card. Knulli creates it on
+   its first boot: it grows the partition to fill the card and formats it
+   exFAT so your computer can read it. Skip this and your PC will show only
+   unreadable Linux partitions and no SHARE.
+
+   Let it reach the menu, then power the handheld off.
+
+3. Turn the handheld off and put the Knulli SD card in your computer.
+
+4. Open the drive named SHARE and extract the contents of this ZIP DIRECTLY
    onto SHARE. After extraction, these paths must exist:
 
       SHARE/system/snapos/snapos_ui
@@ -19,9 +30,9 @@ Install or update
    scraped art, BIOS, and account files are not included in the package and
    are not removed.
 
-4. Safely eject the card, put it back in the handheld, and boot Knulli.
+5. Safely eject the card, put it back in the handheld, and boot Knulli.
 
-5. In EmulationStation, open PORTS and run:
+6. In EmulationStation, open PORTS and run:
 
       Snap FE (Set As Default)
 
@@ -46,8 +57,22 @@ On the SHARE drive, read or send these files:
    system/snapos/install.log
 
 The most common cause with 1.1.5 was extracting the version wrapper folder
-instead of putting system/ and roms/ at the root of SHARE. The 1.2.4 ZIP is
+instead of putting system/ and roms/ at the root of SHARE. The 1.2.5 ZIP is
 flat so "Extract to SHARE" now produces the correct layout automatically.
+
+
+No SHARE drive on your computer?
+-------------------------------
+- Most often the card has never been booted in the handheld. See step 2.
+- Windows cannot read Linux filesystems, so the other partitions on the card
+  will look unreadable or prompt you to format them. That is normal. Ignore
+  them and never let Windows format anything.
+- Rarely, Knulli's on-device exFAT formatting produces a partition Windows
+  sees in Disk Management but will not assign a drive letter to. Repartition
+  and format the card with a tool such as MiniTool Partition Wizard, then set
+  it as the data source in Knulli again.
+- You can skip the card entirely: with SSH or the network share enabled in
+  Knulli, copy system/ and roms/ to /userdata over the network instead.
 
 
 Restore EmulationStation
