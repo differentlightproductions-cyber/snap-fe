@@ -6731,7 +6731,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         wy += nameh + 4;
 
         SDL_Texture *hint = render_text_fit(ren, font_label,
-            "Right: tune   Sel: Play/Stop", g_ui_dim, wmaxw);
+            "Right: tune   Sel: Play", g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
         return;
@@ -18456,13 +18456,15 @@ int main(int argc, char *argv[]) {
                 // of their own slot and below the status bar. They are drawn
                 // last so art or a long title can never cover them.
                 if (w1 != HOME_WIDGET_NONE) {
-                    const char *keys = (w1 == HOME_WIDGET_RADIO || w2 == HOME_WIDGET_RADIO) ? "R1" : "L1  R1";
+                    // Both keys always cycle now -- Radio no longer takes L1/L2
+                    // for tuning, so the hint no longer has to hide them.
+                    const char *keys = "L1  R1";
                     SDL_Texture *b = render_text(ren, font_fixed ? font_fixed : font_label, keys, th->accent2);
                     int bw, bh; SDL_QueryTexture(b, NULL, NULL, &bw, &bh);
                     SDL_RenderCopy(ren, b, NULL, &(SDL_Rect){ WIN_W - 16 - bw, home_widget_draw_top[0], bw, bh });
                 }
                 if (w2 != HOME_WIDGET_NONE) {
-                    const char *keys = (w1 == HOME_WIDGET_RADIO || w2 == HOME_WIDGET_RADIO) ? "R2" : "L2  R2";
+                    const char *keys = "L2  R2";
                     SDL_Texture *b = render_text(ren, font_fixed ? font_fixed : font_label, keys, th->accent2);
                     int bw, bh; SDL_QueryTexture(b, NULL, NULL, &bw, &bh);
                     SDL_RenderCopy(ren, b, NULL, &(SDL_Rect){ WIN_W - 16 - bw, home_widget_draw_top[1], bw, bh });
@@ -19601,10 +19603,12 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_GRP_LIBVIEW: snprintf(text, sizeof(text), "%c Library View", disp_grp_libview_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_LIB_VIEW:
                             if (library_view_idx < 0)
-                                snprintf(text, sizeof(text), "Library View: Follow Systems View (%s)",
-                                         view_style_names[platform_view_style % VIEW_STYLE_COUNT]);
+                                // The resolved name is long enough to be
+                                // ellipsised here, and the Systems View group
+                                // right above already shows it.
+                                snprintf(text, sizeof(text), "Layout: Follow Systems View");
                             else
-                                snprintf(text, sizeof(text), "Library View: %s", view_style_names[library_view_idx]);
+                                snprintf(text, sizeof(text), "Layout: %s", view_style_names[library_view_idx]);
                             indent = 1; break;
                         case ROW_DISP_LIB_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
                         case ROW_DISP_LIB_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
@@ -19622,7 +19626,7 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_PLAYER_NAME: snprintf(text, sizeof(text), "Your Name: %s", player_name[0] ? player_name : "(not set - press A)"); indent = 1; break;
                         case ROW_DISP_FONT_COLOR: snprintf(text, sizeof(text), "System Font Color: %s", font_color_names[(global_font_color_idx >= 0 && global_font_color_idx < FONT_COLOR_COUNT) ? global_font_color_idx : 0]); indent = 1; break;
 
-                        case ROW_DISP_CONSOLE_VIEW: snprintf(text, sizeof(text), "Systems View: %s", view_style_names[platform_view_style]); indent = 1; break;
+                        case ROW_DISP_CONSOLE_VIEW: snprintf(text, sizeof(text), "Layout: %s", view_style_names[platform_view_style]); indent = 1; break;
                         case ROW_DISP_ART_HEADER: snprintf(text, sizeof(text), "%c Display Art: %s", display_dropdown_open ? 'v' : '>', art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0]); indent = 1; break;
                         case ROW_DISP_ART_ITEM: {
                             int is_current = (row_extra[i] == display_art_idx);
