@@ -768,7 +768,20 @@ char wifi_status[96] = "";
 int  wifi_connected_now = 0;       // drives the connection banner's wording AND its colour
 char wifi_conn_ssid[64] = "";      // network we are actually on ("" if unknown)
 char wifi_saved_ssid[64] = "";     // the remembered network, "" once forgotten
+// The last network the user picked here on purpose. Reconnecting to THAT is
+// not a decision worth interrupting them for; being moved to a different one
+// is. Persisted so it survives a restart.
+char wifi_user_ssid[64] = "";
 int  wifi_forget_confirm = -1;     // index armed for a second X press, -1 = none
+// A connection attempt in flight. Without this, the 2-second status refresh
+// overwrote "Connecting..." with "not connected" on its very next tick, so an
+// attempt showed no progress and a wrong password looked identical to success.
+int    wifi_try_active = 0;
+char   wifi_try_ssid[64] = "";
+char   wifi_try_svc[96] = "";
+Uint32 wifi_try_started = 0;
+#define WIFI_TRY_TIMEOUT_MS 32000
+int    wifi_status_err = 0;        // last result was a failure -> banner turns red
 char wifi_target_ssid[64] = "";    // network we're entering a password for
 int  wifi_scanning = 0;            // show a "Scanning..." screen, then run the (blocking) scan
 int  wifi_scan_shown = 0;          // one frame has been presented showing "Scanning..."
@@ -4955,6 +4968,7 @@ void load_settings() {
         else if (strcmp(key, "home_icon_pack_idx") == 0) home_icon_pack_idx = (val >= 0 && val < HOME_ICON_PACK_COUNT) ? val : 0;
         else if (strcmp(key, "library_view_idx") == 0) library_view_idx = (val >= -1 && val < VIEW_STYLE_COUNT) ? val : -1;
         else if (strcmp(key, "link_host_name") == 0) snprintf(link_host_name, sizeof link_host_name, "%.39s", valstr);
+        else if (strcmp(key, "wifi_user_ssid") == 0) snprintf(wifi_user_ssid, sizeof wifi_user_ssid, "%.63s", valstr);
         else if (strcmp(key, "favorites_view_idx") == 0) favorites_view_idx = (val >= 0 && val < FAVORITES_VIEW_COUNT) ? val : 0;
         else if (strcmp(key, "show_empty_systems") == 0) show_empty_systems = val;
         else if (strcmp(key, "setup_done") == 0) setup_done = val;
@@ -5112,6 +5126,7 @@ void save_settings() {
     fprintf(f, "home_icon_pack_idx=%d\n", home_icon_pack_idx);
     fprintf(f, "library_view_idx=%d\n", library_view_idx);
     fprintf(f, "link_host_name=%s\n", link_host_name);
+    fprintf(f, "wifi_user_ssid=%s\n", wifi_user_ssid);
     fprintf(f, "favorites_view_idx=%d\n", favorites_view_idx);
     fprintf(f, "show_empty_systems=%d\n", show_empty_systems);
     fprintf(f, "setup_done=%d\n", setup_done);
@@ -12863,7 +12878,10 @@ static void wifi_forget_network(int idx) {
     wifi_ssid_saved[idx] = 0;
     snprintf(wifi_status, sizeof wifi_status, "Forgot \"%.40s\"", wifi_ssids[idx]);
 }
+static void wifi_try_tick(void);   // defined with wifi_connect below
+
 static void wifi_refresh_status(void) {
+    if (wifi_try_active) { wifi_try_tick(); return; }   // an attempt owns the status line
     wifi_saved_ssid[0] = '\0';
     { FILE *sp = popen("/usr/bin/knulli-settings-get wifi.ssid 2>/dev/null", "r");
       if (sp) { if (fgets(wifi_saved_ssid, sizeof wifi_saved_ssid, sp))
@@ -12879,6 +12897,7 @@ static void wifi_refresh_status(void) {
         if (fgets(ip, sizeof ip, p)) { ip[strcspn(ip, "\r\n/")] = '\0'; }
         pclose(p);
         wifi_connected_now = ip[0] != '\0';
+        if (wifi_connected_now) wifi_status_err = 0;
         if (wifi_connected_now) {
             wifi_conn_ssid[0] = '\0';
             FILE *sp = popen("/usr/bin/knulli-settings-get wifi.ssid 2>/dev/null", "r");
@@ -12905,7 +12924,65 @@ static void wifi_connect(const char *ssid, const char *psk) {
     sh_squote(psk, qp, sizeof qp);
     snprintf(cmd, sizeof cmd, "/usr/bin/knulli-wifi enable %s %s >/dev/null 2>&1 &", qs, qp);
     system(cmd);
+    snprintf(wifi_try_ssid, sizeof wifi_try_ssid, "%.63s", ssid);
+    wifi_try_svc[0] = '\0';
+    for (int i = 0; i < wifi_ssid_count; i++)        // remember its service id
+        if (!strcmp(wifi_ssids[i], ssid)) { snprintf(wifi_try_svc, sizeof wifi_try_svc, "%s", wifi_ssid_svc[i]); break; }
+    snprintf(wifi_user_ssid, sizeof wifi_user_ssid, "%.63s", ssid);   // an explicit choice
+    save_settings();
+    wifi_try_active = 1;
+    wifi_status_err = 0;
+    wifi_try_started = SDL_GetTicks();
     snprintf(wifi_status, sizeof wifi_status, "Connecting to %.48s...", ssid);
+}
+
+// Watch an attempt through to a definite answer, and say which one it was.
+// ConnMan records why a service failed, so a wrong password can be reported as
+// a wrong password instead of just "not connected".
+static void wifi_try_tick(void) {
+    if (!wifi_try_active) return;
+    Uint32 el = SDL_GetTicks() - wifi_try_started;
+
+    if (wifi_has_route()) {                       // got an address: it worked
+        wifi_try_active = 0;
+        wifi_connected_now = 1;
+        snprintf(wifi_conn_ssid, sizeof wifi_conn_ssid, "%.63s", wifi_try_ssid);
+        snprintf(wifi_saved_ssid, sizeof wifi_saved_ssid, "%.63s", wifi_try_ssid);
+        wifi_status_err = 0;
+        snprintf(wifi_status, sizeof wifi_status, "Connected to %.40s", wifi_try_ssid);
+        return;
+    }
+
+    char err[64] = "";
+    if (wifi_try_svc[0]) {                        // ask ConnMan what went wrong
+        char cmd[220];
+        snprintf(cmd, sizeof cmd,
+                 "connmanctl services %s 2>/dev/null | awk -F'= ' '/Error/{print $2; exit}'", wifi_try_svc);
+        FILE *p = popen(cmd, "r");
+        if (p) { if (fgets(err, sizeof err, p)) err[strcspn(err, "\r\n")] = '\0'; pclose(p); }
+    }
+
+    if (err[0]) {
+        wifi_try_active = 0;
+        wifi_status_err = 1;
+        if (strstr(err, "invalid-key"))
+            snprintf(wifi_status, sizeof wifi_status,
+                     "Wrong password for %.30s -- press A to try again", wifi_try_ssid);
+        else if (strstr(err, "out-of-range"))
+            snprintf(wifi_status, sizeof wifi_status, "%.30s is out of range", wifi_try_ssid);
+        else
+            snprintf(wifi_status, sizeof wifi_status, "Could not join %.30s (%.20s)", wifi_try_ssid, err);
+        return;
+    }
+
+    if (el > WIFI_TRY_TIMEOUT_MS) {
+        wifi_try_active = 0;
+        wifi_status_err = 1;
+        snprintf(wifi_status, sizeof wifi_status,
+                 "%.30s did not respond -- check the password and try again", wifi_try_ssid);
+        return;
+    }
+    snprintf(wifi_status, sizeof wifi_status, "Connecting to %.40s...  (%us)", wifi_try_ssid, el / 1000);
 }
 static void wifi_set_enabled(int on) {
     system(on ? "/usr/bin/knulli-wifi enable >/dev/null 2>&1 &"
@@ -12955,10 +13032,20 @@ static void wifi_reconnect_tick(void) {
             wifi_prompt_ssid[strcspn(wifi_prompt_ssid, "\r\n")] = '\0';
         pclose(p);
     }
+    // Rejoining the network the user chose is not a change of network, so just
+    // do it -- otherwise a handheld that drops wifi stays offline until someone
+    // is looking at the Home screen to answer. Only ask when this would put
+    // them somewhere they did not pick.
+    if (wifi_prompt_ssid[0] &&
+        (!wifi_user_ssid[0] || strcmp(wifi_prompt_ssid, wifi_user_ssid) == 0)) {
+        wifi_do_saved_reconnect();
+        return;
+    }
     wifi_prompt_active = 1;   // Home draws it; A connects, B declines
 }
 #else
 static void wifi_scan(void) { wifi_ssid_count = 0; }
+static void wifi_try_tick(void) {}
 static void wifi_forget_network(int idx) { (void)idx; }
 static void wifi_refresh_status(void) { snprintf(wifi_status, sizeof wifi_status, "Wi-Fi (device only)"); }
 static void wifi_connect(const char *ssid, const char *psk) { (void)ssid; (void)psk; }
@@ -20886,7 +20973,8 @@ int main(int argc, char *argv[]) {
 
         } else if (state == STATE_WIFI) {
             static Uint32 wifi_last_refresh = 0;
-            if (!promo_mode && !wifi_scanning && SDL_GetTicks() - wifi_last_refresh > 2000) {
+            if (!promo_mode && !wifi_scanning &&
+                SDL_GetTicks() - wifi_last_refresh > (Uint32)(wifi_try_active ? 400 : 2000)) {
                 wifi_refresh_status();          // so "Connecting..." resolves to an IP on its own
                 wifi_last_refresh = SDL_GetTicks();
             }
@@ -20904,7 +20992,9 @@ int main(int argc, char *argv[]) {
             // appeared in the status bar.
             if (wifi_status[0]) {
                 int pending = strstr(wifi_status, "...") != NULL;
-                SDL_Color fg = wifi_connected_now ? th->accent3 : (pending ? th->accent2 : g_ui_dim);
+                SDL_Color fg = wifi_status_err   ? (SDL_Color){ 220, 90, 80, 255 }
+                             : wifi_connected_now ? th->accent3
+                             : pending            ? th->accent2 : g_ui_dim;
                 SDL_Texture *bt2 = render_text_fit(ren, font_label, wifi_status, fg, WIN_W - 2*hx - 24);
                 int btw, bth; SDL_QueryTexture(bt2, NULL, NULL, &btw, &bth);
                 SDL_Rect band = { hx - 8, y, WIN_W - 2*hx + 16, bth + 12 };
