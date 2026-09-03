@@ -614,6 +614,41 @@ int brightness_pct = 100;
 int night_brightness_pct = 35;   // persisted: the level Night Mode snaps to
 int g_pre_night_brightness = -1;  // brightness before Night Mode took over (-1 = not saved)
 
+// --- Pad buttons: physical keycodes, not SDL indices ----------------------
+//
+// SDL numbers joystick buttons by walking the device's evdev key bitmap in
+// ascending keycode order, so an index only means something on the handheld it
+// was measured on. The RG35XX-SP has no BTN_TR2 and no BTN_MODE, so every index
+// above BTN_TL2 shifts down by one or two: the Menu key that is 16 on an
+// RG34XX-SP is 14 there, which is R2's slot -- pressing Menu changed the view
+// instead of running its gesture.
+//
+// The evdev keycodes below are identical on both, so resolve indices from the
+// kernel at startup and treat these as the real identities.
+#define PADK_VOLDOWN 114   // KEY_VOLUMEDOWN
+#define PADK_VOLUP   115   // KEY_VOLUMEUP
+#define PADK_A       304   // BTN_SOUTH   (Anbernic wires these to its own layout;
+#define PADK_B       305   // BTN_EAST     the NAME does not match the face button,
+#define PADK_Y       306   // BTN_C        only the index order matters)
+#define PADK_X       307   // BTN_NORTH
+#define PADK_L1      308   // BTN_WEST
+#define PADK_R1      309   // BTN_Z
+#define PADK_SELECT  310   // BTN_TL
+#define PADK_START   311   // BTN_TR
+#define PADK_MOD     312   // BTN_TL2 -- held as the brightness modifier
+#define PADK_L2      314   // BTN_SELECT
+#define PADK_R2      315   // BTN_START
+#define PADK_MENU    354   // KEY_GOTO -- the dedicated Menu/Fn key
+
+#define PAD_KEY_MAX 768
+static int g_pad_index_of_key[PAD_KEY_MAX];
+static int g_pad_nbuttons = 0;      // 0 = not resolved, fall back to the literals
+int pad_idx(int keycode, int fallback) {
+    if (!g_pad_nbuttons || keycode < 0 || keycode >= PAD_KEY_MAX) return fallback;
+    int v = g_pad_index_of_key[keycode];
+    return v >= 0 ? v : -1;         // resolved, and this pad genuinely lacks the key
+}
+
 // --- Rebindable hotkey buttons (raw SDL joystick button numbers) ------------
 // Defaults for the Anbernic RG34XX-SP: its two volume keys enumerate as joy
 // buttons 1 and 2; button 11 is the Menu/fn key used as a modifier.
@@ -11092,6 +11127,52 @@ const char *gamepad_evdev_name(void) {
     return name;   // "" if none yet -- retried on the next call, never cached
 }
 
+// Ask the kernel which keys this pad has and reproduce SDL's numbering, so the
+// button identities above resolve to the right indices on any of these
+// handhelds instead of only the one the table was measured on.
+void pad_indices_build(void) {
+    g_pad_nbuttons = 0;
+    for (int i = 0; i < PAD_KEY_MAX; i++) g_pad_index_of_key[i] = -1;
+#ifdef SNAPOS_TARGET_KNULLI
+    const char *pad = gamepad_evdev_name();
+    char path[64];
+    if (!pad[0] || !find_evdev_for(pad, path, sizeof path)) return;
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return;
+    unsigned long bits[(PAD_KEY_MAX / (sizeof(unsigned long) * 8)) + 1];
+    memset(bits, 0, sizeof bits);
+    if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof bits), bits) < 0) { close(fd); return; }
+    close(fd);
+    int n = 0;
+    for (int k = 0; k < PAD_KEY_MAX; k++) {
+        size_t w = (size_t)k / (sizeof(unsigned long) * 8);
+        size_t b = (size_t)k % (sizeof(unsigned long) * 8);
+        if ((bits[w] >> b) & 1UL) g_pad_index_of_key[k] = n++;
+    }
+    g_pad_nbuttons = n;
+
+    // The Menu/Fn key is not rebindable in Settings > Hotkeys, so its stored
+    // number is never a deliberate choice -- always re-derive it. A saved
+    // hk_flashlight_btn=16 on a 15-button RG35XX-SP landed on R2's slot, which
+    // is why Menu changed the view instead of running its tap gesture.
+    { int r = pad_idx(PADK_MENU, HK_FLASHLIGHT_DEFAULT);
+      if (r >= 0) hk_flashlight_btn = r; }
+
+    // Volume and the modifier ARE rebindable, so only correct them when the
+    // saved number cannot exist on this pad at all.
+    struct { int *var; int key; int fallback; } fixups[] = {
+        { &hk_volup_btn,   PADK_VOLUP,   HK_VOLUP_DEFAULT   },
+        { &hk_voldown_btn, PADK_VOLDOWN, HK_VOLDOWN_DEFAULT },
+        { &hk_mod_btn,     PADK_MOD,     HK_MOD_DEFAULT     },
+    };
+    for (int i = 0; i < (int)(sizeof fixups / sizeof fixups[0]); i++) {
+        if (*fixups[i].var < g_pad_nbuttons) continue;   // in range: leave the rebind alone
+        int r = pad_idx(fixups[i].key, fixups[i].fallback);
+        if (r >= 0) *fixups[i].var = r;
+    }
+#endif
+}
+
 static void gamepad_evdev_open(void) {
     char path[64];
     const char *pad = gamepad_evdev_name();
@@ -13114,24 +13195,23 @@ static void bt_agent_answer_code(const char *code) { (void)code; bt_confirm_pend
 static void bt_agent_cleanup(void) {}
 #endif
 
-// Button numbers are the raw SDL joystick indices for the Anbernic RG34XX-SP,
-// per Knulli's own es_input.cfg: a=3 b=4 y=5 x=6 l1=7 r1=8 select=9 start=10
-// hotkey=11 l2=13 r2=14, d-pad on hat 0.
+// Resolved from the pad's own keycodes (see PADK_* above). The literals are the
+// RG34XX-SP indices, kept only as the fallback for a build or device where the
+// evdev bitmap cannot be read.
 static SDL_Keycode pad_map_joybutton(int b) {
-    switch (b) {
-        case 3:  return SDLK_RETURN;   // A -> confirm / launch
-        case 10: return SDLK_F1;       // Start -> open Settings
-        case 4:  return SDLK_ESCAPE;   // B -> back / cancel
-        case 9:  return SDLK_SLASH;    // Select -> search (Game Library)
-        case 16: return SDLK_UNKNOWN;  // Menu/Fn is handled as a SNAP gesture before mapping
-        case 5:  return SDLK_f;        // Y -> favorite toggle
-        case 6:  return SDLK_s;        // X -> cycle sort (Game Library)
-        case 7:  return SDLK_q;        // L1 -> scroll / step through content (lists, blurb, tracks)
-        case 8:  return SDLK_e;        // R1 -> scroll / step through content
-        case 13: return SDLK_PAGEUP;   // L2 -> previous view / settings tab
-        case 14: return SDLK_PAGEDOWN; // R2 -> next     view / settings tab
-        default: return SDLK_UNKNOWN;
-    }
+    if (b < 0) return SDLK_UNKNOWN;
+    if (b == pad_idx(PADK_A,      3))  return SDLK_RETURN;   // A -> confirm / launch
+    if (b == pad_idx(PADK_START,  10)) return SDLK_F1;       // Start -> open Settings
+    if (b == pad_idx(PADK_B,      4))  return SDLK_ESCAPE;   // B -> back / cancel
+    if (b == pad_idx(PADK_SELECT, 9))  return SDLK_SLASH;    // Select -> search (Game Library)
+    if (b == pad_idx(PADK_MENU,   16)) return SDLK_UNKNOWN;  // Menu/Fn is a SNAP gesture, handled before mapping
+    if (b == pad_idx(PADK_Y,      5))  return SDLK_f;        // Y -> favorite toggle
+    if (b == pad_idx(PADK_X,      6))  return SDLK_s;        // X -> cycle sort (Game Library)
+    if (b == pad_idx(PADK_L1,     7))  return SDLK_q;        // L1 -> scroll / step through content
+    if (b == pad_idx(PADK_R1,     8))  return SDLK_e;        // R1 -> scroll / step through content
+    if (b == pad_idx(PADK_L2,     13)) return SDLK_PAGEUP;   // L2 -> previous view / settings tab
+    if (b == pad_idx(PADK_R2,     14)) return SDLK_PAGEDOWN; // R2 -> next     view / settings tab
+    return SDLK_UNKNOWN;
 }
 
 // Commit the on-screen keyboard buffer to wherever it was opened for.
@@ -15007,6 +15087,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Resolve the pad's button numbering from the kernel. Must run after
+    // load_settings(), so a binding saved on a handheld with more buttons can
+    // be corrected for this one.
+    pad_indices_build();
+
     // Knulli mounts one data partition as /userdata and leaves the other card
     // unmounted, so a two-card handheld shows one card's games and no sign the
     // other exists. Mount it ourselves before anything scans for ROMs.
@@ -15128,8 +15213,8 @@ int main(int argc, char *argv[]) {
                 }
                 // Night-mode chord: Select then X within ~1s (opt-in in Settings).
                 static Uint32 g_select_at = 0;
-                if (jb == 9) g_select_at = SDL_GetTicks();
-                if (jb == 6 && night_hotkey_on && SDL_GetTicks() - g_select_at < 1000) {
+                if (jb == pad_idx(PADK_SELECT, 9)) g_select_at = SDL_GetTicks();
+                if (jb == pad_idx(PADK_X, 6) && night_hotkey_on && SDL_GetTicks() - g_select_at < 1000) {
                     night_force = !night_force; play_click();
                     osd_kind = 3; osd_value = night_force; osd_until = SDL_GetTicks() + 1400;
                 }
