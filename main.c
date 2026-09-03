@@ -8665,6 +8665,7 @@ static int count_games_under(const char *base) {
 // Scan every mounted spot a ROM tree could live and adopt ALL that hold games
 // (up to ROMS_ROOT_MAX), primary card first. Scans then read from all of them.
 // verbose != 0 -> also fill roms_status[] for the UI.
+static int dir_has_subdirs(const char *path);   // defined with the folder manager below
 void roms_detect_and_apply(int verbose) {
 #ifdef SNAPOS_TARGET_KNULLI
     const char *primary = "/userdata/roms";
@@ -8708,7 +8709,12 @@ void roms_detect_and_apply(int verbose) {
     snprintf(g_roms_roots[g_roms_nroots++], 512, "%s", cand[0]);
     int extra = 0;
     for (int i = 1; i < nc && g_roms_nroots < ROMS_ROOT_MAX; i++)
-        if (cnt[i] > 0) { snprintf(g_roms_roots[g_roms_nroots++], 512, "%s", cand[i]); extra++; }
+        // Keep a folder that holds games, and also one that has been set up but
+        // not filled yet -- dropping that on the next rescan would silently undo
+        // the user's choice right after they made it.
+        if (cnt[i] > 0 || dir_has_subdirs(cand[i])) {
+            snprintf(g_roms_roots[g_roms_nroots++], 512, "%s", cand[i]); extra++;
+        }
 
     // If it's just the one default folder, drop back to "no override" so the
     // config stays clean.
@@ -8737,6 +8743,85 @@ void roms_detect_and_apply(int verbose) {
         platform_has_games_cache[p]  = -1;
     }
     save_settings();
+}
+
+// Does this folder contain at least one subdirectory? Used to tell a games
+// folder that has been set up (system folders present, no ROMs copied yet)
+// apart from an unrelated folder that just happens to be selected.
+static int dir_has_subdirs(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    struct dirent *e; int found = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        char full[900];
+        snprintf(full, sizeof full, "%.700s/%.150s", path, e->d_name);
+        struct stat st;
+        if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+// Create the per-system folders in a games folder that has none.
+//
+// A second SD card is blank until something lays this structure down, and on
+// KNULLI that is done once, for the primary card, at first boot -- so a card
+// added later (or added while a different frontend is running) stays empty and
+// invisible. Rather than inventing names, mirror whatever the main card
+// already uses: KNULLI's folder names do not always match Snap FE's canonical
+// slugs (megadrive vs genesis), and copying the main card is right by
+// construction. Falls back to the built-in table if the main card cannot be
+// read. Returns the number of folders created.
+static int roms_scaffold(const char *root) {
+    if (!root || !root[0]) return 0;
+    mkdir(root, 0777);
+    int made = 0;
+
+    const char *primary =
+#ifdef SNAPOS_TARGET_KNULLI
+        "/userdata/roms";
+#else
+        NULL;
+#endif
+    char pbuf[512];
+    if (!primary) {
+        snprintf(pbuf, sizeof pbuf, "%s/snapos-ui/roms", getenv("HOME") ? getenv("HOME") : "/tmp");
+        primary = pbuf;
+    }
+
+    int seen = 0;   // source folders found, whether or not they were created
+    DIR *d = (strcmp(root, primary) == 0) ? NULL : opendir(primary);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char src[900], dst[900];
+            snprintf(src, sizeof src, "%.700s/%.150s", primary, e->d_name);
+            struct stat st;
+            if (stat(src, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            snprintf(dst, sizeof dst, "%.700s/%.150s", root, e->d_name);
+            seen++;
+            if (mkdir(dst, 0777) == 0) made++;
+        }
+        closedir(d);
+    }
+    // Fall back only when there was nothing to mirror. Keying this off `made`
+    // instead meant a folder that already matched the main card fell through to
+    // the table and created canonical slugs beside the real ones -- an empty
+    // "genesis/" next to the "megadrive/" that actually holds the games.
+    if (seen == 0) {
+        for (int i = 0; i < PLATFORM_COUNT; i++) {
+            char dst[900];
+            snprintf(dst, sizeof dst, "%.700s/%.150s", root, platform_dirs[i]);
+            if (mkdir(dst, 0777) == 0) made++;
+            if (platform_dir_alt[i]) {
+                snprintf(dst, sizeof dst, "%.700s/%.150s", root, platform_dir_alt[i]);
+                mkdir(dst, 0777);
+            }
+        }
+    }
+    return made;
 }
 
 // --- Interactive ROM-folder manager --------------------------------------
@@ -8809,6 +8894,18 @@ static void romfs_add_current(void) {
         snprintf(romfs_message, sizeof romfs_message, "Three-folder maximum reached"); return;
     }
     snprintf(g_roms_roots[g_roms_nroots++], sizeof g_roms_roots[0], "%s", romfs_path);
+    // A blank card has no system folders and nothing else will create them, so
+    // do it here -- otherwise the folder is added and still shows no games with
+    // nowhere obvious to put any.
+    if (!dir_has_subdirs(romfs_path)) {
+        int made = roms_scaffold(romfs_path);
+        if (made > 0)
+            snprintf(romfs_message, sizeof romfs_message,
+                     "Folder added and set up: %d system folders created. Copy games in, then Rescan.", made);
+        else
+            snprintf(romfs_message, sizeof romfs_message,
+                     "Folder added, but its system folders could not be created (read-only?).");
+    } else
     snprintf(romfs_message, sizeof romfs_message, "Folder added. Choose Rescan to update the library.");
     save_settings(); romfs_browsing = 0; romfs_sel = 0;
 }
