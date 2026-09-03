@@ -710,6 +710,8 @@ int  wifi_ssid_count = 0;
 int  wifi_sel = 0;                 // 0 = On/Off, 1 = Rescan, 2.. = networks
 int  wifi_enabled_now = 0;
 char wifi_status[96] = "";
+int  wifi_connected_now = 0;       // drives the connection banner's wording AND its colour
+char wifi_conn_ssid[64] = "";      // network we are actually on ("" if unknown)
 char wifi_target_ssid[64] = "";    // network we're entering a password for
 int  wifi_scanning = 0;            // show a "Scanning..." screen, then run the (blocking) scan
 int  wifi_scan_shown = 0;          // one frame has been presented showing "Scanning..."
@@ -781,12 +783,14 @@ static int night_active_now(void) {
 typedef struct { const char *name; int w, h; int has_sticks; const char *note; } DeviceProfile;
 static const DeviceProfile device_profiles[] = {
     { "Anbernic RG34XX-SP", 720, 480, 1, "Clamshell, with dual analog sticks." },
+    { "Anbernic RG35XX-SP", 640, 480, 0, "Clamshell, 4:3 panel. D-pad only -- no analog sticks." },
     { "Anbernic RG SP",     720, 480, 0, "Clamshell. D-pad only -- no analog sticks." },
     { "Anbernic RG34XX",    720, 480, 0, "D-pad only -- no analog sticks." },
     { "Generic 640x480",    640, 480, 0, "Fallback layout for other 4:3 devices." },
     { "Generic 720x480",    720, 480, 0, "Fallback layout for other wide 3:2 devices." },
 };
-#define DEVICE_PROFILE_COUNT 5
+// sizeof-derived: a hand-kept count silently hides every model added past it.
+#define DEVICE_PROFILE_COUNT ((int)(sizeof(device_profiles) / sizeof(device_profiles[0])))
 int device_idx = 0;            // persisted; index into device_profiles[]
 
 #ifdef SNAPOS_TARGET_KNULLI
@@ -3466,6 +3470,7 @@ int display_dropdown_open = 0;
 int scrape_description = 0;
 int show_description = 0;
 int only_scrape_missing = 1; // ON by default: never re-fetch something already cached, saves API quota
+int fix_game_titles = 1;     // use the name the scraper returned instead of the filename
 
 // Scrape source: 0 = TheGamesDB (API key), 1 = ScreenScraper (account login).
 // ss_user / ss_pass are declared up with the other credential globals.
@@ -3587,6 +3592,7 @@ int DEVICE_COUNT = 2;
 #define ROW_DISPLAY_ITEM 5
 #define ROW_SCRAPE_NOW 7
 #define ROW_ONLY_MISSING 8
+#define ROW_FIX_TITLES 61
 #define ROW_ACCT_RESTORE 9
 #define ROW_RA_HEADER 10
 #define ROW_RA_ENABLED 11
@@ -3651,6 +3657,7 @@ int build_account_rows(int *row_type, int *row_extra) {
                 }
         }
         row_type[idx] = ROW_ONLY_MISSING; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_FIX_TITLES; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_SCRAPE_NOW; row_extra[idx] = 0; idx++;
     }
     row_type[idx] = ROW_RA_HEADER; row_extra[idx] = 0; idx++;
@@ -4914,6 +4921,7 @@ void load_settings() {
         else if (strcmp(key, "scrape_source") == 0) scrape_source = (val == 1) ? 1 : 0;
         else if (strcmp(key, "show_description") == 0) show_description = val;
         else if (strcmp(key, "only_scrape_missing") == 0) only_scrape_missing = val;
+        else if (strcmp(key, "fix_game_titles") == 0) fix_game_titles = val;
         else if (strcmp(key, "grid_cols") == 0) grid_cols = val;
         else if (strcmp(key, "grid_rows") == 0) grid_rows = val;
         else if (strcmp(key, "library_sort_idx") == 0) library_sort_idx = val;
@@ -5065,6 +5073,7 @@ void save_settings() {
     fprintf(f, "scrape_source=%d\n", scrape_source);
     fprintf(f, "show_description=%d\n", show_description);
     fprintf(f, "only_scrape_missing=%d\n", only_scrape_missing);
+    fprintf(f, "fix_game_titles=%d\n", fix_game_titles);
     fprintf(f, "grid_cols=%d\n", grid_cols);
     fprintf(f, "grid_rows=%d\n", grid_rows);
     fprintf(f, "library_sort_idx=%d\n", library_sort_idx);
@@ -7977,14 +7986,23 @@ void run_scrape() {
     // The frontend's launch environment (via custom.sh) often has a bare PATH
     // with no python3, so `sh -c "python3 ..."` silently fails. Resolve an
     // absolute interpreter, and tee all output to scrape.log for diagnosis.
-    char cmd[1600];
+    // Every ROM root, not just the primary card -- the scraper splits on "|".
+    char roots_arg[1600] = "";
+    { const char *rv[ROMS_ROOT_MAX];
+      int rn = sn_roms_roots(rv);
+      for (int r = 0; r < rn; r++) {
+          if (r) strncat(roots_arg, "|", sizeof roots_arg - strlen(roots_arg) - 1);
+          strncat(roots_arg, rv[r], sizeof roots_arg - strlen(roots_arg) - 1);
+      } }
+    char cmd[3400];
     snprintf(cmd, sizeof(cmd),
              "{ PY=$(command -v python3 || echo /usr/bin/python3); export PYTHONUNBUFFERED=1; "
              "\"$PY\" \"%s/scrape_boxart.py\" --source=%s --data=\"%s\" --roms=\"%s\" "
-             "--types=%s --systems=%s --description=%d --only-missing=%d ; } "
+             "--types=%s --systems=%s --description=%d --only-missing=%d --titles=%d ; } "
              ">\"%s/scrape.log\" 2>&1 &",
-             home, scrape_source ? "screenscraper" : "gamesdb", home, sn_roms_root(),
-             types_arg, systems_arg, scrape_description, only_scrape_missing, home);
+             home, scrape_source ? "screenscraper" : "gamesdb", home, roots_arg,
+             types_arg, systems_arg, scrape_description, only_scrape_missing,
+             fix_game_titles, home);
     system(cmd);
 
     scrape_in_progress = 1;
@@ -8388,6 +8406,30 @@ struct scan_ctx {
     // optional progress readout during a big single-platform scan
     SDL_Renderer *ren; const char *label; int total; int seen; Uint32 last_draw;
 };
+// The name the scraper matched this ROM to, from boxart/<sys>/name/<rom>.txt.
+// Written during a scrape at no extra API cost -- the name is already in the
+// response that fetched the art. Returns 0 when there is no scraped name.
+static int scraped_title_for(const char *platform_dir, const char *raw, char *out, size_t n) {
+    if (!fix_game_titles || !platform_dir || !raw || !raw[0]) return 0;
+    char path[900];
+    snprintf(path, sizeof path, "%.400s/boxart/%.60s/name/%.300s.txt",
+             sn_data_root(), platform_dir, raw);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[256] = "";
+    if (!fgets(buf, sizeof buf, f)) { fclose(f); return 0; }
+    fclose(f);
+    buf[strcspn(buf, "\r\n")] = '\0';
+    // Trim, and refuse a blank or whitespace-only file rather than blanking a
+    // game's name in the library.
+    char *b = buf; while (*b == ' ' || *b == '\t') b++;
+    size_t L = strlen(b);
+    while (L > 0 && (b[L-1] == ' ' || b[L-1] == '\t')) b[--L] = '\0';
+    if (!b[0]) return 0;
+    snprintf(out, n, "%s", b);
+    return 1;
+}
+
 static void scan_add(const char *full, const char *name, void *ud) {
     struct scan_ctx *c = (struct scan_ctx *)ud;
     if (c->ren && c->total > 0) {
@@ -8408,7 +8450,7 @@ static void scan_add(const char *full, const char *name, void *ud) {
     strip_ext(name, games[i].raw_filename, sizeof(games[i].raw_filename));
     RomInfo info; parse_rom_filename(games[i].raw_filename, &info);
     snprintf(games[i].title, sizeof(games[i].title), "%.127s", info.title);
-    // Prefer what the system's gamelist.xml calls this, and honour <hidden>.
+        // Prefer what the system's gamelist.xml calls this, and honour <hidden>.
     // Filenames like "doom1_shareware" or "fix_it_felix_64" are shipping
     // defaults on Knulli, and the curated name is always the better label.
     {
@@ -8417,6 +8459,11 @@ static void scan_add(const char *full, const char *name, void *ud) {
             if (ge.hidden) return;
             if (ge.name[0]) snprintf(games[i].title, sizeof(games[i].title), "%.127s", ge.name);
         }
+        // A name the user scraped on purpose beats both the filename and
+        // whatever a stale gamelist.xml happens to say.
+        char sct[256];
+        if (scraped_title_for(platform_dirs[c->p], games[i].raw_filename, sct, sizeof sct))
+            snprintf(games[i].title, sizeof(games[i].title), "%.127s", sct);
     }
     if (c->search_lc && !ci_contains(games[i].title, c->search_lc)) return;
     snprintf(games[i].region, sizeof(games[i].region), "%s", info.region);
@@ -8462,6 +8509,7 @@ void ensure_rom_folders() {
 //   assets/icons/bookshelf/background/      -- the one bookshelf-view backdrop
 //   boxart/<system>/<art_type>/             -- scraped cover art (boxart/fanart/...)
 //   boxart/<system>/description/            -- scraped text blurbs
+//   boxart/<system>/name/                   -- scraped titles ("Fix Game Titles")
 // Drop art into the matching folder and it's picked up automatically -- adding a
 // new system to the platform_* arrays needs no other folder-setup changes.
 void ensure_asset_folders() {
@@ -8524,6 +8572,9 @@ void ensure_asset_folders() {
         char descdir[720];
         snprintf(descdir, sizeof(descdir), "%s/description", sysdir);
         mkdir(descdir, 0755);
+        char namedir[720];
+        snprintf(namedir, sizeof(namedir), "%s/name", sysdir);   // "Fix Game Titles"
+        mkdir(namedir, 0755);
     }
 }
 
@@ -8638,6 +8689,307 @@ void sort_bookshelf_platforms(int reset_anim) {
     }
     for (int i = 0; i < g_nplat; i++) if (g_plat[i] == platform_selected) { g_sel_ord = i; break; }
     if (reset_anim) { g_prev_ord = g_sel_ord; carousel_prev_selected = platform_selected; }
+}
+
+// --- Physical storage: cards, slots, mount state --------------------------
+//
+// Knulli mounts exactly ONE data partition as /userdata and leaves the other
+// card completely unmounted. /media/<LABEL> is created as an empty placeholder
+// directory on tmpfs with nothing behind it, so on a two-card handheld the
+// second card's games are not merely hard to find -- no path in the filesystem
+// reaches them until something mounts the partition. Scanning /media/*/roms
+// (which is all we used to do) therefore finds exactly one card, always.
+//
+// This enumerates the real block devices, works out which physical slot each
+// one is (the card carrying /boot is TF1, the other is TF2), mounts the data
+// partition Knulli left behind, and reports what is on each card.
+#define STORAGE_MAX 6
+typedef struct {
+    char base[32];                 // mmcblk0
+    char slot[8];                  // TF1 / TF2 / USB
+    unsigned long long disk_bytes;
+    char dev[64];                  // /dev/mmcblk0p4 -- the data partition ("" if none)
+    char label[48];                // SHARE ("" if unlabelled)
+    char fstype[16];               // exfat
+    char mount[256];               // "" when not mounted
+    unsigned long long part_bytes;
+    int is_userdata;               // this partition is the live /userdata
+    int is_boot_card;              // this card carries /boot
+    int games;                     // -1 = not counted yet
+    int roms_ok;                   // a roms/ folder exists on it
+    int missing;                   // system folders absent from roms/ (-1 unknown)
+} StorageCard;
+StorageCard g_storage[STORAGE_MAX];
+int g_storage_count = 0;
+
+static int fstype_mountable(const char *fs) {
+    return fs && (!strcmp(fs, "exfat") || !strcmp(fs, "vfat") || !strcmp(fs, "ext4") ||
+                  !strcmp(fs, "ext3")  || !strcmp(fs, "ext2")  || !strcmp(fs, "ntfs") ||
+                  !strcmp(fs, "fuseblk"));
+}
+
+static unsigned long long sysfs_u64(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    unsigned long long v = 0;
+    if (fscanf(f, "%llu", &v) != 1) v = 0;
+    fclose(f);
+    return v;
+}
+
+// Where is this device mounted? A device can appear in /proc/mounts several
+// times (Knulli bind-mounts /userdata to /var/knullifs and even onto a single
+// config file); the shortest target is the real one.
+static int mount_target_of(const char *dev, char *out, size_t n) {
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f) return 0;
+    char src[300], tgt[300], best[300] = "";
+    while (fscanf(f, "%299s %299s %*s %*s %*d %*d", src, tgt) == 2)
+        if (!strcmp(src, dev) && (!best[0] || strlen(tgt) < strlen(best)))
+            snprintf(best, sizeof best, "%s", tgt);
+    fclose(f);
+    if (!best[0]) return 0;
+    if (out) snprintf(out, n, "%s", best);
+    return 1;
+}
+
+// Which device is mounted at this path? (Used to find the card carrying /boot.)
+static int device_at_mount(const char *target, char *out, size_t n) {
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f) return 0;
+    char src[300], tgt[300]; int found = 0;
+    while (fscanf(f, "%299s %299s %*s %*s %*d %*d", src, tgt) == 2)
+        if (!strcmp(tgt, target)) { snprintf(out, n, "%s", src); found = 1; break; }
+    fclose(f);
+    return found;
+}
+
+// One blkid run, parsed for every device at once. Lines look like
+//   /dev/mmcblk0p3: LABEL_FATBOOT="KNULLI" LABEL="KNULLI" TYPE="vfat" ...
+// so the leading space in " LABEL=\"" is what keeps LABEL_FATBOOT out.
+typedef struct { char dev[64], label[48], fstype[16]; } BlkidRow;
+static BlkidRow g_blkid[24];
+static int g_blkid_n = 0;
+static void blkid_refresh(void) {
+    g_blkid_n = 0;
+    FILE *p = popen("blkid 2>/dev/null", "r");
+    if (!p) return;
+    char line[1024];
+    while (g_blkid_n < (int)(sizeof g_blkid / sizeof g_blkid[0]) && fgets(line, sizeof line, p)) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        BlkidRow *r = &g_blkid[g_blkid_n];
+        memset(r, 0, sizeof *r);
+        snprintf(r->dev, sizeof r->dev, "%s", line);
+        const char *rest = colon + 1;
+        const char *l = strstr(rest, " LABEL=\"");
+        if (l) { l += 8; const char *e = strchr(l, '"');
+                 if (e && (size_t)(e - l) < sizeof r->label) { memcpy(r->label, l, (size_t)(e - l)); r->label[e - l] = '\0'; } }
+        const char *t = strstr(rest, " TYPE=\"");
+        if (t) { t += 7; const char *e = strchr(t, '"');
+                 if (e && (size_t)(e - t) < sizeof r->fstype) { memcpy(r->fstype, t, (size_t)(e - t)); r->fstype[e - t] = '\0'; } }
+        g_blkid_n++;
+    }
+    pclose(p);
+}
+static const BlkidRow *blkid_find(const char *dev) {
+    for (int i = 0; i < g_blkid_n; i++) if (!strcmp(g_blkid[i].dev, dev)) return &g_blkid[i];
+    return NULL;
+}
+
+// Only ever build a path out of characters we choose, never straight out of a
+// filesystem label -- these strings end up in a shell command line.
+static void sanitize_token(const char *in, char *out, size_t n) {
+    size_t j = 0;
+    for (size_t i = 0; in && in[i] && j + 1 < n; i++) {
+        char c = in[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') out[j++] = c;
+    }
+    out[j] = '\0';
+}
+
+static void storage_mountpoint(const StorageCard *c, char *out, size_t n) {
+    char t[48];
+    sanitize_token(c->label[0] ? c->label : c->base, t, sizeof t);
+    if (!t[0]) sanitize_token(c->base, t, sizeof t);
+    snprintf(out, n, "/media/%s", t[0] ? t : "card");
+}
+
+// Human-readable name for the games folder on a card, without committing to
+// it existing yet.
+void storage_roms_path(const StorageCard *c, char *out, size_t n) {
+    if (c->mount[0]) snprintf(out, n, "%s/roms", strcmp(c->mount, "/") ? c->mount : "");
+    else out[0] = '\0';
+}
+
+// Enumerate the cards. Partitions come from sysfs (so the device paths we
+// later hand to mount are ours, not parsed out of a tool's output); labels and
+// filesystem types come from blkid. The data partition of a card is the
+// largest mountable one -- on a Knulli card that is SHARE, not the 5 GB boot
+// partition beside it.
+void storage_scan(void) {
+    g_storage_count = 0;
+    blkid_refresh();
+
+    char bootdev[300] = "";
+    device_at_mount("/boot", bootdev, sizeof bootdev);
+    char udatadev[300] = "";
+    device_at_mount("/userdata", udatadev, sizeof udatadev);
+
+    DIR *d = opendir("/sys/block");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && g_storage_count < STORAGE_MAX) {
+        const char *nm = e->d_name;
+        int is_mmc = strncmp(nm, "mmcblk", 6) == 0;
+        int is_scsi = strncmp(nm, "sd", 2) == 0;
+        if (!is_mmc && !is_scsi) continue;
+        if (strstr(nm, "boot") || strstr(nm, "rpmb")) continue;   // eMMC hardware partitions
+        char p[300];
+        if (is_scsi) {   // only removable SCSI/USB media, never someone's system disk
+            snprintf(p, sizeof p, "/sys/block/%s/removable", nm);
+            if (sysfs_u64(p) != 1) continue;
+        }
+        StorageCard *c = &g_storage[g_storage_count];
+        memset(c, 0, sizeof *c);
+        c->games = -1; c->missing = -1;
+        snprintf(c->base, sizeof c->base, "%s", nm);
+        snprintf(p, sizeof p, "/sys/block/%s/size", nm);
+        c->disk_bytes = sysfs_u64(p) * 512ULL;
+
+        // Largest mountable partition wins; a card with no partition table is
+        // itself the partition.
+        char dirp[300]; snprintf(dirp, sizeof dirp, "/sys/block/%s", nm);
+        DIR *pd = opendir(dirp);
+        if (pd) {
+            struct dirent *pe;
+            while ((pe = readdir(pd)) != NULL) {
+                if (strncmp(pe->d_name, nm, strlen(nm)) != 0) continue;
+                snprintf(p, sizeof p, "/sys/block/%s/%s/partition", nm, pe->d_name);
+                struct stat st;
+                if (stat(p, &st) != 0) continue;
+                snprintf(p, sizeof p, "/sys/block/%s/%s/size", nm, pe->d_name);
+                unsigned long long bytes = sysfs_u64(p) * 512ULL;
+                char dev[64]; snprintf(dev, sizeof dev, "/dev/%s", pe->d_name);
+                const BlkidRow *b = blkid_find(dev);
+                const char *fs = b ? b->fstype : "";
+                if (!fstype_mountable(fs)) continue;
+                if (!strcmp(dev, bootdev)) { c->is_boot_card = 1; continue; }   // /boot is not a data partition
+                if (bytes <= c->part_bytes) continue;
+                snprintf(c->dev, sizeof c->dev, "%s", dev);
+                snprintf(c->label, sizeof c->label, "%s", b ? b->label : "");
+                snprintf(c->fstype, sizeof c->fstype, "%s", fs);
+                c->part_bytes = bytes;
+            }
+            closedir(pd);
+        }
+        if (!c->dev[0]) {   // unpartitioned card
+            char dev[64]; snprintf(dev, sizeof dev, "/dev/%s", nm);
+            const BlkidRow *b = blkid_find(dev);
+            if (b && fstype_mountable(b->fstype)) {
+                snprintf(c->dev, sizeof c->dev, "%s", dev);
+                snprintf(c->label, sizeof c->label, "%s", b->label);
+                snprintf(c->fstype, sizeof c->fstype, "%s", b->fstype);
+                c->part_bytes = c->disk_bytes;
+            }
+        }
+        if (!c->dev[0] && !c->is_boot_card) continue;   // nothing usable on this card
+
+        if (c->dev[0]) {
+            mount_target_of(c->dev, c->mount, sizeof c->mount);
+            c->is_userdata = udatadev[0] && !strcmp(c->dev, udatadev);
+        }
+        g_storage_count++;
+    }
+    closedir(d);
+
+    // Order by device name so TF1/TF2 numbering is stable across boots.
+    for (int a = 0; a < g_storage_count; a++)
+        for (int b = a + 1; b < g_storage_count; b++)
+            if (strcmp(g_storage[b].base, g_storage[a].base) < 0) {
+                StorageCard t = g_storage[a]; g_storage[a] = g_storage[b]; g_storage[b] = t;
+            }
+
+    // Name the slots. The card carrying /boot is the one the handheld booted
+    // from -- TF1 -- whichever device node it happens to have come up as.
+    int tf = 1, boot_idx = -1;
+    for (int i = 0; i < g_storage_count; i++) if (g_storage[i].is_boot_card) { boot_idx = i; break; }
+    if (boot_idx >= 0) snprintf(g_storage[boot_idx].slot, sizeof g_storage[boot_idx].slot, "TF1");
+    for (int i = 0; i < g_storage_count; i++) {
+        if (i == boot_idx) continue;
+        if (strncmp(g_storage[i].base, "sd", 2) == 0) { snprintf(g_storage[i].slot, sizeof g_storage[i].slot, "USB"); continue; }
+        if (boot_idx >= 0) tf++; else tf = (i == 0) ? 1 : tf + 1;
+        snprintf(g_storage[i].slot, sizeof g_storage[i].slot, "TF%d", tf > 9 ? 9 : tf);
+    }
+}
+
+// Mount a card's data partition at /media/<LABEL>. Returns 1 on success.
+int storage_mount_card(int idx, char *msg, size_t msgn) {
+    if (idx < 0 || idx >= g_storage_count) return 0;
+    StorageCard *c = &g_storage[idx];
+    if (!c->dev[0])  { snprintf(msg, msgn, "%s has no data partition to mount", c->slot); return 0; }
+    if (c->mount[0]) { snprintf(msg, msgn, "%s is already mounted at %s", c->slot, c->mount); return 0; }
+    if (!fstype_mountable(c->fstype)) {
+        snprintf(msg, msgn, "%s uses %s, which this build cannot mount", c->slot,
+                 c->fstype[0] ? c->fstype : "an unknown filesystem");
+        return 0;
+    }
+    char mp[256]; storage_mountpoint(c, mp, sizeof mp);
+    mkdir("/media", 0755);
+    mkdir(mp, 0755);
+    char fs[16]; sanitize_token(c->fstype, fs, sizeof fs);
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "/bin/mount -t %s '%s' '%s' >/dev/null 2>&1", fs, c->dev, mp);
+    int rc = system(cmd);
+    if (rc != 0) {   // let mount work the type out itself (fuse helpers, ntfs-3g)
+        snprintf(cmd, sizeof cmd, "/bin/mount '%s' '%s' >/dev/null 2>&1", c->dev, mp);
+        rc = system(cmd);
+    }
+    if (rc != 0 || !mount_target_of(c->dev, c->mount, sizeof c->mount)) {
+        rmdir(mp);
+        snprintf(msg, msgn, "Could not mount %s (%s). The card may need checking on a PC.", c->slot, c->dev);
+        return 0;
+    }
+    c->games = -1; c->missing = -1;
+    snprintf(msg, msgn, "%s mounted at %s", c->slot, c->mount);
+    return 1;
+}
+
+int storage_unmount_card(int idx, char *msg, size_t msgn) {
+    if (idx < 0 || idx >= g_storage_count) return 0;
+    StorageCard *c = &g_storage[idx];
+    if (!c->mount[0]) { snprintf(msg, msgn, "%s is not mounted", c->slot); return 0; }
+    if (c->is_userdata || !strcmp(c->mount, "/") || !strcmp(c->mount, "/boot")) {
+        snprintf(msg, msgn, "%s is the system card and cannot be ejected while running", c->slot);
+        return 0;
+    }
+    sync();
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "/bin/umount '%s' >/dev/null 2>&1", c->mount);
+    if (system(cmd) != 0) {
+        snprintf(msg, msgn, "%s is still in use -- close any running game first", c->slot);
+        return 0;
+    }
+    char was[256]; snprintf(was, sizeof was, "%s", c->mount);
+    c->mount[0] = '\0'; c->games = -1; c->missing = -1;
+    if (!strncmp(was, "/media/", 7)) rmdir(was);
+    snprintf(msg, msgn, "%s unmounted -- safe to remove", c->slot);
+    return 1;
+}
+
+// Mount whatever Knulli left behind, so a second card is visible at all.
+// Silent: this runs during boot, before there is anywhere to show a message.
+int storage_automount_all(void) {
+    int n = 0;
+    char msg[192];
+    for (int i = 0; i < g_storage_count; i++) {
+        StorageCard *c = &g_storage[i];
+        if (c->mount[0] || !c->dev[0] || !fstype_mountable(c->fstype)) continue;
+        if (storage_mount_card(i, msg, sizeof msg)) n++;
+    }
+    return n;
 }
 
 // --- Second SD card / games-folder detection ------------------------------
@@ -8763,65 +9115,130 @@ static int dir_has_subdirs(const char *path) {
     return found;
 }
 
-// Create the per-system folders in a games folder that has none.
+// The set of per-system folder names a games folder is expected to have.
 //
-// A second SD card is blank until something lays this structure down, and on
-// KNULLI that is done once, for the primary card, at first boot -- so a card
-// added later (or added while a different frontend is running) stays empty and
-// invisible. Rather than inventing names, mirror whatever the main card
-// already uses: KNULLI's folder names do not always match Snap FE's canonical
-// slugs (megadrive vs genesis), and copying the main card is right by
-// construction. Falls back to the built-in table if the main card cannot be
-// read. Returns the number of folders created.
-static int roms_scaffold(const char *root) {
-    if (!root || !root[0]) return 0;
-    mkdir(root, 0777);
-    int made = 0;
+// Rather than inventing names, mirror whatever the main card already uses:
+// KNULLI's folder names do not always match Snap FE's canonical slugs
+// (megadrive vs genesis), and copying the main card is right by construction.
+// Falls back to the built-in table only when the main card cannot be read.
+#define ROMS_EXPECT_MAX 256
+static char g_roms_expect[ROMS_EXPECT_MAX][64];
+static int  g_roms_expect_n = 0;
+static int  g_roms_expect_mirrored = 0;   // 1 = copied from the main card
 
-    const char *primary =
+static const char *roms_primary_root(void) {
 #ifdef SNAPOS_TARGET_KNULLI
-        "/userdata/roms";
+    return "/userdata/roms";
 #else
-        NULL;
+    static char pbuf[512];
+    snprintf(pbuf, sizeof pbuf, "%s/snapos-ui/roms", getenv("HOME") ? getenv("HOME") : "/tmp");
+    return pbuf;
 #endif
-    char pbuf[512];
-    if (!primary) {
-        snprintf(pbuf, sizeof pbuf, "%s/snapos-ui/roms", getenv("HOME") ? getenv("HOME") : "/tmp");
-        primary = pbuf;
-    }
+}
 
-    int seen = 0;   // source folders found, whether or not they were created
-    DIR *d = (strcmp(root, primary) == 0) ? NULL : opendir(primary);
+static void roms_expect_build(const char *skip_root) {
+    g_roms_expect_n = 0; g_roms_expect_mirrored = 0;
+    const char *primary = roms_primary_root();
+    DIR *d = (skip_root && !strcmp(skip_root, primary)) ? NULL : opendir(primary);
     if (d) {
         struct dirent *e;
-        while ((e = readdir(d)) != NULL) {
+        while ((e = readdir(d)) != NULL && g_roms_expect_n < ROMS_EXPECT_MAX) {
             if (e->d_name[0] == '.') continue;
-            char src[900], dst[900];
+            char src[900];
             snprintf(src, sizeof src, "%.700s/%.150s", primary, e->d_name);
             struct stat st;
             if (stat(src, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-            snprintf(dst, sizeof dst, "%.700s/%.150s", root, e->d_name);
-            seen++;
-            if (mkdir(dst, 0777) == 0) made++;
+            // Skip rather than truncate: a clipped name would read as "missing"
+            // on every check and get re-created under the wrong, shorter name.
+            if (strlen(e->d_name) >= 64) continue;
+            snprintf(g_roms_expect[g_roms_expect_n++], 64, "%s", e->d_name);
         }
         closedir(d);
     }
-    // Fall back only when there was nothing to mirror. Keying this off `made`
-    // instead meant a folder that already matched the main card fell through to
-    // the table and created canonical slugs beside the real ones -- an empty
-    // "genesis/" next to the "megadrive/" that actually holds the games.
-    if (seen == 0) {
-        for (int i = 0; i < PLATFORM_COUNT; i++) {
-            char dst[900];
-            snprintf(dst, sizeof dst, "%.700s/%.150s", root, platform_dirs[i]);
-            if (mkdir(dst, 0777) == 0) made++;
+    if (g_roms_expect_n > 0) { g_roms_expect_mirrored = 1; return; }
+    for (int i = 0; i < PLATFORM_COUNT && g_roms_expect_n < ROMS_EXPECT_MAX; i++)
+        snprintf(g_roms_expect[g_roms_expect_n++], 64, "%s", platform_dirs[i]);
+}
+
+// How many expected system folders are absent from this games folder?
+// -1 means the folder itself could not be read.
+int roms_missing_count(const char *root) {
+    if (!root || !root[0]) return -1;
+    struct stat st;
+    if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+    roms_expect_build(root);
+    int missing = 0;
+    for (int i = 0; i < g_roms_expect_n; i++) {
+        char dst[900];
+        snprintf(dst, sizeof dst, "%.700s/%.150s", root, g_roms_expect[i]);
+        if (stat(dst, &st) != 0 || !S_ISDIR(st.st_mode)) missing++;
+    }
+    return missing;
+}
+
+// Create whichever expected system folders this games folder is missing.
+//
+// A second SD card is blank until something lays this structure down, and on
+// KNULLI that is done once, for the primary card, at first boot -- so a card
+// added later (or added while a different frontend was running) stays empty.
+// Returns the number of folders created.
+static int roms_scaffold(const char *root) {
+    if (!root || !root[0]) return 0;
+    mkdir(root, 0777);
+    roms_expect_build(root);
+    int made = 0;
+    for (int i = 0; i < g_roms_expect_n; i++) {
+        char dst[900];
+        snprintf(dst, sizeof dst, "%.700s/%.150s", root, g_roms_expect[i]);
+        if (mkdir(dst, 0777) == 0) made++;
+    }
+    // Only the built-in table carries alternate spellings; a mirrored list
+    // already has whatever names the main card really uses, and adding the
+    // canonical slug beside it would create the empty "genesis/" next to the
+    // "megadrive/" that actually holds the games.
+    if (!g_roms_expect_mirrored)
+        for (int i = 0; i < PLATFORM_COUNT; i++)
             if (platform_dir_alt[i]) {
+                char dst[900];
                 snprintf(dst, sizeof dst, "%.700s/%.150s", root, platform_dir_alt[i]);
                 mkdir(dst, 0777);
             }
+    return made;
+}
+
+// Fill in what is actually on each card: games, whether it has a roms folder
+// at all, and how many system folders it is missing. Separate from
+// storage_scan() because it walks every system directory on every card and so
+// is far too expensive to do per frame.
+void storage_refresh_counts(void) {
+    for (int i = 0; i < g_storage_count; i++) {
+        StorageCard *c = &g_storage[i];
+        c->games = -1; c->roms_ok = 0; c->missing = -1;
+        if (!c->mount[0]) continue;
+        char rp[300]; storage_roms_path(c, rp, sizeof rp);
+        if (!rp[0]) continue;
+        struct stat st;
+        if (stat(rp, &st) == 0 && S_ISDIR(st.st_mode)) {
+            c->roms_ok = 1;
+            c->games = count_games_under(rp);
+            c->missing = roms_missing_count(rp);
+        } else {
+            c->games = 0;
         }
     }
-    return made;
+}
+
+// Index of the card a path lives on, or -1.
+int storage_card_for_path(const char *path) {
+    if (!path || !path[0]) return -1;
+    int best = -1; size_t bestlen = 0;
+    for (int i = 0; i < g_storage_count; i++) {
+        const char *m = g_storage[i].mount;
+        if (!m[0]) continue;
+        size_t L = strlen(m);
+        if (strncmp(path, m, L) == 0 && (path[L] == '/' || path[L] == '\0') && L > bestlen) { best = i; bestlen = L; }
+    }
+    return best;
 }
 
 // --- Interactive ROM-folder manager --------------------------------------
@@ -8832,6 +9249,8 @@ static int roms_scaffold(const char *root) {
 char romfs_path[512] = "";
 char romfs_dirs[ROMFS_MAX_DIRS][256];
 int romfs_dir_count = 0, romfs_sel = 0, romfs_browsing = 0;
+int romfs_card = -1;      // storage index whose action menu is open, else -1
+int romfs_card_sel = 0;
 char romfs_message[160] = "";
 AppState romfs_return_state = STATE_SETTINGS;
 
@@ -8884,6 +9303,9 @@ static void romfs_parent(void) {
 }
 static void romfs_open(AppState ret) {
     romfs_return_state = ret; romfs_browsing = 0; romfs_sel = 0; romfs_message[0] = '\0';
+    romfs_card = -1; romfs_card_sel = 0;
+    storage_scan();            // a card may have been swapped since the last look
+    storage_refresh_counts();
 }
 static void romfs_add_current(void) {
     if (romfs_selected(romfs_path)) {
@@ -8917,6 +9339,186 @@ static void romfs_remove(int idx) {
     if (g_roms_nroots > 0) g_roms_nroots--;
     snprintf(romfs_message, sizeof romfs_message, "Folder removed. Choose Rescan to update the library.");
     save_settings();
+}
+
+// A card that appeared since last boot should just work. Called once at
+// startup, after the cards are mounted: adds any games folder that holds games
+// and is not already selected. It only ever ADDS -- a folder the user
+// deliberately removed must stay removed, which is why this is not simply
+// roms_detect_and_apply().
+int roms_autoadd_new(void) {
+    int added = 0;
+    for (int i = 0; i < g_storage_count && g_roms_nroots < ROMS_ROOT_MAX; i++) {
+        StorageCard *c = &g_storage[i];
+        if (!c->mount[0] || c->is_userdata) continue;
+        char rp[300]; storage_roms_path(c, rp, sizeof rp);
+        if (!rp[0]) continue;
+        struct stat st;
+        if (stat(rp, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (count_games_under(rp) <= 0) continue;
+        if (romfs_selected(rp)) continue;
+        romfs_make_default_explicit();
+        if (g_roms_nroots >= ROMS_ROOT_MAX) break;
+        snprintf(g_roms_roots[g_roms_nroots++], sizeof g_roms_roots[0], "%s", rp);
+        added++;
+    }
+    if (added) save_settings();
+    return added;
+}
+
+// --- Card actions (the rows behind A on a storage row) --------------------
+// "Use this card for games": mount it if needed, make sure roms/ exists and is
+// laid out, then select it. This is the one-button path for a fresh card.
+static void storage_use_for_games(int idx) {
+    if (idx < 0 || idx >= g_storage_count) return;
+    StorageCard *c = &g_storage[idx];
+    if (!c->mount[0] && !storage_mount_card(idx, romfs_message, sizeof romfs_message)) return;
+    char rp[300]; storage_roms_path(c, rp, sizeof rp);
+    if (!rp[0]) { snprintf(romfs_message, sizeof romfs_message, "%s has no usable mount point", c->slot); return; }
+    int made = 0;
+    struct stat st;
+    if (stat(rp, &st) != 0 || !S_ISDIR(st.st_mode)) made = roms_scaffold(rp);
+    else if (!dir_has_subdirs(rp))                  made = roms_scaffold(rp);
+    if (romfs_selected(rp)) {
+        snprintf(romfs_message, sizeof romfs_message, "%s is already selected%s",
+                 c->slot, made > 0 ? " -- created its missing system folders" : "");
+    } else if (g_roms_nroots >= ROMS_ROOT_MAX) {
+        snprintf(romfs_message, sizeof romfs_message, "Three-folder maximum reached -- remove one first");
+    } else {
+        romfs_make_default_explicit();
+        snprintf(g_roms_roots[g_roms_nroots++], sizeof g_roms_roots[0], "%s", rp);
+        if (made > 0)
+            snprintf(romfs_message, sizeof romfs_message,
+                     "%s added and set up: %d system folders created. Copy games in, then Rescan.", c->slot, made);
+        else
+            snprintf(romfs_message, sizeof romfs_message, "%s added. Choose Rescan to update the library.", c->slot);
+        save_settings();
+    }
+    storage_refresh_counts();
+}
+
+// "Check folders": report what is missing without changing anything, then
+// create it on a second press.
+static void storage_check_folders(int idx, int repair) {
+    if (idx < 0 || idx >= g_storage_count) return;
+    StorageCard *c = &g_storage[idx];
+    if (!c->mount[0]) { snprintf(romfs_message, sizeof romfs_message, "Mount %s first", c->slot); return; }
+    char rp[300]; storage_roms_path(c, rp, sizeof rp);
+    struct stat st;
+    int exists = rp[0] && stat(rp, &st) == 0 && S_ISDIR(st.st_mode);
+    if (!exists && !repair) {
+        snprintf(romfs_message, sizeof romfs_message,
+                 "%s has no games folder yet. Choose Create missing folders to add %s.", c->slot, rp);
+        return;
+    }
+    if (repair) {
+        int made = roms_scaffold(rp);
+        storage_refresh_counts();
+        if (made > 0) snprintf(romfs_message, sizeof romfs_message,
+                               "%s: created %d missing system folders in %s", c->slot, made, rp);
+        else          snprintf(romfs_message, sizeof romfs_message,
+                               "%s: nothing to create, %s is already complete", c->slot, rp);
+        return;
+    }
+    int miss = roms_missing_count(rp);
+    storage_refresh_counts();
+    if (miss < 0)       snprintf(romfs_message, sizeof romfs_message, "%s: cannot read %s", c->slot, rp);
+    else if (miss == 0) snprintf(romfs_message, sizeof romfs_message,
+                                 "%s: all %d system folders present in %s", c->slot, g_roms_expect_n, rp);
+    else                snprintf(romfs_message, sizeof romfs_message,
+                                 "%s: %d of %d system folders missing%s", c->slot, miss, g_roms_expect_n,
+                                 g_roms_expect_mirrored ? " (compared with the main card)" : "");
+}
+
+// The first card that is not the one the system is running from -- i.e. the
+// one a user means by "my other card". -1 when there is only one.
+int storage_extra_card(void) {
+    for (int i = 0; i < g_storage_count; i++)
+        if (!g_storage[i].is_userdata && g_storage[i].dev[0]) return i;
+    return -1;
+}
+
+#define SROM_CHOOSE   0
+#define SROM_DETECT   1
+#define SROM_CARD     2
+#define SROM_CONTINUE 3
+
+// Rows on the first-run games-folder step. The second-card row only exists
+// when there IS a second card, so render and input both read the list from
+// here rather than each deciding how many rows there are.
+int setup_roms_rows(char labels[5][96], int ids[5]) {
+    int n = 0;
+    snprintf(labels[n], 96, "Choose or add games folders");    ids[n++] = SROM_CHOOSE;
+    snprintf(labels[n], 96, "Auto-detect and re-scan cards");  ids[n++] = SROM_DETECT;
+    int x = storage_extra_card();
+    if (x >= 0) {
+        StorageCard *c = &g_storage[x];
+        if (!c->mount[0])
+            snprintf(labels[n], 96, "Set up %s (%.12s): mount and add folders",
+                     c->slot, c->label[0] ? c->label : "no label");
+        else if (c->missing > 0)
+            snprintf(labels[n], 96, "Set up %s (%.12s): add %d folders",
+                     c->slot, c->label[0] ? c->label : "no label", c->missing);
+        else
+            snprintf(labels[n], 96, "Use %s (%s) for games",
+                     c->slot, c->label[0] ? c->label : "no label");
+        ids[n++] = SROM_CARD;
+    }
+    snprintf(labels[n], 96, "Continue");                       ids[n++] = SROM_CONTINUE;
+    return n;
+}
+
+#define CARDACT_USE     0
+#define CARDACT_CHECK   1
+#define CARDACT_REPAIR  2
+#define CARDACT_BROWSE  3
+#define CARDACT_MOUNT   4
+#define CARDACT_UNMOUNT 5
+#define CARDACT_BACK    6
+
+// The rows in a card's action menu. Render and input BOTH call this, and both
+// act on the returned ids rather than on row positions -- the rows available
+// depend on whether the card is mounted, and a hand-kept copy of that logic in
+// the renderer is exactly how a menu ends up running the wrong action.
+static int romfs_card_actions(int idx, char labels[8][96], int ids[8]) {
+    int n = 0;
+    if (idx < 0 || idx >= g_storage_count) return 0;
+    StorageCard *c = &g_storage[idx];
+    if (c->mount[0]) {
+        snprintf(labels[n], 96, "Use this card for games");   ids[n++] = CARDACT_USE;
+        snprintf(labels[n], 96, "Check games folders");       ids[n++] = CARDACT_CHECK;
+        snprintf(labels[n], 96, "Create missing folders");    ids[n++] = CARDACT_REPAIR;
+        snprintf(labels[n], 96, "Browse this card");          ids[n++] = CARDACT_BROWSE;
+        if (!c->is_userdata) { snprintf(labels[n], 96, "Eject card (unmount %.40s)", c->mount); ids[n++] = CARDACT_UNMOUNT; }
+    } else if (c->dev[0]) {
+        snprintf(labels[n], 96, "Mount this card");           ids[n++] = CARDACT_MOUNT;
+    }
+    snprintf(labels[n], 96, "Back");                          ids[n++] = CARDACT_BACK;
+    return n;
+}
+
+static void storage_row_text(int i, char *out, size_t n) {
+    StorageCard *c = &g_storage[i];
+    unsigned long long b = c->part_bytes ? c->part_bytes : c->disk_bytes;
+    char where[80], games[64];
+    if (c->is_userdata)   snprintf(where, sizeof where, "system card");
+    else if (c->mount[0]) snprintf(where, sizeof where, "%.60s", c->mount);
+    else if (c->dev[0])   snprintf(where, sizeof where, "not mounted");
+    else                  snprintf(where, sizeof where, "no data partition");
+    if (c->games < 0 || !c->mount[0]) games[0] = '\0';
+    else if (!c->roms_ok)             snprintf(games, sizeof games, "  -  no games folder");
+    else if (c->missing > 0)          snprintf(games, sizeof games, "  -  %d games, %d missing", c->games, c->missing);
+    else                              snprintf(games, sizeof games, "  -  %d games", c->games);
+    snprintf(out, n, "%s  %.16s  %.0f GB  -  %s%s", c->slot,
+             c->label[0] ? c->label : "(no label)",
+             (double)b / (1024.0 * 1024.0 * 1024.0), where, games);
+}
+
+// Longer form for the card-options header, where there is a full line to spare.
+static void storage_row_text_long(int i, char *out, size_t n) {
+    StorageCard *c = &g_storage[i];
+    char base[220]; storage_row_text(i, base, sizeof base);
+    snprintf(out, n, "%s  (%s, %s)", base, c->fstype[0] ? c->fstype : "unknown fs", c->dev);
 }
 
 void ensure_carousel_bg_loaded(SDL_Renderer *ren, int platform); // defined below
@@ -10260,6 +10862,9 @@ void scan_favorite_games(SDL_Renderer *ren, TTF_Font *font_label) {
         strip_ext(base ? base + 1 : fv->path, games[i].raw_filename, sizeof games[i].raw_filename);
         RomInfo info; parse_rom_filename(games[i].raw_filename, &info);
         snprintf(games[i].title, sizeof games[i].title, "%.127s", fv->title[0] ? fv->title : info.title);
+        { char sct[256];
+          if (scraped_title_for(fv->platform_dir, games[i].raw_filename, sct, sizeof sct))
+              snprintf(games[i].title, sizeof games[i].title, "%.127s", sct); }
         if (search_lc[0] && !ci_contains(games[i].title, search_lc)) continue;
         snprintf(games[i].region, sizeof games[i].region, "%s", info.region);
         snprintf(games[i].languages, sizeof games[i].languages, "%s", info.languages);
@@ -10312,8 +10917,17 @@ static int active_game_rows(void) {
 // Returns the directory to hand RetroArch, or NULL on failure.
 // bind_ff: also bind Menu+L1 / Menu+R1 to RetroArch's fast-forward (toggle /
 // hold) so the Snap "Fast-Forward Speed" setting is actually reachable in-game.
+const char *gamepad_evdev_name(void);   // defined with the evdev reader below
+
+// These button indices were confirmed by probing an RG34XX-SP. Other handhelds
+// enumerate a different set (the RG35XX-SP reports 11 buttons, not 13, and with
+// a gap), so writing this map for them would bind the wrong buttons. Return
+// NULL instead and let RetroArch use its own autoconfig database, which Knulli
+// already sets up correctly for the device it is running on.
 static const char *write_pad_autoconfig(int bind_ff) {
     (void)bind_ff;
+    const char *padname = gamepad_evdev_name();
+    if (!padname[0] || !strstr(padname, "RG34XX")) return NULL;
     static char dir[900];
     snprintf(dir, sizeof(dir), "%s/config/retroarch-autoconfig", sn_data_root());
     { char mk[920]; snprintf(mk, sizeof(mk), "%s", dir);
@@ -10324,9 +10938,9 @@ static const char *write_pad_autoconfig(int bind_ff) {
     snprintf(path, sizeof(path), "%s/anbernic-rg34xx.cfg", dir);
     FILE *f = fopen(path, "w");
     if (!f) return NULL;
+    fprintf(f, "input_driver = \"sdl2\"\n");
+    fprintf(f, "input_device = \"%s\"\n", padname);
     fprintf(f,
-        "input_driver = \"sdl2\"\n"
-        "input_device = \"Anbernic RG34XX-SP Controller\"\n"
         "input_b_btn = \"3\"\n"          // South / cancel
         "input_a_btn = \"4\"\n"          // East / confirm
         "input_y_btn = \"5\"\n"
@@ -10446,22 +11060,49 @@ static int find_evdev_for(const char *name, char *out, size_t outsz) {
     return 0;
 }
 
+// The pad's evdev node is named per model -- "Anbernic RG34XX-SP Controller"
+// on one handheld, "Anbernic RG35XX-SP Controller" on the next. Matching one
+// model's exact string meant the node was never opened on any other handheld,
+// so the Menu modifier was never seen and in-game brightness silently did
+// nothing. Ask the kernel what the pad is actually called.
+const char *gamepad_evdev_name(void) {
+    static char name[128] = "";
+    if (name[0]) return name;
+    FILE *f = fopen("/proc/bus/input/devices", "r");
+    if (!f) return name;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] != 'N') continue;
+        char *q = strstr(line, "Name=\"");
+        if (!q) continue;
+        q += 6;
+        char *e = strchr(q, '"');
+        if (!e) continue;
+        *e = '\0';
+        if (strstr(q, "Controller") || strstr(q, "Gamepad") || strstr(q, "Joystick")) {
+            snprintf(name, sizeof name, "%s", q);
+            break;
+        }
+    }
+    fclose(f);
+    return name;   // "" if none yet -- retried on the next call, never cached
+}
+
 static void gamepad_evdev_open(void) {
     char path[64];
-    if (gamepad_control_fd < 0 &&
-        find_evdev_for("Anbernic RG34XX-SP Controller", path, sizeof path))
+    const char *pad = gamepad_evdev_name();
+    if (gamepad_control_fd < 0 && pad[0] && find_evdev_for(pad, path, sizeof path))
         gamepad_control_fd = open(path, O_RDONLY | O_NONBLOCK);
 
-    // The RG34XX-SP's dedicated Volume buttons are not joystick buttons. They
-    // are reported by the AXP power-management input alongside the lid switch.
+    // The dedicated Volume buttons are not joystick buttons on these handhelds.
+    // They are reported by the AXP power-management input alongside the lid.
     if (gamepad_level_fd < 0 && find_evdev_for("axp2202-pek", path, sizeof path))
         gamepad_level_fd = open(path, O_RDONLY | O_NONBLOCK);
     if (gamepad_level_fd < 0 && access("/dev/input/event0", R_OK) == 0)
         gamepad_level_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
 
     // Fallback for an alternate kernel that places the level keys on the pad.
-    if (gamepad_level_fd < 0 &&
-        find_evdev_for("Anbernic RG34XX-SP Controller", path, sizeof path))
+    if (gamepad_level_fd < 0 && pad[0] && find_evdev_for(pad, path, sizeof path))
         gamepad_level_fd = open(path, O_RDONLY | O_NONBLOCK);
 }
 
@@ -10837,24 +11478,23 @@ static int link_gba_mode_for_rom(const char *path, const char *display_name) {
 static void link_scan_cb(const char *full, const char *name, void *ud) {
     if (link_game_count >= (int)(sizeof(link_games)/sizeof(link_games[0]))) return;
     RomInfo info; parse_rom_filename(name, &info);
-    const char *title = info.title[0] ? info.title : name;
     int p = ud ? *(int*)ud : 2;
+    char raw[256]; strip_ext(name, raw, sizeof raw);
+    char sct[256];
+    const char *title = info.title[0] ? info.title : name;
+    if (p >= 0 && p < PLATFORM_COUNT &&
+        scraped_title_for(platform_dirs[p], raw, sct, sizeof sct)) title = sct;
     int mode = (p == 0) ? link_gba_mode_for_rom(full, title) : LINK_MODE_GB;
     if (mode < 0) return;
     struct LinkGame *g = &link_games[link_game_count++];
     snprintf(g->path, sizeof g->path, "%s", full);
-    snprintf(g->name, sizeof g->name, "%.127s", info.title[0] ? info.title : name);
+    snprintf(g->name, sizeof g->name, "%.127s", title);
     g->mode = mode;
-    // system = the folder right under /userdata/roms
-    const char *rr = sn_roms_root();
-    size_t rl = strlen(rr);
-    g->sys[0] = '\0';
-    if (strncmp(full, rr, rl) == 0) {
-        const char *q = full + rl; while (*q == '/') q++;
-        int k = 0; while (*q && *q != '/' && k < (int)sizeof(g->sys) - 1) g->sys[k++] = *q++;
-        g->sys[k] = '\0';
-    }
-    if (!g->sys[0]) snprintf(g->sys, sizeof g->sys, "gb");
+    // The platform is already known from the folder being walked. Deriving it
+    // by stripping sn_roms_root() only worked for the primary card: a game on a
+    // second card fell through to "gb" and was mislabelled.
+    snprintf(g->sys, sizeof g->sys, "%s",
+             (p >= 0 && p < PLATFORM_COUNT) ? platform_dirs[p] : "gb");
 }
 static int link_game_sort(const void *a, const void *b) {
     return strcasecmp(((const struct LinkGame*)a)->name, ((const struct LinkGame*)b)->name);
@@ -10862,12 +11502,23 @@ static int link_game_sort(const void *a, const void *b) {
 static void link_scan_games(void) {
     link_game_count = 0;
     link_gba_available = link_gba_core_capable();
+    // Every ROM root, not just the primary card. Scanning sn_roms_root() alone
+    // made games on a second SD card invisible here while the main library --
+    // which walks all roots -- listed and launched them fine.
+    const char *roots[ROMS_ROOT_MAX];
+    int nroots = sn_roms_roots(roots);
     // platform_dirs[] = {"gba","gbc","gb",...}; gba=0, gbc=1, gb=2
     for (int p = link_gba_available ? 0 : 1; p <= 2; p++) {
-        char dir[600];
-        snprintf(dir, sizeof dir, "%s/%s", sn_roms_root(), platform_dirs[p]);
         int scan_platform = p;
-        walk_roms(dir, p, 0, link_scan_cb, &scan_platform);
+        for (int r = 0; r < nroots; r++) {
+            char dir[600];
+            snprintf(dir, sizeof dir, "%s/%s", roots[r], platform_dirs[p]);
+            walk_roms(dir, p, 0, link_scan_cb, &scan_platform);
+            if (platform_dir_alt[p]) {
+                snprintf(dir, sizeof dir, "%s/%s", roots[r], platform_dir_alt[p]);
+                walk_roms(dir, p, 0, link_scan_cb, &scan_platform);
+            }
+        }
     }
     if (link_game_count > 1)
         qsort(link_games, link_game_count, sizeof link_games[0], link_game_sort);
@@ -11595,7 +12246,7 @@ void factory_reset() {
     device_idx = 0; g_roms_nroots = 0; dev_grp_batt_open = 0; dev_grp_night_open = 0;
     for (int i = 0; i < HOME_ORDER_COUNT; i++) home_tile_order[i] = i;
     display_art_idx = 0;
-    scrape_description = 0; show_description = 0; only_scrape_missing = 1; scrape_source = 0;
+    scrape_description = 0; show_description = 0; only_scrape_missing = 1; fix_game_titles = 1; scrape_source = 0;
     art_dropdown_open = 0; display_dropdown_open = 0; game_art_dropdown_open = 0;
     bg_dropdown_open = 0; disp_grp_home_open = 0; disp_grp_text_open = 0;
     disp_grp_view_open = 0; disp_grp_hud_open = 0; disp_grp_screen_open = 0;
@@ -11714,7 +12365,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         // device_idx and the games-folder override are deliberately left alone -
         // they describe the hardware, not a preference.
     } else if (tab == TAB_ACCOUNT) {
-        scrape_description = 0; show_description = 0; only_scrape_missing = 1; scrape_source = 0;
+        scrape_description = 0; show_description = 0; only_scrape_missing = 1; fix_game_titles = 1; scrape_source = 0;
         art_dropdown_open = 0; scrape_service_open = 0; scrape_systems_open = 0; scrape_extras_open = 0;
         for (int i = 0; i < ART_TYPE_COUNT; i++) scrape_art_enabled[i] = (i == 0);
         for (int i = 0; i < PLATFORM_COUNT; i++) scrape_system_enabled[i] = 1;
@@ -11952,8 +12603,25 @@ static void wifi_refresh_status(void) {
         char ip[48] = "";
         if (fgets(ip, sizeof ip, p)) { ip[strcspn(ip, "\r\n/")] = '\0'; }
         pclose(p);
-        if (ip[0]) snprintf(wifi_status, sizeof wifi_status, "Connected: %s", ip);
-        else snprintf(wifi_status, sizeof wifi_status, wifi_enabled_now ? "Wi-Fi on - not connected" : "Wi-Fi off");
+        wifi_connected_now = ip[0] != '\0';
+        if (wifi_connected_now) {
+            wifi_conn_ssid[0] = '\0';
+            FILE *sp = popen("/usr/bin/knulli-settings-get wifi.ssid 2>/dev/null", "r");
+            if (sp) {
+                if (fgets(wifi_conn_ssid, sizeof wifi_conn_ssid, sp))
+                    wifi_conn_ssid[strcspn(wifi_conn_ssid, "\r\n")] = '\0';
+                pclose(sp);
+            }
+            if (wifi_conn_ssid[0])
+                snprintf(wifi_status, sizeof wifi_status, "Connected to %.40s  -  %s", wifi_conn_ssid, ip);
+            else
+                snprintf(wifi_status, sizeof wifi_status, "Connected  -  %s", ip);
+        } else {
+            wifi_conn_ssid[0] = '\0';
+            snprintf(wifi_status, sizeof wifi_status,
+                     wifi_enabled_now ? "Not connected  -  Wi-Fi is on, pick a network below"
+                                      : "Not connected  -  Wi-Fi is off");
+        }
     }
 }
 static void wifi_connect(const char *ssid, const char *psk) {
@@ -13996,6 +14664,7 @@ static void mg_render_menu(SDL_Renderer *ren) {
 static int  promo_mode = 0;
 static int  promo_start = 0;
 static char promo_dir[512] = "";
+static char promo_only[128] = "";   // --promo-only SUBSTR: shoot just the matching stops
 static void save_screenshot(SDL_Renderer *ren, const char *path) {
     int w = 640, h = 480; SDL_GetRendererOutputSize(ren, &w, &h);
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -14034,6 +14703,51 @@ static void promo_seed_radio(void) {
     radio_volume_pct = 82;
     snprintf(radio_place, sizeof radio_place, "Phoenix, Arizona");
     snprintf(radio_status, sizeof radio_status, "%d local stations ready", radio_count);
+}
+
+// Two cards as they actually come up on the dev handhelds: the boot card
+// carrying the system, and a second card whose games folder exists but has
+// never had the system folders laid down.
+static void promo_seed_storage(void) {
+    g_storage_count = 2;
+    StorageCard *a = &g_storage[0];
+    memset(a, 0, sizeof *a);
+    snprintf(a->base, sizeof a->base, "mmcblk0");
+    snprintf(a->slot, sizeof a->slot, "TF1");
+    snprintf(a->dev, sizeof a->dev, "/dev/mmcblk0p4");
+    snprintf(a->label, sizeof a->label, "SHARE");
+    snprintf(a->fstype, sizeof a->fstype, "exfat");
+    snprintf(a->mount, sizeof a->mount, "/userdata");
+    a->disk_bytes = 14ULL << 30; a->part_bytes = 10ULL << 30;
+    a->is_userdata = 1; a->is_boot_card = 1; a->roms_ok = 1; a->games = 342; a->missing = 0;
+
+    StorageCard *b = &g_storage[1];
+    memset(b, 0, sizeof *b);
+    snprintf(b->base, sizeof b->base, "mmcblk1");
+    snprintf(b->slot, sizeof b->slot, "TF2");
+    snprintf(b->dev, sizeof b->dev, "/dev/mmcblk1p1");
+    snprintf(b->label, sizeof b->label, "ROMS");
+    snprintf(b->fstype, sizeof b->fstype, "exfat");
+    snprintf(b->mount, sizeof b->mount, "/media/ROMS");
+    b->disk_bytes = 58ULL << 30; b->part_bytes = 58ULL << 30;
+    b->roms_ok = 1; b->games = 0; b->missing = 181;
+}
+
+static void promo_seed_wifi(int connected) {
+    static const char *nets[] = { "Beast-5G", "Beast-2.4G", "NETGEAR47", "Hyperoptic-8A2C",
+                                  "TP-Link_2F10", "BTWholeHome-9K", "eduroam", "SKYQ4B2F" };
+    wifi_ssid_count = (int)(sizeof nets / sizeof nets[0]);
+    for (int i = 0; i < wifi_ssid_count; i++) snprintf(wifi_ssids[i], 64, "%s", nets[i]);
+    wifi_scanning = 0; wifi_sel = 2;
+    wifi_enabled_now = 1;
+    wifi_connected_now = connected;
+    if (connected) {
+        snprintf(wifi_conn_ssid, sizeof wifi_conn_ssid, "Beast-5G");
+        snprintf(wifi_status, sizeof wifi_status, "Connected to Beast-5G  -  192.168.4.31");
+    } else {
+        wifi_conn_ssid[0] = '\0';
+        snprintf(wifi_status, sizeof wifi_status, "Not connected  -  Wi-Fi is on, pick a network below");
+    }
 }
 
 static void promo_seed_recent(void) {
@@ -14139,6 +14853,9 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--setup") == 0) setup_force = 1;
         else if (strcmp(argv[i], "--promo") == 0) promo_mode = 1;
+        else if (strcmp(argv[i], "--promo-only") == 0 && i + 1 < argc) {
+            promo_mode = 1; snprintf(promo_only, sizeof promo_only, "%s", argv[++i]);
+        }
         else if (strcmp(argv[i], "--promo-dir") == 0 && i + 1 < argc) snprintf(promo_dir, sizeof promo_dir, "%s", argv[++i]);
         else if (strcmp(argv[i], "--promo-start") == 0 && i + 1 < argc) promo_start = atoi(argv[++i]);
     }
@@ -14285,6 +15002,13 @@ int main(int argc, char *argv[]) {
         printf("Font failed to load: %s\n", TTF_GetError());
         return 1;
     }
+
+    // Knulli mounts one data partition as /userdata and leaves the other card
+    // unmounted, so a two-card handheld shows one card's games and no sign the
+    // other exists. Mount it ourselves before anything scans for ROMs.
+    storage_scan();
+    if (storage_automount_all() > 0) storage_scan();   // pick up the new mount points
+    roms_autoadd_new();
 
     ensure_rom_folders();
     ensure_asset_folders();
@@ -16169,6 +16893,8 @@ int main(int argc, char *argv[]) {
                                 scrape_description = !scrape_description;
                             } else if (rt == ROW_ONLY_MISSING) {
                                 only_scrape_missing = !only_scrape_missing;
+                            } else if (rt == ROW_FIX_TITLES) {
+                                fix_game_titles = !fix_game_titles;
                             } else if (rt == ROW_RA_ENABLED) {
                                 ra_enabled = !ra_enabled; save_ra_config();
                             } else if (rt == ROW_RA_HARDCORE) {
@@ -16489,6 +17215,16 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_ONLY_MISSING) {
                                 only_scrape_missing = !only_scrape_missing;
                                 save_settings(); settings_dirty = 0;
+                            } else if (rt == ROW_FIX_TITLES) {
+                                // Titles are resolved during the scan, so the
+                                // library has to be re-read for this to show.
+                                fix_game_titles = !fix_game_titles;
+                                save_settings(); settings_dirty = 0;
+                                for (int gp = 0; gp < PLATFORM_COUNT; gp++) {
+                                    platform_game_count_cache[gp] = -1;
+                                    platform_has_games_cache[gp] = -1;
+                                }
+                                free_games(ren); rescan_active_games(ren, font_label);
                             } else if (rt == ROW_SCRAPE_NOW) {
                                 if (scrape_in_progress) stop_scrape(ren, font_label, platform_selected);
                                 else run_scrape(); // non-blocking -- poll_scrape_status() refreshes art once actually done
@@ -16549,7 +17285,41 @@ int main(int argc, char *argv[]) {
                 }
                 else if (state == STATE_ROMFOLDERS) {
                     SDL_Keycode k = e.key.keysym.sym;
-                    if (romfs_browsing) {
+                    if (romfs_card >= 0) {
+                        char labels[8][96]; int ids[8];
+                        int n = romfs_card_actions(romfs_card, labels, ids);
+                        if (n <= 0) { romfs_card = -1; }
+                        else {
+                            if (k == SDLK_UP)   romfs_card_sel = (romfs_card_sel - 1 + n) % n;
+                            if (k == SDLK_DOWN) romfs_card_sel = (romfs_card_sel + 1) % n;
+                            if (k == SDLK_ESCAPE) { romfs_card = -1; play_click(); }
+                            if (k == SDLK_RETURN) {
+                                int act = ids[romfs_card_sel < n ? romfs_card_sel : 0];
+                                play_click();
+                                switch (act) {
+                                    case CARDACT_USE:    storage_use_for_games(romfs_card); romfs_card = -1; break;
+                                    case CARDACT_CHECK:  storage_check_folders(romfs_card, 0); break;
+                                    case CARDACT_REPAIR: storage_check_folders(romfs_card, 1); break;
+                                    case CARDACT_BROWSE: {
+                                        char mp[300]; snprintf(mp, sizeof mp, "%s", g_storage[romfs_card].mount);
+                                        romfs_card = -1;
+                                        if (mp[0]) romfs_enter(mp);
+                                        break;
+                                    }
+                                    case CARDACT_MOUNT:
+                                        if (storage_mount_card(romfs_card, romfs_message, sizeof romfs_message))
+                                            storage_refresh_counts();
+                                        romfs_card_sel = 0;
+                                        break;
+                                    case CARDACT_UNMOUNT:
+                                        storage_unmount_card(romfs_card, romfs_message, sizeof romfs_message);
+                                        romfs_card_sel = 0;
+                                        break;
+                                    case CARDACT_BACK: romfs_card = -1; break;
+                                }
+                            }
+                        }
+                    } else if (romfs_browsing) {
                         int has_parent = strcmp(romfs_path, "/") != 0;
                         int total = 1 + has_parent + romfs_dir_count; // Use here, parent, directories
                         if (k == SDLK_UP) romfs_sel = (romfs_sel - 1 + total) % total;
@@ -16570,28 +17340,33 @@ int main(int argc, char *argv[]) {
                         }
                     } else {
                         int roots = g_roms_nroots > 0 ? g_roms_nroots : 1;
-                        int total = 1 + roots + (roots < ROMS_ROOT_MAX ? 1 : 0);
+                        int ns = g_storage_count;
+                        int total = ns + 1 + roots + (roots < ROMS_ROOT_MAX ? 1 : 0);
                         if (k == SDLK_UP) romfs_sel = (romfs_sel - 1 + total) % total;
                         if (k == SDLK_DOWN) romfs_sel = (romfs_sel + 1) % total;
                         if (k == SDLK_ESCAPE) { save_settings(); state = romfs_return_state; play_click(); }
-                        if (k == SDLK_s && romfs_sel >= 1 && romfs_sel <= roots) {
+                        if (k == SDLK_s && romfs_sel > ns && romfs_sel <= ns + roots) {
                             if (g_roms_nroots == 0) snprintf(romfs_message, sizeof romfs_message, "Add another folder before replacing the default");
-                            else romfs_remove(romfs_sel - 1);
+                            else romfs_remove(romfs_sel - ns - 1);
                             if (romfs_sel >= total - 1) romfs_sel = total - 2;
                             play_click();
                         }
                         if (k == SDLK_RETURN) {
-                            if (romfs_sel == 0) {
+                            if (romfs_sel < ns) {
+                                romfs_card = romfs_sel; romfs_card_sel = 0;
+                                romfs_message[0] = '\0'; play_click();
+                            } else if (romfs_sel == ns) {
                                 splash_now(ren, "Rescanning selected game folders");
+                                storage_scan(); storage_refresh_counts();
                                 for (int p = 0; p < PLATFORM_COUNT; p++) {
                                     platform_game_count_cache[p] = -1; platform_has_games_cache[p] = -1;
                                 }
                                 free_games(ren); library_search[0] = '\0'; scan_all_games(ren, font_label);
                                 snprintf(romfs_message, sizeof romfs_message, "Library rescan complete");
                                 play_click();
-                            } else if (romfs_sel <= roots) {
-                                const char *p = g_roms_nroots > 0 ? g_roms_roots[romfs_sel - 1] : sn_roms_root();
-                                romfs_enter(p); play_click();
+                            } else if (romfs_sel <= ns + roots) {
+                                const char *pth = g_roms_nroots > 0 ? g_roms_roots[romfs_sel - ns - 1] : sn_roms_root();
+                                romfs_enter(pth); play_click();
                             } else {
 #ifdef SNAPOS_TARGET_KNULLI
                                 romfs_enter("/userdata");
@@ -16630,8 +17405,10 @@ int main(int argc, char *argv[]) {
                             }
                         }
                     } else if (setup_step == SETUP_DEVICE) {
-                        if (k == SDLK_UP)   setup_sel = (setup_sel - 1 + DEVICE_PROFILE_COUNT) % DEVICE_PROFILE_COUNT;
-                        if (k == SDLK_DOWN) setup_sel = (setup_sel + 1) % DEVICE_PROFILE_COUNT;
+                        if (k == SDLK_LEFT  || k == SDLK_UP)
+                            setup_sel = (setup_sel - 1 + DEVICE_PROFILE_COUNT) % DEVICE_PROFILE_COUNT;
+                        if (k == SDLK_RIGHT || k == SDLK_DOWN)
+                            setup_sel = (setup_sel + 1) % DEVICE_PROFILE_COUNT;
                         if (k == SDLK_RETURN) {
                             device_idx = setup_sel;
                             setup_step = SETUP_HOTKEYS; setup_sel = 0;
@@ -16676,17 +17453,39 @@ int main(int argc, char *argv[]) {
                                 setup_sel = 0; play_click();
                             } else {
                                 setup_step = SETUP_ROMS; setup_sel = 0;
+                                storage_scan();
+                                if (storage_automount_all() > 0) storage_scan();
+                                storage_refresh_counts();
                                 roms_detect_and_apply(1);   // scan cards, fill roms_status
                                 play_click();
                             }
                         }
                     } else if (setup_step == SETUP_ROMS) {
-                        if (k == SDLK_UP) setup_sel = (setup_sel - 1 + 3) % 3;
-                        if (k == SDLK_DOWN) setup_sel = (setup_sel + 1) % 3;
+                        char slabels[5][96]; int sids[5];
+                        int sn = setup_roms_rows(slabels, sids);
+                        if (setup_sel >= sn) setup_sel = sn - 1;
+                        if (k == SDLK_UP)   setup_sel = (setup_sel - 1 + sn) % sn;
+                        if (k == SDLK_DOWN) setup_sel = (setup_sel + 1) % sn;
                         if (k == SDLK_RETURN) {
-                            if (setup_sel == 0) { romfs_open(STATE_SETUP); state = STATE_ROMFOLDERS; play_click(); }
-                            else if (setup_sel == 1) { roms_detect_and_apply(1); play_click(); }
-                            else { setup_step = SETUP_THEME; setup_sel = theme_idx; play_click(); }
+                            play_click();
+                            switch (sids[setup_sel]) {
+                              case SROM_CHOOSE: romfs_open(STATE_SETUP); state = STATE_ROMFOLDERS; break;
+                              case SROM_DETECT:
+                                storage_scan();
+                                if (storage_automount_all() > 0) storage_scan();
+                                storage_refresh_counts();
+                                roms_detect_and_apply(1);
+                                break;
+                              case SROM_CARD: {
+                                int x = storage_extra_card();
+                                if (x >= 0) {
+                                    storage_use_for_games(x);
+                                    snprintf(roms_status, sizeof roms_status, "%s", romfs_message);
+                                }
+                                break;
+                              }
+                              case SROM_CONTINUE: setup_step = SETUP_THEME; setup_sel = theme_idx; break;
+                            }
                         }
                     } else if (setup_step == SETUP_THEME) {
                         if (k == SDLK_UP)   setup_sel = (setup_sel - 1 + THEME_COUNT) % THEME_COUNT;
@@ -18625,7 +19424,7 @@ int main(int argc, char *argv[]) {
                             break;
                         }
                         case ROW_G_SHOW_DESC: snprintf(text, sizeof(text), "Show Descriptions: %s", show_description ? "ON" : "OFF"); break;
-                        case ROW_G_ROMS: if (g_roms_nroots > 1) snprintf(text, sizeof(text), "> Games Folders: %d / %d", g_roms_nroots, ROMS_ROOT_MAX); else snprintf(text, sizeof(text), "> Games Folder: %.58s", sn_roms_root()); break;
+                        case ROW_G_ROMS: if (g_storage_count > 1) snprintf(text, sizeof(text), "> Storage & Games Folders: %d cards, %d folder%s", g_storage_count, g_roms_nroots > 0 ? g_roms_nroots : 1, (g_roms_nroots > 0 ? g_roms_nroots : 1) == 1 ? "" : "s"); else if (g_roms_nroots > 1) snprintf(text, sizeof(text), "> Storage & Games Folders: %d / %d", g_roms_nroots, ROMS_ROOT_MAX); else snprintf(text, sizeof(text), "> Storage & Games Folders: %.44s", sn_roms_root()); break;
                         case ROW_G_BG_HEADER: snprintf(text, sizeof(text), "%c Backgrounds", bg_dropdown_open ? 'v' : '>'); break;
                         case ROW_G_BG_MODE: snprintf(text, sizeof(text), "Source: %s", bg_mode_names[(platform_bg_mode>=0&&platform_bg_mode<BG_MODE_COUNT)?platform_bg_mode:0]); indent=1; break;
                         case ROW_G_BG_COLOR: snprintf(text, sizeof(text), "Color: %s", hud_chrome_colors[(platform_bg_color_idx>=0&&platform_bg_color_idx<HUD_CHROME_COLOR_COUNT)?platform_bg_color_idx:0].name); indent=1; break;
@@ -18672,6 +19471,7 @@ int main(int argc, char *argv[]) {
                         case ROW_ART_EXTRAS_HEADER: snprintf(text, sizeof(text), "%c Extras", scrape_extras_open ? 'v' : '>'); indent = 2; break;
                         case ROW_SCRAPE_DESC: snprintf(text, sizeof(text), "Descriptions: %s", scrape_description ? "ON" : "OFF"); indent = 2; break;
                         case ROW_ONLY_MISSING: snprintf(text, sizeof(text), "Only Scrape Missing: %s", only_scrape_missing ? "ON" : "OFF"); indent = 1; break;
+                        case ROW_FIX_TITLES: snprintf(text, sizeof(text), "Fix Game Titles: %s", fix_game_titles ? "ON" : "OFF"); indent = 1; break;
                         case ROW_SCRAPE_NOW: snprintf(text, sizeof(text), "%s", scrape_in_progress ? "Stop Scraping Now (Press A)" : scrape_error ? "Scrape Now (last run failed)" : "Scrape Now"); indent = 1; break;
                         case ROW_RA_HEADER: snprintf(text, sizeof(text), "%c RetroAchievements%s", ra_dropdown_open ? 'v' : '>', ra_configured() ? "  (active)" : ""); break;
                         case ROW_RA_ENABLED: snprintf(text, sizeof(text), "Enabled: %s", !ra_enabled ? "OFF" : ra_linked ? "ON + Linked" : "ON"); indent = 1; break;
@@ -18915,27 +19715,80 @@ int main(int argc, char *argv[]) {
             }
         } else if (state == STATE_ROMFOLDERS) {
             int hx = 36, y = 62;
-            SDL_Texture *hdr = render_text(ren, font_small_bold,
-                romfs_browsing ? "CHOOSE A GAMES FOLDER" : "GAMES FOLDERS", th->accent2);
+            const char *hdr_txt = romfs_card >= 0 ? "CARD OPTIONS"
+                                : romfs_browsing  ? "CHOOSE A GAMES FOLDER"
+                                                  : "STORAGE & GAMES FOLDERS";
+            SDL_Texture *hdr = render_text(ren, font_small_bold, hdr_txt, th->accent2);
             int hw, hh; SDL_QueryTexture(hdr, NULL, NULL, &hw, &hh);
             SDL_RenderCopy(ren, hdr, NULL, &(SDL_Rect){ hx, y, hw, hh });
-            if (!romfs_browsing) {
+            int pitch = TTF_FontHeight(font_label) + 12;
+
+            if (romfs_card >= 0) {
+                char labels[8][96]; int ids[8];
+                int n = romfs_card_actions(romfs_card, labels, ids);
+                char sub[320]; storage_row_text_long(romfs_card, sub, sizeof sub);
+                y += hh + 10;
+                char sl[MAX_LINES][128];
+                int sln = wrap_text(font_label, sub, WIN_W - 2*hx, sl);
+                for (int i2 = 0; i2 < sln; i2++) {
+                    SDL_Texture *st = render_text(ren, font_label, sl[i2], g_ui_text);
+                    int sw, sh; SDL_QueryTexture(st, NULL, NULL, &sw, &sh);
+                    SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ hx, y, sw, sh });
+                    y += sh + 3;
+                }
+                y += 12;
+                for (int i2 = 0; i2 < n; i2++) {
+                    int sel = i2 == romfs_card_sel;
+                    if (sel) {
+                        SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                        SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 4, WIN_W - 2*hx + 16, pitch - 4 });
+                    }
+                    SDL_Texture *rt = render_text_fit(ren, font_label, labels[i2], sel ? g_ui_text : g_ui_dim, WIN_W - 2*hx - 8);
+                    int rw, rh; SDL_QueryTexture(rt, NULL, NULL, &rw, &rh);
+                    SDL_RenderCopy(ren, rt, NULL, &(SDL_Rect){ hx, y, rw, rh });
+                    y += pitch;
+                }
+                SDL_Texture *hint = render_text_fit(ren, font_label,
+                    "A  Choose     B  Back", g_ui_dim, WIN_W - 2*hx);
+                int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
+                SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ hx, WIN_H - ih - 16, iw, ih });
+            } else if (!romfs_browsing) {
                 int roots = g_roms_nroots > 0 ? g_roms_nroots : 1;
-                char cap[24]; snprintf(cap, sizeof cap, "%d / %d selected", roots, ROMS_ROOT_MAX);
-                SDL_Texture *ct = render_text(ren, font_label, cap, g_ui_dim);
-                int cw, ch; SDL_QueryTexture(ct, NULL, NULL, &cw, &ch);
-                SDL_RenderCopy(ren, ct, NULL, &(SDL_Rect){ WIN_W - hx - cw, y + 4, cw, ch });
-                y += hh + 16;
-                int total = 1 + roots + (roots < ROMS_ROOT_MAX ? 1 : 0);
-                int pitch = TTF_FontHeight(font_label) + 14;
-                for (int i = 0; i < total; i++) {
-                    char row[620];
-                    if (i == 0) snprintf(row, sizeof row, "Rescan selected folders");
-                    else if (i <= roots) {
-                        const char *p = g_roms_nroots > 0 ? g_roms_roots[i - 1] : sn_roms_root();
-                        snprintf(row, sizeof row, "%d. %s", i, p);
+                int ns = g_storage_count;
+                y += hh + 10;
+                int total = ns + 1 + roots + (roots < ROMS_ROOT_MAX ? 1 : 0);
+                int lblh = TTF_FontHeight(font_label);
+                // Everything below the list: message line (when shown) + hint.
+                int reserved = lblh + 22 + (romfs_message[0] ? lblh + 10 : 0);
+                int avail = (WIN_H - reserved) - y;
+                int sect_extra = (ns > 0 ? lblh + 6 : 0) + (lblh + 6);
+                int vis = (avail - sect_extra) / pitch;
+                if (vis < 3) vis = 3;
+                if (vis > total) vis = total;
+                int first = romfs_sel >= vis ? romfs_sel - vis + 1 : 0;
+                for (int i2 = first; i2 < total && i2 < first + vis; i2++) {
+                    char row[700];
+                    // A section heading sits above the first row of each block.
+                    const char *sect = (ns > 0 && i2 == 0)  ? "CARDS"
+                                     : (i2 == ns)           ? "GAMES FOLDERS" : NULL;
+                    if (sect) {
+                        char sbuf[64];
+                        if (i2 == 0) snprintf(sbuf, sizeof sbuf, "CARDS  (%d)", ns);
+                        else         snprintf(sbuf, sizeof sbuf, "GAMES FOLDERS  (%d of %d)", roots, ROMS_ROOT_MAX);
+                        SDL_Texture *sh2 = render_text(ren, font_label, sbuf, th->accent3);
+                        int sw2, shh; SDL_QueryTexture(sh2, NULL, NULL, &sw2, &shh);
+                        SDL_RenderCopy(ren, sh2, NULL, &(SDL_Rect){ hx, y, sw2, shh });
+                        y += shh + 6;
+                    }
+                    if (i2 < ns)              storage_row_text(i2, row, sizeof row);
+                    else if (i2 == ns)        snprintf(row, sizeof row, "Rescan selected folders");
+                    else if (i2 <= ns + roots) {
+                        const char *pth = g_roms_nroots > 0 ? g_roms_roots[i2 - ns - 1] : sn_roms_root();
+                        int card = storage_card_for_path(pth);
+                        if (card >= 0) snprintf(row, sizeof row, "%d. [%s] %s", i2 - ns, g_storage[card].slot, pth);
+                        else           snprintf(row, sizeof row, "%d. %s", i2 - ns, pth);
                     } else snprintf(row, sizeof row, "+ Add another folder");
-                    int sel = i == romfs_sel;
+                    int sel = i2 == romfs_sel;
                     if (sel) {
                         SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
                         SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 4, WIN_W - 2*hx + 16, pitch - 4 });
@@ -18945,8 +19798,12 @@ int main(int argc, char *argv[]) {
                     SDL_RenderCopy(ren, rt, NULL, &(SDL_Rect){ hx, y, rw, rh });
                     y += pitch;
                 }
-                SDL_Texture *hint = render_text_fit(ren, font_label,
-                    "A  Open / Rescan     X  Remove folder     B  Done", g_ui_dim, WIN_W - 2*hx);
+                char hintbuf[160];
+                snprintf(hintbuf, sizeof hintbuf, "%s%s",
+                    romfs_sel < ns ? "A  Card options     B  Done"
+                                   : "A  Open / Rescan     X  Remove folder     B  Done",
+                    (first > 0 || first + vis < total) ? "     (scroll for more)" : "");
+                SDL_Texture *hint = render_text_fit(ren, font_label, hintbuf, g_ui_dim, WIN_W - 2*hx);
                 int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
                 SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ hx, WIN_H - ih - 16, iw, ih });
             } else {
@@ -18957,26 +19814,26 @@ int main(int argc, char *argv[]) {
                 y += ph + 12;
                 int has_parent = strcmp(romfs_path, "/") != 0;
                 int total = 1 + has_parent + romfs_dir_count;
-                int pitch = TTF_FontHeight(font_label) + 10;
-                int vis = (WIN_H - y - 54) / pitch; if (vis < 3) vis = 3;
+                int bpitch = TTF_FontHeight(font_label) + 10;
+                int vis = (WIN_H - y - 54) / bpitch; if (vis < 3) vis = 3;
                 int first = romfs_sel >= vis ? romfs_sel - vis + 1 : 0;
-                for (int i = first; i < total && i < first + vis; i++) {
+                for (int i2 = first; i2 < total && i2 < first + vis; i2++) {
                     char row[300];
-                    if (i == 0) snprintf(row, sizeof row, "Use this folder%s", romfs_selected(romfs_path) ? "  (selected)" : "");
-                    else if (has_parent && i == 1) snprintf(row, sizeof row, "[..] Parent folder");
+                    if (i2 == 0) snprintf(row, sizeof row, "Use this folder%s", romfs_selected(romfs_path) ? "  (selected)" : "");
+                    else if (has_parent && i2 == 1) snprintf(row, sizeof row, "[..] Parent folder");
                     else {
-                        int di = i - 1 - has_parent;
+                        int di = i2 - 1 - has_parent;
                         snprintf(row, sizeof row, "[%s]", romfs_dirs[di]);
                     }
-                    int sel = i == romfs_sel;
+                    int sel = i2 == romfs_sel;
                     if (sel) {
                         SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
-                        SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 3, WIN_W - 2*hx + 16, pitch - 3 });
+                        SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 3, WIN_W - 2*hx + 16, bpitch - 3 });
                     }
                     SDL_Texture *rt = render_text_fit(ren, font_label, row, sel ? g_ui_text : g_ui_dim, WIN_W - 2*hx - 8);
                     int rw, rh; SDL_QueryTexture(rt, NULL, NULL, &rw, &rh);
                     SDL_RenderCopy(ren, rt, NULL, &(SDL_Rect){ hx, y, rw, rh });
-                    y += pitch;
+                    y += bpitch;
                 }
                 SDL_Texture *hint = render_text_fit(ren, font_label,
                     "A  Open / Use this folder     B  Parent / Back", g_ui_dim, WIN_W - 2*hx);
@@ -18986,7 +19843,8 @@ int main(int argc, char *argv[]) {
             if (romfs_message[0]) {
                 SDL_Texture *mt = render_text_fit(ren, font_label, romfs_message, th->accent3, WIN_W - 2*hx);
                 int mw, mh; SDL_QueryTexture(mt, NULL, NULL, &mw, &mh);
-                SDL_RenderCopy(ren, mt, NULL, &(SDL_Rect){ hx, WIN_H - mh - 43, mw, mh });
+                SDL_RenderCopy(ren, mt, NULL,
+                    &(SDL_Rect){ hx, WIN_H - mh - TTF_FontHeight(font_label) - 26, mw, mh });
             }
 
         } else if (state == STATE_SETUP) {
@@ -19056,20 +19914,50 @@ int main(int argc, char *argv[]) {
                                       SETUP_ROW("Continue", setup_sel == 2); y += rowh; }
                 else                { SETUP_ROW("Continue", setup_sel == 1); y += rowh; }
             } else if (setup_step == SETUP_DEVICE) {
-                for (int i = 0; i < DEVICE_PROFILE_COUNT; i++) {
-                    SETUP_ROW(device_profiles[i].name, i == setup_sel);
-                    y += rowh;
+                // One row that cycles, rather than a line per model: the list
+                // grows with every handheld added and was crowding the step.
+                int sw = WIN_W - 2*hx;
+                SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 3, sw + 16, rowh + 8 });
+                SDL_Texture *la = render_text(ren, font_label_bold ? font_label_bold : font_label, "<", th->accent2);
+                SDL_Texture *ra = render_text(ren, font_label_bold ? font_label_bold : font_label, ">", th->accent2);
+                int law, lah, raw, rah;
+                SDL_QueryTexture(la, NULL, NULL, &law, &lah);
+                SDL_QueryTexture(ra, NULL, NULL, &raw, &rah);
+                SDL_Texture *nm = render_text_fit(ren, font_label, device_profiles[setup_sel].name,
+                                                  g_ui_text, sw - law - raw - 48);
+                int nmw, nmh; SDL_QueryTexture(nm, NULL, NULL, &nmw, &nmh);
+                int cy = y + (rowh + 2 - nmh) / 2;
+                SDL_RenderCopy(ren, la, NULL, &(SDL_Rect){ hx + 6, y + (rowh + 2 - lah) / 2, law, lah });
+                SDL_RenderCopy(ren, ra, NULL, &(SDL_Rect){ hx + sw - raw - 6, y + (rowh + 2 - rah) / 2, raw, rah });
+                SDL_RenderCopy(ren, nm, NULL, &(SDL_Rect){ hx + (sw - nmw) / 2, cy, nmw, nmh });
+                y += rowh + 14;
+                char pos[40];
+                snprintf(pos, sizeof pos, "%d of %d", setup_sel + 1, DEVICE_PROFILE_COUNT);
+                SDL_Texture *pt2 = render_text(ren, font_label, pos, g_ui_dim);
+                int ptw, pth2; SDL_QueryTexture(pt2, NULL, NULL, &ptw, &pth2);
+                SDL_RenderCopy(ren, pt2, NULL, &(SDL_Rect){ hx + (sw - ptw) / 2, y, ptw, pth2 });
+                y += pth2 + 10;
+                // Wrap, don't clip: both of these are longer than one 640px line
+                // and the model note is the whole point of the step.
+                char nl[MAX_LINES][128];
+                int nn = wrap_text(font_label, device_profiles[setup_sel].note, WIN_W - 2*hx, nl);
+                for (int i = 0; i < nn; i++) {
+                    SDL_Texture *n = render_text(ren, font_label, nl[i], g_ui_dim);
+                    int nw, nh; SDL_QueryTexture(n, NULL, NULL, &nw, &nh);
+                    SDL_RenderCopy(ren, n, NULL, &(SDL_Rect){ hx, y, nw, nh });
+                    y += nh + 3;
                 }
                 y += 8;
-                SDL_Texture *n = render_text_fit(ren, font_label, device_profiles[setup_sel].note, g_ui_dim, WIN_W - 2*hx);
-                int nw, nh; SDL_QueryTexture(n, NULL, NULL, &nw, &nh);
-                SDL_RenderCopy(ren, n, NULL, &(SDL_Rect){ hx, y, nw, nh });
-                y += nh + 6;
-                SDL_Texture *n2 = render_text_fit(ren, font_label,
-                    "Sets the screen layout and whether Snap FE expects analog sticks. Pick the entry that matches your handheld's controls.",
-                    g_ui_dim, WIN_W - 2*hx);
-                int n2w, n2h; SDL_QueryTexture(n2, NULL, NULL, &n2w, &n2h);
-                SDL_RenderCopy(ren, n2, NULL, &(SDL_Rect){ hx, y, n2w, n2h });
+                int n2n = wrap_text(font_label,
+                    "Left / Right to change, A to continue. Sets the screen layout and whether Snap FE expects analog sticks.",
+                    WIN_W - 2*hx, nl);
+                for (int i = 0; i < n2n; i++) {
+                    SDL_Texture *n2 = render_text(ren, font_label, nl[i], g_ui_dim);
+                    int n2w, n2h; SDL_QueryTexture(n2, NULL, NULL, &n2w, &n2h);
+                    SDL_RenderCopy(ren, n2, NULL, &(SDL_Rect){ hx, y, n2w, n2h });
+                    y += n2h + 3;
+                }
             } else if (setup_step == SETUP_HOTKEYS) {
                 const char *controls[][2] = {
                     { "A",              "Select / open" },
@@ -19109,15 +19997,26 @@ int main(int argc, char *argv[]) {
                     y += lh + 4;
                 }
                 y += 14;
-                SETUP_ROW("Choose or add games folders", setup_sel == 0); y += rowh;
-                SETUP_ROW("Auto-detect and re-scan cards", setup_sel == 1); y += rowh;
-                SETUP_ROW("Continue", setup_sel == 2); y += rowh;
+                {
+                    char slabels[5][96]; int sids[5];
+                    int sn = setup_roms_rows(slabels, sids);
+                    for (int i = 0; i < sn; i++) { SETUP_ROW(slabels[i], setup_sel == i); y += rowh; }
+                }
                 y += 8;
-                SDL_Texture *n = render_text_fit(ren, font_label,
-                    "Choose up to 3 ROM folders now. You can add, remove or rescan them later from Settings > Games > Games Folders.",
-                    g_ui_dim, WIN_W - 2*hx);
-                int nw, nh; SDL_QueryTexture(n, NULL, NULL, &nw, &nh);
-                SDL_RenderCopy(ren, n, NULL, &(SDL_Rect){ hx, y, nw, nh });
+                {
+                    char fl[MAX_LINES][128];
+                    int fn = wrap_text(font_label,
+                        "A second SD card can be set up here.",
+                        WIN_W - 2*hx, fl);
+                    for (int i = 0; i < fn; i++) {
+                        int fh = TTF_FontHeight(font_label);
+                        if (y + fh > body_bottom) break;   // never draw over the button hint
+                        SDL_Texture *n = render_text(ren, font_label, fl[i], g_ui_dim);
+                        int nw, nh; SDL_QueryTexture(n, NULL, NULL, &nw, &nh);
+                        SDL_RenderCopy(ren, n, NULL, &(SDL_Rect){ hx, y, nw, nh });
+                        y += nh + 3;
+                    }
+                }
             } else if (setup_step == SETUP_TZ) {
                 int vis = (body_bottom - y) / rowh; if (vis < 4) vis = 4;
                 int first = 0;
@@ -19490,7 +20389,7 @@ int main(int argc, char *argv[]) {
 
         } else if (state == STATE_WIFI) {
             static Uint32 wifi_last_refresh = 0;
-            if (!wifi_scanning && SDL_GetTicks() - wifi_last_refresh > 2000) {
+            if (!promo_mode && !wifi_scanning && SDL_GetTicks() - wifi_last_refresh > 2000) {
                 wifi_refresh_status();          // so "Connecting..." resolves to an IP on its own
                 wifi_last_refresh = SDL_GetTicks();
             }
@@ -19498,7 +20397,27 @@ int main(int argc, char *argv[]) {
             SDL_Texture *hdr = render_text(ren, font_small, "WI-FI", th->accent2);
             int hw, hh; SDL_QueryTexture(hdr, NULL, NULL, &hw, &hh);
             SDL_RenderCopy(ren, hdr, NULL, &(SDL_Rect){ hx, y, hw, hh });
-            y += hh + 14;
+            y += hh + 12;
+
+            // Connection state gets its own banner at the top. It used to be a
+            // bare line pinned to the bottom of the window, one row above the
+            // button hint and directly under a network list whose height was a
+            // fixed 10 rows -- so on a full list the three ran into each other
+            // and you could not tell connected from not until the signal bars
+            // appeared in the status bar.
+            if (wifi_status[0]) {
+                int pending = strstr(wifi_status, "...") != NULL;
+                SDL_Color fg = wifi_connected_now ? th->accent3 : (pending ? th->accent2 : g_ui_dim);
+                SDL_Texture *bt2 = render_text_fit(ren, font_label, wifi_status, fg, WIN_W - 2*hx - 24);
+                int btw, bth; SDL_QueryTexture(bt2, NULL, NULL, &btw, &bth);
+                SDL_Rect band = { hx - 8, y, WIN_W - 2*hx + 16, bth + 12 };
+                SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                SDL_RenderFillRect(ren, &band);
+                SDL_SetRenderDrawColor(ren, fg.r, fg.g, fg.b, 255);
+                SDL_RenderFillRect(ren, &(SDL_Rect){ band.x, band.y, 4, band.h });   // state stripe
+                SDL_RenderCopy(ren, bt2, NULL, &(SDL_Rect){ hx + 8, y + 6, btw, bth });
+                y += band.h + 14;
+            }
 
             if (wifi_scanning) {
                 int dots = (SDL_GetTicks() / 400) % 4;
@@ -19514,9 +20433,14 @@ int main(int argc, char *argv[]) {
             }
 
             int wtotal = 2 + wifi_ssid_count;
-            // room for ~8 network rows after the two fixed ones
+            // Derive the row count from the space left under the banner instead
+            // of assuming 10 fit -- that assumption is what pushed the list into
+            // the status line and the hint.
+            int wrowh = TTF_FontHeight(font_label) + 12;
+            int wbottom = WIN_H - TTF_FontHeight(font_label) - 30;
+            int visible = (wbottom - y) / wrowh;
+            if (visible < 3) visible = 3;
             int first = 0;
-            int visible = 10;
             if (wifi_sel >= visible) first = wifi_sel - visible + 1;
             for (int i = first; i < wtotal && i < first + visible; i++) {
                 char line[96];
@@ -19539,11 +20463,6 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, e, NULL, &(SDL_Rect){ hx, y + 4, ew, eh });
             }
 
-            if (wifi_status[0]) {
-                SDL_Texture *st = render_text_fit(ren, font_label, wifi_status, th->accent2, WIN_W - 2*hx);
-                int sw, sh; SDL_QueryTexture(st, NULL, NULL, &sw, &sh);
-                SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ hx, WIN_H - sh - 40, sw, sh });
-            }
             SDL_Texture *hint = render_text(ren, font_label, "A: Select    B: Back", g_ui_dim);
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ hx, WIN_H - hih - 18, hiw, hih });
@@ -21477,12 +22396,20 @@ int main(int argc, char *argv[]) {
                 "block-roll-level", "link-play-game-list", "setup-built-in-hotkeys",
                 "home-stats-recent-spacing", "home-app-weather-controls",
                 "home-battery-health-data", "home-calendar-week",
-                "calendar-app", "calculator-app", "calendar-reminder-popup", "calendar-time-picker"
+                "calendar-app", "calculator-app", "calendar-reminder-popup", "calendar-time-picker",
+                "storage-two-cards", "storage-card-options",
+                "wifi-connected", "wifi-not-connected", "setup-device-picker",
+                "setup-second-card"
             };
             static const int pfonts[] = {
                 0, 3, 7, 9, 1, 3, 2, 3, 2, 0, 4, 4, 3, 3, 3, 3, 9, 1, 3, 3, 4,
-                3, 0, 5, 3, 9, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0
+                3, 0, 5, 3, 9, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+                0, 0, 3, 3, 0, 0
             };
+            // pfonts is indexed by pstep in lockstep with pnames; a short one
+            // reads past the end the moment a stop is added.
+            _Static_assert(sizeof(pfonts)/sizeof(pfonts[0]) == sizeof(pnames)/sizeof(pnames[0]),
+                           "promo: pfonts must have one entry per pnames stop");
 
             // --- extended tour -------------------------------------------
             // The hand-built stops above cover the feature set once each. These
@@ -21756,6 +22683,41 @@ int main(int argc, char *argv[]) {
                            snprintf(calendar_reminders[0].text, sizeof calendar_reminders[0].text, "Call Mom");
                            calendar_reminder_last_shown = 0; calendar_reminder_popup = 1; break;
                            }
+                  case 36:
+                           scrape_in_progress = 0; theme_idx = 1;
+                           promo_seed_storage();
+                           g_roms_nroots = 2;
+                           snprintf(g_roms_roots[0], 512, "/userdata/roms");
+                           snprintf(g_roms_roots[1], 512, "/media/ROMS/roms");
+                           romfs_browsing = 0; romfs_card = -1; romfs_sel = 1;
+                           snprintf(romfs_message, sizeof romfs_message,
+                                    "TF2: 181 of 181 system folders missing (compared with the main card)");
+                           state = STATE_ROMFOLDERS; break;
+                  case 37:
+                           scrape_in_progress = 0; theme_idx = 1;
+                           promo_seed_storage();
+                           g_roms_nroots = 2;
+                           snprintf(g_roms_roots[0], 512, "/userdata/roms");
+                           snprintf(g_roms_roots[1], 512, "/media/ROMS/roms");
+                           romfs_browsing = 0; romfs_card = 1; romfs_card_sel = 0;
+                           romfs_message[0] = '\0';
+                           state = STATE_ROMFOLDERS; break;
+                  case 38:
+                           scrape_in_progress = 0; theme_idx = 1;
+                           promo_seed_wifi(1); state = STATE_WIFI; break;
+                  case 39:
+                           scrape_in_progress = 0; theme_idx = 1;
+                           promo_seed_wifi(0); state = STATE_WIFI; break;
+                  case 40:
+                           scrape_in_progress = 0; state = STATE_SETUP; theme_idx = 1;
+                           setup_step = SETUP_DEVICE; setup_sel = 1; break;
+                  case 41:
+                           scrape_in_progress = 0; state = STATE_SETUP; theme_idx = 1;
+                           promo_seed_storage();
+                           setup_step = SETUP_ROMS; setup_sel = 2;
+                           snprintf(roms_status, sizeof roms_status,
+                                    "2 cards found. TF1 (SHARE): 342 games. TF2 (ROMS): no system folders yet.");
+                           break;
                   case 35:
                            scrape_in_progress = 0; state = STATE_CALENDAR; theme_idx = 1;
                            calendar_set_today(); calendar_reminder_time_picker = 1;
@@ -21771,6 +22733,12 @@ int main(int argc, char *argv[]) {
             // frame; keep temporary help text aged out in subsequent promo frames.
             if (((pstep >= 4 && pstep <= 7) || pstep >= PROMO_BASE) && pf > 0)
                 platform_enter_time = SDL_GetTicks() - 11000;
+            const char *pstop_name = pstep < PROMO_BASE ? pnames[pstep] : pextra[pstep - PROMO_BASE].name;
+            if (promo_only[0] && !strstr(pstop_name, promo_only)) {
+                pf = 0; pstep++;
+                if (pstep >= PROMO_STEPS) running = 0;
+                continue;   // skip the settle frames entirely for stops we do not want
+            }
             pf++;
             if (pf == PSETTLE) {
                 char pp[700];

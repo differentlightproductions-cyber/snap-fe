@@ -41,6 +41,9 @@ def _arg(name, default=None):
 
 DATA_ROOT = _arg("data") or f"{HOME}/snapos-ui"
 ROMS_BASE = _arg("roms") or f"{HOME}/snapos-ui/roms"
+# Snap FE's library can span several cards. Take them all, "|"-separated, so a
+# game on the second SD card is scraped like any other.
+ROMS_ROOTS = [r for r in ROMS_BASE.split("|") if r.strip()] or [ROMS_BASE]
 BOXART_BASE = os.path.join(DATA_ROOT, "boxart")
 CONFIG_DIR = os.path.join(DATA_ROOT, "config")
 STATUS_PATH = os.path.join(DATA_ROOT, "scrape_status.txt")
@@ -281,19 +284,26 @@ def download_image(url, dest_path):
 def iter_roms():
     """Yield (short_dir, fname, base, title) for every ROM found."""
     seen_dirs = list(PLATFORMS) + list(DIR_ALIASES)
+    emitted = set()
     for d in seen_dirs:
         short = DIR_ALIASES.get(d, d)
         if SYSTEM_FILTER and short not in SYSTEM_FILTER:
             continue
-        rom_dir = os.path.join(ROMS_BASE, d)
-        if not os.path.isdir(rom_dir):
-            continue
-        for root, _dirs, files in os.walk(rom_dir):
-            for fname in sorted(files):
-                if not fname.lower().endswith(ROM_EXTENSIONS):
-                    continue
-                base = os.path.splitext(fname)[0]
-                yield short, fname, base, clean_title(fname)
+        for base_root in ROMS_ROOTS:
+            rom_dir = os.path.join(base_root, d)
+            if not os.path.isdir(rom_dir):
+                continue
+            for root, _dirs, files in os.walk(rom_dir):
+                for fname in sorted(files):
+                    if not fname.lower().endswith(ROM_EXTENSIONS):
+                        continue
+                    base = os.path.splitext(fname)[0]
+                    # Art is cached per (system, base name), so the same ROM
+                    # present on two cards is one unit of work, not two.
+                    if (short, base) in emitted:
+                        continue
+                    emitted.add((short, base))
+                    yield short, fname, base, clean_title(fname)
 
 
 # --------------------------------------------------------------------------- #
@@ -350,6 +360,9 @@ class TheGamesDB:
 
     def description(self, game):
         return (game.get("overview") or "").strip()
+
+    def title_of(self, game):
+        return (game.get("game_title") or "").strip()
 
     def _images(self, game_id):
         if game_id not in self._img_cache:
@@ -493,6 +506,19 @@ class ScreenScraper:
             return None
         return None
 
+    def title_of(self, game):
+        noms = game.get("noms", []) or []
+        if isinstance(noms, dict):          # some responses return a single object
+            noms = [noms]
+        for reg in list(SS_REGION_PREF) + ["ss"]:
+            for n in noms:
+                if n.get("region") == reg and (n.get("text") or "").strip():
+                    return n["text"].strip()
+        for n in noms:
+            if (n.get("text") or "").strip():
+                return n["text"].strip()
+        return ""
+
     def description(self, game):
         for s in game.get("synopsis", []) or []:
             if s.get("langue") in ("en", "en_us"):
@@ -530,11 +556,12 @@ def main():
     source = (_arg("source", "gamesdb") or "gamesdb").lower()
     types = parse_types()
     want_desc = flag("description", False)
+    want_titles = flag("titles", True)
     only_missing = flag("only-missing", True)
 
     print(f"Source: {source}   types: {', '.join(types)}   "
           f"desc: {want_desc}   only-missing: {only_missing}")
-    print(f"data={DATA_ROOT}  roms={ROMS_BASE}")
+    print(f"data={DATA_ROOT}  roms={' + '.join(ROMS_ROOTS)}")
 
     write_status(0, 0, "Starting...", "scraping")
     is_ss = source in ("screenscraper", "ss")
@@ -564,6 +591,11 @@ def main():
             os.makedirs(dd, exist_ok=True)
             if not (only_missing and os.path.exists(os.path.join(dd, base + ".txt"))):
                 work.append((short, fname, base, title, "description"))
+        if want_titles:
+            nd = os.path.join(BOXART_BASE, short, "name")
+            os.makedirs(nd, exist_ok=True)
+            if not os.path.exists(os.path.join(nd, base + ".txt")):
+                work.append((short, fname, base, title, "name"))
 
     total = len(work)
     if total == 0:
@@ -576,7 +608,7 @@ def main():
     game_cache = {}   # (short, base) -> game dict or None
 
     for idx, (short, fname, base, title, slug) in enumerate(work):
-        label = f"{title} ({ART_TYPE_DISPLAY.get(slug, 'Description')})"
+        label = f"{title} ({ART_TYPE_DISPLAY.get(slug, 'Name' if slug == 'name' else 'Description')})"
         write_status(idx, total, label, "scraping")
         print(f"[{idx + 1}/{total}] {label}")
 
@@ -608,6 +640,32 @@ def main():
         if not game:
             print("  no match")
             missed += 1
+            continue
+
+        # Record the name this ROM matched, so "Fix Game Titles" can show it
+        # instead of the filename. No extra request: it is already in the
+        # response that found the art.
+        name_path = os.path.join(BOXART_BASE, short, "name", base + ".txt")
+        if not os.path.exists(name_path):
+            try:
+                real = backend.title_of(game)
+            except Exception:
+                real = ""
+            if real:
+                try:
+                    os.makedirs(os.path.dirname(name_path), exist_ok=True)
+                    with open(name_path, "w", encoding="utf-8") as nf:
+                        nf.write(real + "\n")
+                    print(f"  title: {real}")
+                except Exception as e:
+                    print(f"  title save error: {e}")
+
+        if slug == "name":
+            if os.path.exists(name_path):
+                found += 1
+            else:
+                print("  no name returned")
+                missed += 1
             continue
 
         if slug == "description":

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Deploy Snap FE to a Knulli handheld over SSH, in one connection.
+# Deploy Snap FE to one or more Knulli handhelds over SSH.
 # Run from anywhere; it cd's to the snapos-ui/ dir itself.
 #
-#   ./knulli/deploy.sh [user@ip]          (required, e.g. root@192.168.1.42)
+#   ./knulli/deploy.sh root@192.168.1.42                 one device
+#   ./knulli/deploy.sh root@192.168.1.42 root@...43      several, in order
+#   ./knulli/deploy.sh                                   every device listed in
+#                                                        knulli/devices.local
+#
+# devices.local is one "user@host" per line (# comments allowed). It is
+# gitignored: keep your own handhelds there rather than in this script, so the
+# published copy carries nobody's addresses.
 #
 # TIP: `ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 && ssh-copy-id root@<ip>`
 # once, and you'll never be asked for the password again.
@@ -10,7 +17,19 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DEV="${1:?usage: $0 user@device-ip   (e.g. root@192.168.1.42 -- password: linux)}"
+TARGETS=("$@")
+if [[ ${#TARGETS[@]} -eq 0 && -f knulli/devices.local ]]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"; line="${line// /}"
+    [[ -n "$line" ]] && TARGETS+=("$line")
+  done < knulli/devices.local
+fi
+[[ ${#TARGETS[@]} -gt 0 ]] || {
+  echo "usage: $0 user@device-ip [user@device-ip ...]" >&2
+  echo "   or: list them in knulli/devices.local and run with no arguments" >&2
+  echo "   (e.g. root@192.168.1.42 -- password: linux)" >&2
+  exit 1
+}
 BIN="snapos_ui.aarch64"
 [[ -f "$BIN" ]] || { echo "build first:  ./build-knulli.sh --sysroot ~/knulli-sysroot" >&2; exit 1; }
 [[ -d assets ]] || { echo "no assets/ dir here?" >&2; exit 1; }
@@ -18,7 +37,7 @@ BIN="snapos_ui.aarch64"
 # strip Windows NTFS metadata streams if any crept back in
 find assets -name '*:Zone.Identifier' -delete 2>/dev/null || true
 
-echo ">> deploying to $DEV  (one password prompt)"
+echo ">> deploying to ${#TARGETS[@]} device(s): ${TARGETS[*]}"
 EXTRA=""
 [ -f scrape_boxart.py ] && EXTRA="$EXTRA scrape_boxart.py"
 [ -f background_browser.py ] && EXTRA="$EXTRA background_browser.py"
@@ -50,10 +69,20 @@ printf 'Snap FE %s\nbuilt %s\nsource: knulli/deploy.sh (dev deploy, not a packag
   "$SNAPVER" "$(date -u +%FT%TZ)" > ./_VERSION
 echo "   version: $SNAPVER"
 
-tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED _VERSION assets \
+# Pack once. Re-running tar per device would re-read the whole asset tree for
+# each handheld and, worse, let two devices receive different bytes if anything
+# changed on disk mid-deploy.
+PAYLOAD="$(mktemp -t snapfe-deploy.XXXXXX.tgz)"
+trap 'rm -f "$PAYLOAD" ./_VERSION' EXIT
+tar czf "$PAYLOAD" --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED _VERSION assets \
   vendor/link-cores/gpsp_libretro.so vendor/link-cores/gambatte_libretro.so \
-  -C knulli custom.sh \
-| ssh "$DEV" '
+  -C knulli custom.sh
+
+FAILED=()
+for DEV in "${TARGETS[@]}"; do
+echo
+echo ">> $DEV"
+ssh "$DEV" '
   set -e
   # stop the frontend so nothing holds the old files open. Do NOT pkill on
   # "custom.sh" -- this very script mentions it and would kill our own shell.
@@ -119,9 +148,17 @@ tar czf - --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED _VERSION assets \
   if [ -x snapos_ui ]; then echo "   exec bit: OK"; else
     echo "   NOTE: no exec bit (FAT /userdata). custom.sh runs it as: sh -c ./snapos_ui"
   fi
-'
-rm -f ./_VERSION
+' < "$PAYLOAD" || { echo "   !! $DEV FAILED"; FAILED+=("$DEV"); }
+done
 
 echo
-echo ">> done. Reboot:  ssh $DEV reboot"
-echo "   revert:        ssh $DEV \"mv -f /userdata/system/custom.sh.pre-snapos /userdata/system/custom.sh 2>/dev/null || rm -f /userdata/system/custom.sh\""
+if [ ${#FAILED[@]} -gt 0 ]; then
+  echo ">> finished with failures: ${FAILED[*]}"
+else
+  echo ">> done on all ${#TARGETS[@]} device(s)."
+fi
+for DEV in "${TARGETS[@]}"; do
+  echo "   reboot $DEV:  ssh $DEV reboot"
+done
+echo "   revert:  ssh <dev> \"mv -f /userdata/system/custom.sh.pre-snapos /userdata/system/custom.sh 2>/dev/null || rm -f /userdata/system/custom.sh\""
+[ ${#FAILED[@]} -eq 0 ]

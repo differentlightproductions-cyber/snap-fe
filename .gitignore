@@ -37,3 +37,6 @@ promo/
 *~
 .DS_Store
 *:Zone.Identifier
+
+# personal device list for knulli/deploy.sh -- never publish addresses
+knulli/devices.local
