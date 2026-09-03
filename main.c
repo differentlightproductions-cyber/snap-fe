@@ -761,10 +761,21 @@ int  wifi_enabled_now = 0;
 char wifi_status[96] = "";
 int  wifi_connected_now = 0;       // drives the connection banner's wording AND its colour
 char wifi_conn_ssid[64] = "";      // network we are actually on ("" if unknown)
+char wifi_saved_ssid[64] = "";     // the remembered network, "" once forgotten
+int  wifi_forget_confirm = 0;      // Forget asks twice before it wipes anything
 char wifi_target_ssid[64] = "";    // network we're entering a password for
 int  wifi_scanning = 0;            // show a "Scanning..." screen, then run the (blocking) scan
 int  wifi_scan_shown = 0;          // one frame has been presented showing "Scanning..."
 Uint32 wifi_reconnect_last = 0;     // rate-limit the saved-network self-heal
+// Snap FE used to silently run knulli-wifi enable whenever it saw no route,
+// which reconnects whatever network is saved. If you had deliberately joined a
+// different one -- a phone hotspot, say -- that pulled you back to the old
+// network behind your back. It now asks first.
+int  wifi_prompt_active = 0;        // 1 = the Home prompt is up
+char wifi_prompt_ssid[64] = "";     // remembered network, or "" = none saved yet
+// "Don't ask again until the handheld is fully powered off": /tmp is tmpfs, so
+// this survives a Snap FE restart but not a reboot, which is exactly the ask.
+#define WIFI_PROMPT_DECLINED "/tmp/snapfe-wifi-prompt-declined"
 
 // --- Per-game options (Select button on a game in the library) -------------
 int gopts_sel = 0;
@@ -12804,6 +12815,11 @@ static void wifi_scan(void) {
     pclose(p);
 }
 static void wifi_refresh_status(void) {
+    wifi_saved_ssid[0] = '\0';
+    { FILE *sp = popen("/usr/bin/knulli-settings-get wifi.ssid 2>/dev/null", "r");
+      if (sp) { if (fgets(wifi_saved_ssid, sizeof wifi_saved_ssid, sp))
+                    wifi_saved_ssid[strcspn(wifi_saved_ssid, "\r\n")] = '\0';
+                pclose(sp); } }
     wifi_enabled_now = 0;
     FILE *p = popen("/usr/bin/knulli-settings-get wifi.enabled 2>/dev/null", "r");
     if (p) { char b[16] = ""; if (fgets(b, sizeof b, p)) wifi_enabled_now = (atoi(b) == 1); pclose(p); }
@@ -12834,6 +12850,21 @@ static void wifi_refresh_status(void) {
         }
     }
 }
+static void wifi_forget_saved(void) {
+    system("/usr/bin/knulli-settings-set wifi.ssid '' >/dev/null 2>&1");
+    system("/usr/bin/knulli-settings-set wifi.key '' >/dev/null 2>&1");
+    // knulli_wifi.config is regenerated from those settings; the managed_psk
+    // directories are ConnMan's own cached credentials and would otherwise
+    // reconnect on their own.
+    system("rm -f /var/lib/connman/knulli_wifi.config >/dev/null 2>&1");
+    system("rm -rf /var/lib/connman/wifi_*_managed_psk >/dev/null 2>&1");
+    system("/etc/init.d/S08connman reload >/dev/null 2>&1 &");
+    wifi_saved_ssid[0] = '\0';
+    wifi_conn_ssid[0] = '\0';
+    wifi_connected_now = 0;
+    snprintf(wifi_status, sizeof wifi_status, "Saved network forgotten -- pick one to connect");
+}
+
 static void wifi_connect(const char *ssid, const char *psk) {
     char qs[160], qp[200], cmd[420];
     sh_squote(ssid, qs, sizeof qs);
@@ -12856,12 +12887,23 @@ static void wifi_set_enabled(int on) {
 // reloading through its helper is enough to restore the saved network. Keep the
 // helper in the background (it may wait up to 20 seconds) and rate-limit retries
 // so an unavailable AP does not create a busy loop or drain the battery.
+// Reconnect to the saved network. Only ever called because the user said yes.
+static void wifi_do_saved_reconnect(void) {
+    system("( /usr/bin/knulli-wifi enable >/dev/null 2>&1 || {"
+           " connmanctl scan wifi >/dev/null 2>&1; sleep 2;"
+           " /usr/bin/knulli-wifi enable >/dev/null 2>&1; } ) &");
+    snprintf(wifi_status, sizeof wifi_status, "Reconnecting to %.40s...",
+             wifi_prompt_ssid[0] ? wifi_prompt_ssid : "the saved network");
+}
+
 static void wifi_reconnect_tick(void) {
     Uint32 now = SDL_GetTicks();
     if (wifi_reconnect_last && now - wifi_reconnect_last < 45000) return;
     wifi_reconnect_last = now;
 
-    if (wifi_has_route()) return;
+    if (wifi_has_route()) { wifi_prompt_active = 0; return; }   // back online, nothing to ask
+    if (wifi_prompt_active) return;                              // already asking
+    if (access(WIFI_PROMPT_DECLINED, F_OK) == 0) return;         // declined until next power-up
 
     int enabled = 0;
     FILE *p = popen("/usr/bin/knulli-settings-get wifi.enabled 2>/dev/null", "r");
@@ -12872,16 +12914,23 @@ static void wifi_reconnect_tick(void) {
     }
     if (!enabled) return;
 
-    system("( /usr/bin/knulli-wifi enable >/dev/null 2>&1 || {"
-           " connmanctl scan wifi >/dev/null 2>&1; sleep 2;"
-           " /usr/bin/knulli-wifi enable >/dev/null 2>&1; } ) &");
+    wifi_prompt_ssid[0] = '\0';
+    p = popen("/usr/bin/knulli-settings-get wifi.ssid 2>/dev/null", "r");
+    if (p) {
+        if (fgets(wifi_prompt_ssid, sizeof wifi_prompt_ssid, p))
+            wifi_prompt_ssid[strcspn(wifi_prompt_ssid, "\r\n")] = '\0';
+        pclose(p);
+    }
+    wifi_prompt_active = 1;   // Home draws it; A connects, B declines
 }
 #else
 static void wifi_scan(void) { wifi_ssid_count = 0; }
 static void wifi_refresh_status(void) { snprintf(wifi_status, sizeof wifi_status, "Wi-Fi (device only)"); }
 static void wifi_connect(const char *ssid, const char *psk) { (void)ssid; (void)psk; }
 static void wifi_set_enabled(int on) { wifi_enabled_now = on; }
+static void wifi_forget_saved(void) { wifi_saved_ssid[0] = '\0'; }
 static void wifi_reconnect_tick(void) {}
+static void wifi_do_saved_reconnect(void) {}
 #endif
 
 // Wi-Fi signal for the header icon: 0 = not connected, 1..4 = bars.
@@ -15630,6 +15679,33 @@ int main(int argc, char *argv[]) {
                         continue;
                     }
 
+                    // The Wi-Fi prompt owns A and B while it is up, so it is
+                    // answered before anything else on Home can act on them.
+                    if (wifi_prompt_active) {
+                        SDL_Keycode wk = e.key.keysym.sym;
+                        if (wk == SDLK_RETURN) {
+                            play_click();
+                            wifi_prompt_active = 0;
+                            if (wifi_prompt_ssid[0]) wifi_do_saved_reconnect();
+                            else {   // nothing saved yet -- open Wi-Fi to set one up
+                                wifi_sel = 0; wifi_ssid_count = 0;
+                                state = STATE_WIFI;
+                                wifi_refresh_status();
+                                wifi_scanning = 1; wifi_scan_shown = 0;
+                            }
+                            continue;
+                        }
+                        if (wk == SDLK_ESCAPE) {
+                            play_click();
+                            wifi_prompt_active = 0;
+                            // Remember the refusal until the handheld is fully
+                            // powered off, not just until Snap FE restarts.
+                            FILE *df = fopen(WIFI_PROMPT_DECLINED, "w");
+                            if (df) fclose(df);
+                            continue;
+                        }
+                    }
+
                     // L1/R1 move backward/forward through the top slot; L2/R2
                     // do the same for the bottom. These always cycle: the Radio
                     // card used to claim L1/L2 for tuning, which silently took
@@ -16165,18 +16241,32 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if (state == STATE_WIFI) {
-                    int wtotal = 2 + wifi_ssid_count;
-                    if (e.key.keysym.sym == SDLK_ESCAPE) state = STATE_SETTINGS;
-                    if (e.key.keysym.sym == SDLK_DOWN) wifi_sel = (wifi_sel + 1) % wtotal;
-                    if (e.key.keysym.sym == SDLK_UP)   wifi_sel = (wifi_sel - 1 + wtotal) % wtotal;
+                    // Row 2 is Forget, and only exists while something is saved.
+                    // Both this and the renderer derive it the same way.
+                    int has_forget = wifi_saved_ssid[0] != '\0';
+                    int wtotal = 2 + has_forget + wifi_ssid_count;
+                    if (wifi_sel >= wtotal) wifi_sel = wtotal - 1;
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { wifi_forget_confirm = 0; state = STATE_SETTINGS; }
+                    if (e.key.keysym.sym == SDLK_DOWN) { wifi_sel = (wifi_sel + 1) % wtotal; wifi_forget_confirm = 0; }
+                    if (e.key.keysym.sym == SDLK_UP)   { wifi_sel = (wifi_sel - 1 + wtotal) % wtotal; wifi_forget_confirm = 0; }
                     if (e.key.keysym.sym == SDLK_RETURN) {
                         play_click();
                         if (wifi_sel == 0) {
                             wifi_set_enabled(!wifi_enabled_now);
                         } else if (wifi_sel == 1) {
                             wifi_scanning = 1; wifi_scan_shown = 0; // deferred -- see poll loop
+                        } else if (has_forget && wifi_sel == 2) {
+                            // Ask twice: this clears the password too.
+                            if (!wifi_forget_confirm) {
+                                wifi_forget_confirm = 1;
+                                snprintf(wifi_status, sizeof wifi_status,
+                                         "Press A again to forget \"%.40s\"", wifi_saved_ssid);
+                            } else {
+                                wifi_forget_confirm = 0;
+                                wifi_forget_saved();
+                            }
                         } else {
-                            int i = wifi_sel - 2;
+                            int i = wifi_sel - 2 - has_forget;
                             if (i >= 0 && i < wifi_ssid_count) {
                                 snprintf(wifi_target_ssid, sizeof(wifi_target_ssid), "%s", wifi_ssids[i]);
                                 kb_buffer[0] = '\0'; kb_len = 0;
@@ -18533,6 +18623,40 @@ int main(int argc, char *argv[]) {
               int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
               SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ bx + 20, by + bh - hh - 18, hw, hh });
           }
+          // Not on Wi-Fi. Ask rather than reconnecting behind the user's back,
+          // and take no for an answer until the handheld is powered off.
+          if (wifi_prompt_active) {
+              SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
+              SDL_RenderFillRect(ren, &(SDL_Rect){ 0, 0, WIN_W, WIN_H });
+              int bw = WIN_W - 120, bh = 200;
+              int bx = WIN_W/2 - bw/2, by = WIN_H/2 - bh/2;
+              SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 255);
+              SDL_RenderFillRect(ren, &(SDL_Rect){ bx, by, bw, bh });
+              SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+              SDL_RenderDrawRect(ren, &(SDL_Rect){ bx, by, bw, bh });
+              SDL_Texture *ttl = render_text(ren, font_small_bold, "NOT CONNECTED", th->accent2);
+              int tw, tht; SDL_QueryTexture(ttl, NULL, NULL, &tw, &tht);
+              SDL_RenderCopy(ren, ttl, NULL, &(SDL_Rect){ bx + 20, by + 18, tw, tht });
+              char wl1[120], wl2[120];
+              if (wifi_prompt_ssid[0]) {
+                  snprintf(wl1, sizeof wl1, "Reconnect to \"%.40s\"?", wifi_prompt_ssid);
+                  snprintf(wl2, sizeof wl2, "Snap FE will not switch networks on its own.");
+              } else {
+                  snprintf(wl1, sizeof wl1, "No Wi-Fi network is set up yet.");
+                  snprintf(wl2, sizeof wl2, "Open Wi-Fi settings to choose one?");
+              }
+              SDL_Texture *b1 = render_text_fit(ren, font_label, wl1, g_ui_text, bw - 40);
+              SDL_Texture *b2 = render_text_fit(ren, font_label, wl2, g_ui_dim,  bw - 40);
+              int w1_, h1_; SDL_QueryTexture(b1, NULL, NULL, &w1_, &h1_);
+              int w2_, h2_; SDL_QueryTexture(b2, NULL, NULL, &w2_, &h2_);
+              SDL_RenderCopy(ren, b1, NULL, &(SDL_Rect){ bx + 20, by + 64, w1_, h1_ });
+              SDL_RenderCopy(ren, b2, NULL, &(SDL_Rect){ bx + 20, by + 64 + h1_ + 6, w2_, h2_ });
+              SDL_Texture *hint = render_text_fit(ren, font_label,
+                  wifi_prompt_ssid[0] ? "A  Reconnect       B  Not now" : "A  Open Wi-Fi       B  Not now",
+                  th->accent2, bw - 40);
+              int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
+              SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ bx + 20, by + bh - hh - 18, hw, hh });
+          }
           draw_calendar_reminder_popup(ren, th);
 
         } else if (state == STATE_SURPRISE) {
@@ -20768,7 +20892,8 @@ int main(int argc, char *argv[]) {
                 goto wifi_done;
             }
 
-            int wtotal = 2 + wifi_ssid_count;
+            int has_forget = wifi_saved_ssid[0] != '\0';
+            int wtotal = 2 + has_forget + wifi_ssid_count;
             // Derive the row count from the space left under the banner instead
             // of assuming 10 fit -- that assumption is what pushed the list into
             // the status line and the hint.
@@ -20782,7 +20907,11 @@ int main(int argc, char *argv[]) {
                 char line[96];
                 if (i == 0)      snprintf(line, sizeof(line), "Wi-Fi: %s", wifi_enabled_now ? "On" : "Off");
                 else if (i == 1) snprintf(line, sizeof(line), "Rescan for networks");
-                else             snprintf(line, sizeof(line), "%.72s", wifi_ssids[i - 2]);
+                else if (has_forget && i == 2)
+                    snprintf(line, sizeof(line), "%s \"%.40s\"",
+                             wifi_forget_confirm ? "Press A again to forget" : "Forget saved network",
+                             wifi_saved_ssid);
+                else             snprintf(line, sizeof(line), "%.72s", wifi_ssids[i - 2 - has_forget]);
                 int sel = (i == wifi_sel);
                 SDL_Texture *t = render_text_fit(ren, font_label, line, sel ? g_ui_text : g_ui_dim, WIN_W - hx - 40);
                 int tw, th2; SDL_QueryTexture(t, NULL, NULL, &tw, &th2);
