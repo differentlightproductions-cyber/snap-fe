@@ -3598,6 +3598,7 @@ AppState kb_return_state = STATE_SETTINGS;
 #define KB_PURPOSE_SS_USER 6
 #define KB_PURPOSE_SS_PASS 7
 #define KB_PURPOSE_LINK_IP 8
+#define KB_PURPOSE_LINK_NAME 20   // the name other players see while you host
 #define KB_PURPOSE_WEATHER_LOC 9
 #define KB_PURPOSE_BT_PASSKEY 10
 #define KB_PURPOSE_RADIO_SEARCH 11
@@ -4081,6 +4082,9 @@ int platform_view_style = 1; // Carousel out of the box
 // picks a layout here it sticks, and changing the Systems View no longer
 // silently overrides it.
 int library_view_idx = -1;
+// Link Play: the name other players see. Persisted, and set from the Link Play
+// lobby; empty means fall back to the device's hostname.
+char link_host_name[40] = "";
 int library_view_style(void) {
     return (library_view_idx >= 0 && library_view_idx < VIEW_STYLE_COUNT)
            ? library_view_idx : platform_view_style;
@@ -4933,6 +4937,7 @@ void load_settings() {
         else if (strcmp(key, "home_view_idx") == 0) home_view_idx = (val >= 0 && val < HOME_VIEW_COUNT) ? val : 0;
         else if (strcmp(key, "home_icon_pack_idx") == 0) home_icon_pack_idx = (val >= 0 && val < HOME_ICON_PACK_COUNT) ? val : 0;
         else if (strcmp(key, "library_view_idx") == 0) library_view_idx = (val >= -1 && val < VIEW_STYLE_COUNT) ? val : -1;
+        else if (strcmp(key, "link_host_name") == 0) snprintf(link_host_name, sizeof link_host_name, "%.39s", valstr);
         else if (strcmp(key, "favorites_view_idx") == 0) favorites_view_idx = (val >= 0 && val < FAVORITES_VIEW_COUNT) ? val : 0;
         else if (strcmp(key, "show_empty_systems") == 0) show_empty_systems = val;
         else if (strcmp(key, "setup_done") == 0) setup_done = val;
@@ -5089,6 +5094,7 @@ void save_settings() {
     fprintf(f, "home_view_idx=%d\n", home_view_idx);
     fprintf(f, "home_icon_pack_idx=%d\n", home_icon_pack_idx);
     fprintf(f, "library_view_idx=%d\n", library_view_idx);
+    fprintf(f, "link_host_name=%s\n", link_host_name);
     fprintf(f, "favorites_view_idx=%d\n", favorites_view_idx);
     fprintf(f, "show_empty_systems=%d\n", show_empty_systems);
     fprintf(f, "setup_done=%d\n", setup_done);
@@ -11661,6 +11667,16 @@ static void link_scan_cb(const char *full, const char *name, void *ud) {
     snprintf(g->sys, sizeof g->sys, "%s",
              (p >= 0 && p < PLATFORM_COUNT) ? platform_dirs[p] : "gb");
 }
+// Peers that are currently hosting, i.e. the only ones that can be joined.
+// A browsing peer has no listener bound, so offering it produced a handshake
+// that could only fail unless the other side happened to press Host in time.
+static int link_hosting_peers(int *out) {
+    int n = 0;
+    for (int i = 0; i < link_peer_count; i++)
+        if (strcmp(link_peers[i].phase, "hosting") == 0) out[n++] = i;
+    return n;
+}
+
 static int link_game_sort(const void *a, const void *b) {
     return strcasecmp(((const struct LinkGame*)a)->name, ((const struct LinkGame*)b)->name);
 }
@@ -11714,7 +11730,8 @@ static void link_open(void) {
     link_peer_ip[0] = '\0';
     link_beacon_last = 0;
     link_said_hello = 0;
-    { char hn[40] = ""; if (gethostname(hn, sizeof hn - 1) == 0 && hn[0]) snprintf(link_my_name, sizeof link_my_name, "%.39s", hn); }
+    if (link_host_name[0]) snprintf(link_my_name, sizeof link_my_name, "%.39s", link_host_name);
+    else { char hn[40] = ""; if (gethostname(hn, sizeof hn - 1) == 0 && hn[0]) snprintf(link_my_name, sizeof link_my_name, "%.39s", hn); }
     link_session_id = (unsigned)(getpid() ^ (SDL_GetTicks() * 2654435761u) ^ (unsigned)time(NULL));
     snprintf(link_status, sizeof link_status, "Looking for players on Wi-Fi...");
     link_sockets_open();
@@ -13348,6 +13365,16 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
         case KB_PURPOSE_SS_USER:  snprintf(ss_user, sizeof ss_user, "%.63s", kb_buffer); save_ss_config(); break;
         case KB_PURPOSE_SS_PASS:  snprintf(ss_pass, sizeof ss_pass, "%.63s", kb_buffer); save_ss_config(); break;
         case KB_PURPOSE_LINK_IP:  if (kb_buffer[0]) link_join(kb_buffer); break;
+        case KB_PURPOSE_LINK_NAME:
+            // Confirmed from the keyboard, so save it and advertise it from now
+            // on. Clearing the field falls back to the device's hostname.
+            snprintf(link_host_name, sizeof link_host_name, "%.39s", kb_buffer);
+            if (link_host_name[0]) snprintf(link_my_name, sizeof link_my_name, "%.39s", link_host_name);
+            else { char hn[40] = ""; if (gethostname(hn, sizeof hn - 1) == 0 && hn[0])
+                       snprintf(link_my_name, sizeof link_my_name, "%.39s", hn); }
+            save_settings();
+            snprintf(link_status, sizeof link_status, "Others will see you as \"%.30s\"", link_my_name);
+            break;
         case KB_PURPOSE_WEATHER_LOC:
             snprintf(weather_loc, sizeof weather_loc, "%.63s", kb_buffer);
             g_weather_kicked = 0; g_weather_str[0] = '\0'; g_weather_mtime = 0; g_weather_at = 0;
@@ -16243,20 +16270,29 @@ int main(int argc, char *argv[]) {
                             }
                         }
                     } else if (link_phase == LP_LOBBY) {
-                        int rows = link_peer_count + 2; // peers + [Host] + [Enter IP]
+                        int hp[8]; int nh = link_hosting_peers(hp);
+                        int rows = nh + 3; // hosts + [Host] + [Host Name] + [Enter IP]
+                        if (link_lobby_sel >= rows) link_lobby_sel = rows - 1;
                         if (e.key.keysym.sym == SDLK_ESCAPE) { link_net_close(); link_phase = LP_GAMES; }
                         if (e.key.keysym.sym == SDLK_DOWN) link_lobby_sel = (link_lobby_sel + 1) % rows;
                         if (e.key.keysym.sym == SDLK_UP)   link_lobby_sel = (link_lobby_sel - 1 + rows) % rows;
                         if (e.key.keysym.sym == SDLK_RETURN) {
                             play_click();
-                            if (link_lobby_sel < link_peer_count) {
-                                struct LinkPeer *peer = &link_peers[link_lobby_sel];
+                            if (link_lobby_sel < nh) {
+                                struct LinkPeer *peer = &link_peers[hp[link_lobby_sel]];
                                 if (strcmp(peer->mode, link_mode_slug(link_my_mode)) != 0)
                                     snprintf(link_status, sizeof link_status, "%.80s uses a different link protocol", peer->game);
                                 else
                                     link_join(peer->ip);
-                            } else if (link_lobby_sel == link_peer_count) {
+                            } else if (link_lobby_sel == nh) {
                                 link_host();
+                            } else if (link_lobby_sel == nh + 1) {
+                                snprintf(kb_buffer, sizeof kb_buffer, "%.39s", link_my_name);
+                                kb_len = (int)strlen(kb_buffer);
+                                kb_row = 0; kb_col = 0;
+                                kb_return_state = STATE_LINK;
+                                kb_purpose = KB_PURPOSE_LINK_NAME;
+                                state = STATE_KEYBOARD;
                             } else {
                                 kb_buffer[0] = '\0'; kb_len = 0; kb_row = 0; kb_col = 0;
                                 kb_return_state = STATE_LINK;
@@ -20415,6 +20451,7 @@ int main(int argc, char *argv[]) {
                                  : kb_purpose == KB_PURPOSE_WIFI_PSK ? "WI-FI PASSWORD"
                                  : kb_purpose == KB_PURPOSE_SS_USER ? "SCREENSCRAPER USERNAME"
                                  : kb_purpose == KB_PURPOSE_SS_PASS ? "SCREENSCRAPER PASSWORD"
+                                 : kb_purpose == KB_PURPOSE_LINK_NAME ? "HOST NAME (A to confirm)"
                                  : kb_purpose == KB_PURPOSE_LINK_IP ? "PARTNER IP ADDRESS"
                                  : kb_purpose == KB_PURPOSE_WEATHER_LOC ? "WEATHER LOCATION  (e.g. Austin, Texas)"
                                  : kb_purpose == KB_PURPOSE_PLAYER_NAME ? "YOUR NAME"
@@ -20997,23 +21034,24 @@ int main(int argc, char *argv[]) {
                     int cw, ch; SDL_QueryTexture(c, NULL, NULL, &cw, &ch);
                     SDL_RenderCopy(ren, c, NULL, &(SDL_Rect){ hx, WIN_H - ch - 16, cw, ch });
                 } else {
-                    SDL_Texture *ph = render_text(ren, font_label, "Players nearby:", g_ui_dim);
+                    SDL_Texture *ph = render_text(ren, font_label, "Sessions you can join:", g_ui_dim);
                     int pw, phh; SDL_QueryTexture(ph, NULL, NULL, &pw, &phh);
                     SDL_RenderCopy(ren, ph, NULL, &(SDL_Rect){ hx, y, pw, phh });
                     y += phh + 8;
 
-                    int rows = link_peer_count + 2;
+                    int hp[8]; int nh = link_hosting_peers(hp);
+                    int rows = nh + 3;
                     for (int i = 0; i < rows; i++) {
                         char row[320];
-                        if (i < link_peer_count) {
-                            struct LinkPeer *pr = &link_peers[i];
+                        if (i < nh) {
+                            struct LinkPeer *pr = &link_peers[hp[i]];
                             int compatible = !strcmp(pr->mode, link_mode_slug(link_my_mode));
-                            const char *note = !strcmp(pr->phase, "ingame") ? "In a game"
-                                             : !compatible                   ? "Different protocol"
-                                                                             : "Ready";
+                            const char *note = !compatible ? "Different protocol" : "Hosting";
                             snprintf(row, sizeof row, "%.39s  -  %.78s [%.7s]  %s", pr->name, pr->game, pr->sys, note);
-                        } else if (i == link_peer_count) {
+                        } else if (i == nh) {
                             snprintf(row, sizeof row, "Host a session (wait for someone to join)");
+                        } else if (i == nh + 1) {
+                            snprintf(row, sizeof row, "Host Name: %.30s", link_my_name);
                         } else {
                             snprintf(row, sizeof row, "Connect by IP address...");
                         }
@@ -21027,8 +21065,12 @@ int main(int argc, char *argv[]) {
                         SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ hx, y, tw, th2 });
                         y += th2 + 10;
                     }
-                    if (link_peer_count == 0) {
-                        SDL_Texture *e = render_text(ren, font_label, "(scanning... make sure both devices are on the same Wi-Fi)", g_ui_dim);
+                    if (nh == 0) {
+                        SDL_Texture *e = render_text_fit(ren, font_label,
+                            link_peer_count > 0
+                              ? "Someone is nearby but not hosting yet -- one of you press Host."
+                              : "Looking for players... make sure both devices are on the same Wi-Fi.",
+                            g_ui_dim, WIN_W - 2*hx);
                         int ew, eh; SDL_QueryTexture(e, NULL, NULL, &ew, &eh);
                         SDL_RenderCopy(ren, e, NULL, &(SDL_Rect){ hx, y + 2, ew, eh });
                         y += eh + 6;
