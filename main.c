@@ -755,6 +755,12 @@ static void hotkeys_discard_edit(void) {
 // --- Wi-Fi (Knulli: ConnMan via the knulli-wifi helper) --------------------
 #define WIFI_MAX 40
 char wifi_ssids[WIFI_MAX][64];
+// Per scanned network: whether ConnMan holds working credentials for it, and
+// the service id needed to remove them. ConnMan only marks a service Favorite
+// once it has actually connected with those credentials, so a network whose
+// password was wrong never shows as saved.
+int  wifi_ssid_saved[WIFI_MAX];
+char wifi_ssid_svc[WIFI_MAX][96];
 int  wifi_ssid_count = 0;
 int  wifi_sel = 0;                 // 0 = On/Off, 1 = Rescan, 2.. = networks
 int  wifi_enabled_now = 0;
@@ -762,7 +768,7 @@ char wifi_status[96] = "";
 int  wifi_connected_now = 0;       // drives the connection banner's wording AND its colour
 char wifi_conn_ssid[64] = "";      // network we are actually on ("" if unknown)
 char wifi_saved_ssid[64] = "";     // the remembered network, "" once forgotten
-int  wifi_forget_confirm = 0;      // Forget asks twice before it wipes anything
+int  wifi_forget_confirm = -1;     // index armed for a second X press, -1 = none
 char wifi_target_ssid[64] = "";    // network we're entering a password for
 int  wifi_scanning = 0;            // show a "Scanning..." screen, then run the (blocking) scan
 int  wifi_scan_shown = 0;          // one frame has been presented showing "Scanning..."
@@ -12803,16 +12809,59 @@ static int wifi_has_route(void) {
     fclose(f);
     return connected;
 }
+// Read the scan from connmanctl rather than knulli-wifi's name-only list, so
+// each row also carries its saved state and the service id used to forget it.
+// Lines look like:  "*AO The Promise LAN      wifi_<mac>_<hex ssid>_managed_psk"
+// -- four flag columns, then a name that may contain spaces, then the id.
 static void wifi_scan(void) {
     wifi_ssid_count = 0;
-    FILE *p = popen("/usr/bin/knulli-wifi scanlist 2>/dev/null", "r");
+    system("connmanctl scan wifi >/dev/null 2>&1");
+    FILE *p = popen("connmanctl services 2>/dev/null", "r");
     if (!p) return;
-    char line[128];
+    char line[256];
     while (fgets(line, sizeof line, p) && wifi_ssid_count < WIFI_MAX) {
         line[strcspn(line, "\r\n")] = '\0';
-        if (line[0]) snprintf(wifi_ssids[wifi_ssid_count++], 64, "%.63s", line);
+        if (strlen(line) < 6) continue;
+        char flags[5]; snprintf(flags, sizeof flags, "%.4s", line);
+        const char *rest = line + 4;
+        while (*rest == ' ') rest++;
+        const char *sp = strrchr(rest, ' ');
+        if (!sp) continue;                       // no id column
+        if (strncmp(sp + 1, "wifi_", 5) != 0) continue;
+        int nlen = (int)(sp - rest);
+        while (nlen > 0 && rest[nlen - 1] == ' ') nlen--;
+        if (nlen <= 0) continue;                 // hidden / unnamed service
+        int dup = 0;                             // one AP can appear per interface
+        char nm[64]; snprintf(nm, sizeof nm, "%.*s", nlen > 63 ? 63 : nlen, rest);
+        for (int i = 0; i < wifi_ssid_count; i++) if (!strcmp(wifi_ssids[i], nm)) { dup = 1; break; }
+        if (dup) continue;
+        int k = wifi_ssid_count++;
+        snprintf(wifi_ssids[k], 64, "%s", nm);
+        wifi_ssid_saved[k] = strchr(flags, '*') != NULL;   // Favorite == it has worked
+        snprintf(wifi_ssid_svc[k], sizeof wifi_ssid_svc[k], "%.95s", sp + 1);
     }
     pclose(p);
+}
+
+// Forget one network: drop ConnMan's provisioned service and its cached
+// credentials, and clear Knulli's record when it was the saved one.
+static void wifi_forget_network(int idx) {
+    if (idx < 0 || idx >= wifi_ssid_count || !wifi_ssid_svc[idx][0]) return;
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "connmanctl disconnect %s >/dev/null 2>&1", wifi_ssid_svc[idx]);
+    system(cmd);
+    snprintf(cmd, sizeof cmd, "connmanctl config %s --remove >/dev/null 2>&1", wifi_ssid_svc[idx]);
+    system(cmd);
+    snprintf(cmd, sizeof cmd, "rm -rf /var/lib/connman/%s >/dev/null 2>&1", wifi_ssid_svc[idx]);
+    system(cmd);
+    if (wifi_saved_ssid[0] && !strcmp(wifi_saved_ssid, wifi_ssids[idx])) {
+        system("/usr/bin/knulli-settings-set wifi.ssid '' >/dev/null 2>&1");
+        system("/usr/bin/knulli-settings-set wifi.key '' >/dev/null 2>&1");
+        system("rm -f /var/lib/connman/knulli_wifi.config >/dev/null 2>&1");
+        wifi_saved_ssid[0] = '\0';
+    }
+    wifi_ssid_saved[idx] = 0;
+    snprintf(wifi_status, sizeof wifi_status, "Forgot \"%.40s\"", wifi_ssids[idx]);
 }
 static void wifi_refresh_status(void) {
     wifi_saved_ssid[0] = '\0';
@@ -12850,21 +12899,6 @@ static void wifi_refresh_status(void) {
         }
     }
 }
-static void wifi_forget_saved(void) {
-    system("/usr/bin/knulli-settings-set wifi.ssid '' >/dev/null 2>&1");
-    system("/usr/bin/knulli-settings-set wifi.key '' >/dev/null 2>&1");
-    // knulli_wifi.config is regenerated from those settings; the managed_psk
-    // directories are ConnMan's own cached credentials and would otherwise
-    // reconnect on their own.
-    system("rm -f /var/lib/connman/knulli_wifi.config >/dev/null 2>&1");
-    system("rm -rf /var/lib/connman/wifi_*_managed_psk >/dev/null 2>&1");
-    system("/etc/init.d/S08connman reload >/dev/null 2>&1 &");
-    wifi_saved_ssid[0] = '\0';
-    wifi_conn_ssid[0] = '\0';
-    wifi_connected_now = 0;
-    snprintf(wifi_status, sizeof wifi_status, "Saved network forgotten -- pick one to connect");
-}
-
 static void wifi_connect(const char *ssid, const char *psk) {
     char qs[160], qp[200], cmd[420];
     sh_squote(ssid, qs, sizeof qs);
@@ -12925,10 +12959,10 @@ static void wifi_reconnect_tick(void) {
 }
 #else
 static void wifi_scan(void) { wifi_ssid_count = 0; }
+static void wifi_forget_network(int idx) { (void)idx; }
 static void wifi_refresh_status(void) { snprintf(wifi_status, sizeof wifi_status, "Wi-Fi (device only)"); }
 static void wifi_connect(const char *ssid, const char *psk) { (void)ssid; (void)psk; }
 static void wifi_set_enabled(int on) { wifi_enabled_now = on; }
-static void wifi_forget_saved(void) { wifi_saved_ssid[0] = '\0'; }
 static void wifi_reconnect_tick(void) {}
 static void wifi_do_saved_reconnect(void) {}
 #endif
@@ -16241,32 +16275,35 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if (state == STATE_WIFI) {
-                    // Row 2 is Forget, and only exists while something is saved.
-                    // Both this and the renderer derive it the same way.
-                    int has_forget = wifi_saved_ssid[0] != '\0';
-                    int wtotal = 2 + has_forget + wifi_ssid_count;
+                    int wtotal = 2 + wifi_ssid_count;
                     if (wifi_sel >= wtotal) wifi_sel = wtotal - 1;
-                    if (e.key.keysym.sym == SDLK_ESCAPE) { wifi_forget_confirm = 0; state = STATE_SETTINGS; }
-                    if (e.key.keysym.sym == SDLK_DOWN) { wifi_sel = (wifi_sel + 1) % wtotal; wifi_forget_confirm = 0; }
-                    if (e.key.keysym.sym == SDLK_UP)   { wifi_sel = (wifi_sel - 1 + wtotal) % wtotal; wifi_forget_confirm = 0; }
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { wifi_forget_confirm = -1; state = STATE_SETTINGS; }
+                    if (e.key.keysym.sym == SDLK_DOWN) { wifi_sel = (wifi_sel + 1) % wtotal; wifi_forget_confirm = -1; }
+                    if (e.key.keysym.sym == SDLK_UP)   { wifi_sel = (wifi_sel - 1 + wtotal) % wtotal; wifi_forget_confirm = -1; }
+                    // X on a saved network forgets it -- armed on the first
+                    // press, done on the second, and disarmed by moving away.
+                    if (e.key.keysym.sym == SDLK_s && wifi_sel >= 2) {
+                        int i = wifi_sel - 2;
+                        if (i >= 0 && i < wifi_ssid_count && wifi_ssid_saved[i]) {
+                            play_click();
+                            if (wifi_forget_confirm != i) {
+                                wifi_forget_confirm = i;
+                                snprintf(wifi_status, sizeof wifi_status,
+                                         "Press X again to forget \"%.40s\"", wifi_ssids[i]);
+                            } else {
+                                wifi_forget_confirm = -1;
+                                wifi_forget_network(i);
+                            }
+                        }
+                    }
                     if (e.key.keysym.sym == SDLK_RETURN) {
                         play_click();
                         if (wifi_sel == 0) {
                             wifi_set_enabled(!wifi_enabled_now);
                         } else if (wifi_sel == 1) {
                             wifi_scanning = 1; wifi_scan_shown = 0; // deferred -- see poll loop
-                        } else if (has_forget && wifi_sel == 2) {
-                            // Ask twice: this clears the password too.
-                            if (!wifi_forget_confirm) {
-                                wifi_forget_confirm = 1;
-                                snprintf(wifi_status, sizeof wifi_status,
-                                         "Press A again to forget \"%.40s\"", wifi_saved_ssid);
-                            } else {
-                                wifi_forget_confirm = 0;
-                                wifi_forget_saved();
-                            }
                         } else {
-                            int i = wifi_sel - 2 - has_forget;
+                            int i = wifi_sel - 2;
                             if (i >= 0 && i < wifi_ssid_count) {
                                 snprintf(wifi_target_ssid, sizeof(wifi_target_ssid), "%s", wifi_ssids[i]);
                                 kb_buffer[0] = '\0'; kb_len = 0;
@@ -20892,8 +20929,7 @@ int main(int argc, char *argv[]) {
                 goto wifi_done;
             }
 
-            int has_forget = wifi_saved_ssid[0] != '\0';
-            int wtotal = 2 + has_forget + wifi_ssid_count;
+            int wtotal = 2 + wifi_ssid_count;
             // Derive the row count from the space left under the banner instead
             // of assuming 10 fit -- that assumption is what pushed the list into
             // the status line and the hint.
@@ -20907,11 +20943,12 @@ int main(int argc, char *argv[]) {
                 char line[96];
                 if (i == 0)      snprintf(line, sizeof(line), "Wi-Fi: %s", wifi_enabled_now ? "On" : "Off");
                 else if (i == 1) snprintf(line, sizeof(line), "Rescan for networks");
-                else if (has_forget && i == 2)
-                    snprintf(line, sizeof(line), "%s \"%.40s\"",
-                             wifi_forget_confirm ? "Press A again to forget" : "Forget saved network",
-                             wifi_saved_ssid);
-                else             snprintf(line, sizeof(line), "%.72s", wifi_ssids[i - 2 - has_forget]);
+                else {
+                    int ni = i - 2;
+                    const char *tag = (wifi_forget_confirm == ni) ? "   X again to forget"
+                                    : wifi_ssid_saved[ni]        ? "   saved" : "";
+                    snprintf(line, sizeof(line), "%.60s%s", wifi_ssids[ni], tag);
+                }
                 int sel = (i == wifi_sel);
                 SDL_Texture *t = render_text_fit(ren, font_label, line, sel ? g_ui_text : g_ui_dim, WIN_W - hx - 40);
                 int tw, th2; SDL_QueryTexture(t, NULL, NULL, &tw, &th2);
@@ -20928,7 +20965,8 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, e, NULL, &(SDL_Rect){ hx, y + 4, ew, eh });
             }
 
-            SDL_Texture *hint = render_text(ren, font_label, "A: Select    B: Back", g_ui_dim);
+            SDL_Texture *hint = render_text(ren, font_label,
+                "A: Select    X: Forget (saved)    B: Back", g_ui_dim);
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ hx, WIN_H - hih - 18, hiw, hih });
             wifi_done: ;
