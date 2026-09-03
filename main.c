@@ -5826,9 +5826,18 @@ SDL_Texture* render_text(SDL_Renderer *ren, TTF_Font *font, const char *text, SD
         }
     }
 
-    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, text, color);
-    SDL_Texture *tex = SDL_CreateTextureFromSurface(ren, surf);
-    SDL_FreeSurface(surf);
+    // An empty string renders to nothing, and a zero-width surface gives back a
+    // NULL texture. Every one of the ~350 call sites immediately does
+    // SDL_QueryTexture on the result and uses the width/height it expects to
+    // have been filled in -- which SDL leaves untouched on failure. Substitute a
+    // blank glyph so the result is always a real, drawable texture.
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, (text && text[0]) ? text : " ", color);
+    if (!surf) surf = TTF_RenderUTF8_Blended(font, " ", color);
+    SDL_Texture *tex = surf ? SDL_CreateTextureFromSurface(ren, surf) : NULL;
+    if (surf) SDL_FreeSurface(surf);
+    // Never cache a failure: doing so would keep handing the same NULL back for
+    // that string for the rest of the session instead of retrying next frame.
+    if (!tex) return NULL;
 
     int slot;
     if (text_cache_count < TEXT_CACHE_SIZE) {
@@ -19820,8 +19829,13 @@ int main(int argc, char *argv[]) {
             if (ra_achievement_count > 0) {
                 int per_page = 6;
                 int first = (ra_book_selected / per_page) * per_page;
-                int list_y = lp.y + 54;
-                int row_h = (bh - 72) / per_page;
+                // Start the list under the header block as actually measured.
+                // A fixed 54 was shorter than the title plus the "<user> - N
+                // earned" line at larger font sizes, so the first row was drawn
+                // over the subtitle.
+                int list_y = lp.y + 13 + hh + thh + 10;
+                int row_h = (bh - (list_y - lp.y) - 12) / per_page;
+                if (row_h < 1) row_h = 1;
                 for (int j = 0; j < per_page && first + j < ra_achievement_count; j++) {
                     int ai = first + j;
                     RaAchievement *a = &ra_achievements[ai];
