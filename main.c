@@ -15097,6 +15097,14 @@ int main(int argc, char *argv[]) {
     brightness_pct = (brightness_pct + BRIGHT_STEP / 2) / BRIGHT_STEP * BRIGHT_STEP;
     if (brightness_pct < BRIGHT_MIN_PCT) brightness_pct = BRIGHT_MIN_PCT;
     if (brightness_pct > 100) brightness_pct = 100;
+    // "Off" is a runtime state, never a boot state. Coming up with the backlight
+    // at 0 is indistinguishable from a dead handheld -- the UI renders fine and
+    // you cannot see it to turn it back up -- so a saved 0 starts visible again.
+    // 1% and above are genuinely dim but readable, and are left alone.
+    if (brightness_pct <= 0) {
+        brightness_pct = 25;
+        save_settings();
+    }
     if (!promo_mode) apply_brightness();
     // Volume: our saved level is the source of truth. custom.sh sets a boot
     // default for the brief window before we start; push the user's real value
