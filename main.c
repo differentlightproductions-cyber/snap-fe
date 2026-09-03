@@ -11420,7 +11420,6 @@ const int link_system_platforms[] = { 2, 1, 0 }; // GB, GBC, GBA
 
 char link_my_name[40] = "Snap FE";
 char link_my_game[128] = "", link_my_sys[8] = "", link_my_path[600] = "";
-char link_my_fp[24] = "";   // ROM build fingerprint -- see link_rom_fingerprint
 // A link session outlives the game it launched. Quitting the game returns to
 // the lobby with discovery still running, so the pair can start another game
 // without setting the session up again; only backing out of Link Play (which
@@ -11429,7 +11428,7 @@ int link_session_keep = 0;
 int link_my_mode = LINK_MODE_GB;
 unsigned link_session_id = 0;
 
-struct LinkPeer { char ip[20], name[40], sys[8], game[128], mode[24], fp[24], phase[12]; Uint32 seen; };
+struct LinkPeer { char ip[20], name[40], sys[8], game[128], mode[24], phase[12]; Uint32 seen; };
 struct LinkPeer link_peers[8];
 int link_peer_count = 0, link_lobby_sel = 0;
 
@@ -11583,40 +11582,6 @@ static int link_gba_mode_for_rom(const char *path, const char *display_name) {
     return -1;
 }
 
-// A short fingerprint of the actual ROM BUILD, not just the game.
-//
-// Two copies of Pokemon FireRed can share the game code BPRE and still be
-// different revisions, and the GBA link protocol exchanges structures at
-// build-specific offsets -- so Rev 0 talking to Rev 1 desyncs and takes both
-// games down the moment they handshake in the trade room. The lobby cannot see
-// that, because the lobby only ever exchanges Snap FE's own metadata.
-//
-//   GBA: game code at 0xAC-0xAF plus the version byte at 0xBC  -> "BPRE.01"
-//   GB : header title at 0x134 plus the global checksum at 0x14E -> "POKEMON RED.9A3C"
-void link_rom_fingerprint(const char *path, int platform, char *out, size_t n) {
-    out[0] = '\0';
-    FILE *f = fopen(path, "rb");
-    if (!f) return;
-    unsigned char h[0x150] = {0};
-    size_t got = fread(h, 1, sizeof h, f);
-    fclose(f);
-    if (got < 0x150) return;
-    if (platform == 0) {   // GBA
-        snprintf(out, n, "%c%c%c%c.%02X",
-                 h[0xAC] ? h[0xAC] : '?', h[0xAD] ? h[0xAD] : '?',
-                 h[0xAE] ? h[0xAE] : '?', h[0xAF] ? h[0xAF] : '?', h[0xBC]);
-    } else {               // GB / GBC
-        char t[12] = {0};
-        for (int i = 0; i < 11; i++) {
-            unsigned char c = h[0x134 + i];
-            t[i] = (c >= 32 && c < 127) ? (char)c : '\0';
-            if (!t[i]) break;
-        }
-        snprintf(out, n, "%.11s.%02X%02X", t[0] ? t : "GB", h[0x14E], h[0x14F]);
-    }
-    for (char *q = out; *q; q++) if (*q == '\t' || *q == '\n') *q = ' ';   // never break the framing
-}
-
 // Scan supported folders into link_games[]. GBA is filtered to protocols the
 // installed gpSP netpacket core actually implements; GB/GBC use Gambatte's
 // byte-level network cable, so their installed libraries remain browsable.
@@ -11748,9 +11713,9 @@ static void link_beacon(void) {
     const char *phase = (game_running && g_link_active) ? "ingame"
                       : link_phase == LP_WAIT ? (link_is_host ? "hosting" : "joining") : "browse";
     char msg[400];
-    snprintf(msg, sizeof msg, "SNAPOSLK\t3\t%u\t%s\t%s\t%s\t%s\t%s\t%s\n",
+    snprintf(msg, sizeof msg, "SNAPOSLK\t2\t%u\t%s\t%s\t%s\t%s\t%s\n",
              link_session_id, link_my_name, link_my_sys, link_my_game[0] ? link_my_game : "(choosing)",
-             link_mode_slug(link_my_mode), phase, link_my_fp[0] ? link_my_fp : "-");
+             link_mode_slug(link_my_mode), phase);
     struct sockaddr_in b; memset(&b, 0, sizeof b);
     b.sin_family = AF_INET; b.sin_port = htons(LINK_DISC_PORT);
     b.sin_addr.s_addr = htonl(INADDR_BROADCAST);
@@ -11765,15 +11730,14 @@ static void link_recv_beacons(void) {
         ssize_t n = recvfrom(link_udp, buf, sizeof buf - 1, 0, (struct sockaddr*)&from, &fl);
         if (n <= 0) break;
         buf[n] = '\0';
-        char *tok[9] = {0}; int t = 0;
-        for (char *p = buf; *p && t < 9; ) {
+        char *tok[8] = {0}; int t = 0;
+        for (char *p = buf; *p && t < 8; ) {
             tok[t++] = p;
             char *tab = strpbrk(p, "\t\n");
             if (!tab) break;
             *tab = '\0'; p = tab + 1;
         }
-        if (t < 8 || strcmp(tok[0], "SNAPOSLK") != 0) continue;
-        if (strcmp(tok[1], "2") != 0 && strcmp(tok[1], "3") != 0) continue;
+        if (t < 8 || strcmp(tok[0], "SNAPOSLK") != 0 || strcmp(tok[1], "2") != 0) continue;
         if ((unsigned)strtoul(tok[2], NULL, 10) == link_session_id) continue; // ourselves
         char ip[20]; snprintf(ip, sizeof ip, "%s", inet_ntoa(from.sin_addr));
         int slot = -1;
@@ -11786,8 +11750,6 @@ static void link_recv_beacons(void) {
         snprintf(link_peers[slot].game, sizeof link_peers[slot].game, "%.127s", tok[5]);
         snprintf(link_peers[slot].mode, sizeof link_peers[slot].mode, "%.23s", tok[6]);
         snprintf(link_peers[slot].phase, sizeof link_peers[slot].phase, "%.11s", tok[7] ? tok[7] : "");
-        snprintf(link_peers[slot].fp, sizeof link_peers[slot].fp,
-                 "%.23s", (t >= 9 && tok[8] && strcmp(tok[8], "-")) ? tok[8] : "");
         link_peers[slot].seen = SDL_GetTicks();
     }
     // expire stale peers
@@ -11845,33 +11807,18 @@ static int link_tick(void) {
             if (r < 0) { close(link_conn); link_conn = -1; snprintf(link_status, sizeof link_status, "Player disconnected. Still hosting..."); }
             else if (r == 1 && strncmp(line, "HELLO", 5) == 0) {
                 // HELLO \t 2 \t name \t sys \t game \t transport-mode
-                char pname[40] = "?", psys[8] = "", pgame[128] = "", pmode[24] = "", pfp[24] = "";
-                { char *f[7] = {0}; int t = 0; for (char *p = line; *p && t < 7;) { f[t++] = p; char *tab = strchr(p, '\t'); if (!tab) break; *tab = 0; p = tab + 1; }
-                  if (t >= 6) { snprintf(pname,sizeof pname,"%.39s",f[2]); snprintf(psys,sizeof psys,"%.7s",f[3]); snprintf(pgame,sizeof pgame,"%.127s",f[4]); snprintf(pmode,sizeof pmode,"%.23s",f[5]); }
-                  if (t >= 7) snprintf(pfp, sizeof pfp, "%.23s", f[6]); }
+                char pname[40] = "?", psys[8] = "", pgame[128] = "", pmode[24] = "";
+                { char *f[6] = {0}; int t = 0; for (char *p = line; *p && t < 6;) { f[t++] = p; char *tab = strchr(p, '\t'); if (!tab) break; *tab = 0; p = tab + 1; }
+                  if (t >= 6) { snprintf(pname,sizeof pname,"%.39s",f[2]); snprintf(psys,sizeof psys,"%.7s",f[3]); snprintf(pgame,sizeof pgame,"%.127s",f[4]); snprintf(pmode,sizeof pmode,"%.23s",f[5]); } }
                 if (strcmp(pmode, link_mode_slug(link_my_mode)) != 0) {
                     link_send("ERROR\tThese games use different link protocols\n");
                     snprintf(link_status, sizeof link_status, "%.80s uses a different link protocol", pgame[0] ? pgame : pname);
                     close(link_conn); link_conn = -1;
                     return 0;
                 }
-                // Same game, different build: the games themselves would pair
-                // and then crash the moment they exchange data. An older peer
-                // sends no fingerprint, so only refuse when both are known.
-                if (pfp[0] && link_my_fp[0] && strcmp(pfp, link_my_fp) != 0) {
-                    char em[192];
-                    snprintf(em, sizeof em, "ERROR\tDifferent ROM builds: yours %s, theirs %s. Both need the same copy.\n",
-                             pfp, link_my_fp);
-                    link_send(em);
-                    snprintf(link_status, sizeof link_status,
-                             "Different ROM build: you have %s, they have %s -- both need the same copy",
-                             link_my_fp, pfp);
-                    close(link_conn); link_conn = -1;
-                    return 0;
-                }
                 snprintf(link_status, sizeof link_status, "Partner: %s (%s)", pgame[0] ? pgame : pname, psys);
                 char w[256];
-                snprintf(w, sizeof w, "WELCOME\t3\t%s\t%s\t%s\t%d\t%s\n", link_my_name, link_my_sys, link_my_game, LINK_GAME_PORT, link_my_fp);
+                snprintf(w, sizeof w, "WELCOME\t2\t%s\t%s\t%s\t%d\n", link_my_name, link_my_sys, link_my_game, LINK_GAME_PORT);
                 link_send(w);
             }
             else if (r == 1 && strncmp(line, "READY", 5) == 0) {
@@ -11892,7 +11839,7 @@ static int link_tick(void) {
                     // send HELLO once
                     if (link_rx_len == 0 && !link_said_hello) {
                         char h[300];
-                        snprintf(h, sizeof h, "HELLO\t3\t%s\t%s\t%s\t%s\t%s\n", link_my_name, link_my_sys, link_my_game, link_mode_slug(link_my_mode), link_my_fp);
+                        snprintf(h, sizeof h, "HELLO\t2\t%s\t%s\t%s\t%s\n", link_my_name, link_my_sys, link_my_game, link_mode_slug(link_my_mode));
                         link_send(h);
                         link_said_hello = 1;
                         snprintf(link_status, sizeof link_status, "Connected -- handshaking...");
@@ -11906,18 +11853,8 @@ static int link_tick(void) {
                         close(link_conn); link_conn = -1; link_said_hello = 0; link_phase = LP_LOBBY;
                     }
                     else if (r == 1 && strncmp(line, "WELCOME", 7) == 0) {
-                        char hfp[24] = "";
-                        { char *f[7] = {0}; int t = 0; for (char *p = line; *p && t < 7;) { f[t++] = p; char *tab = strchr(p, '\t'); if (!tab) break; *tab = 0; p = tab + 1; }
-                          if (t >= 7) snprintf(hfp, sizeof hfp, "%.23s", f[6]); }
-                        if (hfp[0] && link_my_fp[0] && strcmp(hfp, link_my_fp) != 0) {
-                            snprintf(link_status, sizeof link_status,
-                                     "Different ROM build: you have %s, they have %s -- both need the same copy",
-                                     link_my_fp, hfp);
-                            close(link_conn); link_conn = -1; link_said_hello = 0; link_phase = LP_LOBBY;
-                        } else {
-                            link_send("READY\n");
-                            snprintf(link_status, sizeof link_status, "Paired -- starting game...");
-                        }
+                        link_send("READY\n");
+                        snprintf(link_status, sizeof link_status, "Paired -- starting game...");
                     }
                     else if (r == 1 && strncmp(line, "LAUNCH", 6) == 0) {
                         link_said_hello = 0;
@@ -16218,8 +16155,6 @@ int main(int argc, char *argv[]) {
                                 snprintf(link_my_sys,  sizeof link_my_sys,  "%s", g->sys);
                                 snprintf(link_my_path, sizeof link_my_path, "%s", g->path);
                                 link_my_mode = g->mode;
-                                link_rom_fingerprint(g->path,
-                                    link_system_platforms[link_system_sel], link_my_fp, sizeof link_my_fp);
                                 play_click();
                                 link_open(); // -> LP_LOBBY, starts discovery
                             }
@@ -20940,18 +20875,9 @@ int main(int argc, char *argv[]) {
                         if (i < link_peer_count) {
                             struct LinkPeer *pr = &link_peers[i];
                             int compatible = !strcmp(pr->mode, link_mode_slug(link_my_mode));
-                            // Say WHY a partner cannot be joined before the user
-                            // tries. A different ROM build is the one that used to
-                            // pair happily and then crash both games in the trade
-                            // room, so name it here and in the handshake.
-                            const char *note;
-                            char notebuf[64];
-                            if (!strcmp(pr->phase, "ingame"))            note = "In a game";
-                            else if (!compatible)                        note = "Different protocol";
-                            else if (pr->fp[0] && link_my_fp[0] && strcmp(pr->fp, link_my_fp)) {
-                                snprintf(notebuf, sizeof notebuf, "Different ROM build (%.10s)", pr->fp);
-                                note = notebuf;
-                            } else                                       note = "Ready";
+                            const char *note = !strcmp(pr->phase, "ingame") ? "In a game"
+                                             : !compatible                   ? "Different protocol"
+                                                                             : "Ready";
                             snprintf(row, sizeof row, "%.39s  -  %.78s [%.7s]  %s", pr->name, pr->game, pr->sys, note);
                         } else if (i == link_peer_count) {
                             snprintf(row, sizeof row, "Host a session (wait for someone to join)");
