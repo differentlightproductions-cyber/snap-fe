@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.6"
+#define SNAPFE_VERSION "Alpha Build 1.2.7"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -3502,12 +3502,12 @@ static int art_type_supported(int i) {
 int display_art_idx = 0; // which type to show in the game carousel (only one at a time)
 // Carousel, List and Bookshelf each supply their own art -- cartridges, the
 // detail panel's own gallery, book spines -- so Display Art does not reach a
-// system's games while one of those is the Systems View. It still drives
+// system's games while one of those is the Library View. It still drives
 // Favorites, which is always a plain grid, so the setting stays editable and
 // the row says what it is actually affecting rather than appearing broken.
-extern int platform_view_style;   // defined below with the other view state
+int library_view_style(void);     // defined below with the other view state
 static const char *view_overrides_art(void) {
-    switch (platform_view_style) {
+    switch (library_view_style()) {
         case 1: return "Carousel";
         case 3: return "List";
         case 4: return "Bookshelf";
@@ -3780,29 +3780,7 @@ int build_game_rows(int *row_type, int *row_extra) {
     if (fast_forward_values[fast_forward_idx] != 0) { row_type[idx] = ROW_G_FASTFWD_MODE; row_extra[idx] = 0; idx++; }
     row_type[idx] = ROW_G_AUTOSAVE; row_extra[idx] = 0; idx++;
 
-    row_type[idx] = ROW_G_VIEW_HEADER; row_extra[idx] = 0; idx++;
-    if (disp_grp_view_open) {
-        row_type[idx] = ROW_G_CONSOLE_VIEW; row_extra[idx] = 0; idx++;
-        row_type[idx] = ROW_G_FAVORITES_VIEW; row_extra[idx] = 0; idx++;
-        row_type[idx] = ROW_G_SHOW_EMPTY; row_extra[idx] = 0; idx++;
-        if (platform_view_style == 1) { row_type[idx] = ROW_G_CAROUSEL_TITLES; row_extra[idx] = 0; idx++; }
-        if (platform_view_style == 2) {
-            row_type[idx] = ROW_G_PGRID_COLS; row_extra[idx] = 0; idx++;
-            row_type[idx] = ROW_G_PGRID_ROWS; row_extra[idx] = 0; idx++;
-        }
-        if (platform_view_style == 3) {
-            row_type[idx] = ROW_G_LIST_BAR_COLOR; row_extra[idx] = 0; idx++;
-            row_type[idx] = ROW_G_LIST_FRAME_COLOR; row_extra[idx] = 0; idx++;
-            row_type[idx] = ROW_G_LIST_TEXT_COLOR; row_extra[idx] = 0; idx++;
-        }
-        row_type[idx] = ROW_G_VIEW_RESTORE; row_extra[idx] = 0; idx++;
-    }
-
-    row_type[idx] = ROW_G_ART_HEADER; row_extra[idx] = 0; idx++;
-    if (game_art_dropdown_open) {
-        row_type[idx] = ROW_G_GRID_COLS; row_extra[idx] = 0; idx++;
-        row_type[idx] = ROW_G_GRID_ROWS; row_extra[idx] = 0; idx++;
-    }
+    // Systems View and Library View now live in Settings > Display.
     row_type[idx] = ROW_G_DISPLAY_ART_HEADER; row_extra[idx] = 0; idx++;
     if (display_dropdown_open)
         for (int i = 0; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_G_DISPLAY_ART_ITEM; row_extra[idx] = i; idx++; }
@@ -4034,6 +4012,10 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_GRP_WIDGETS 58
 #define ROW_DISP_APP_WIDGET 59
 #define ROW_DISP_ICON_PACK 60
+#define ROW_DISP_GRP_LIBVIEW 61   // "Library View" group, sits under Systems View
+#define ROW_DISP_LIB_VIEW 62      // library layout (or Follow Systems View)
+#define ROW_DISP_LIB_COLS 63
+#define ROW_DISP_LIB_ROWS 64
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
@@ -4065,6 +4047,7 @@ int bg_dropdown_open = 0;
 int disp_grp_home_open = 0;     // Home
 int disp_grp_text_open = 0;     // Theme & Text
 int disp_grp_view_open = 0;     // Systems View
+int disp_grp_libview_open = 0;   // Library View group in Settings > Display
 int disp_grp_hud_open = 0;      // Status Bar
 int disp_grp_screen_open = 0;   // Screen & Power
 
@@ -4093,6 +4076,15 @@ static void settings_close_all_groups(void) {
 const char *view_style_names[VIEW_STYLE_COUNT] = { "Single Card", "Carousel (AI Art)", "Grid", "List", "Bookshelf (AI Art)" };
 #define VIEW_STYLE_BOOKSHELF 4
 int platform_view_style = 1; // Carousel out of the box
+// Which layout the GAME LIBRARY uses. -1 means "follow the Systems View",
+// which is how it behaved when the two were the same setting. Once the user
+// picks a layout here it sticks, and changing the Systems View no longer
+// silently overrides it.
+int library_view_idx = -1;
+int library_view_style(void) {
+    return (library_view_idx >= 0 && library_view_idx < VIEW_STYLE_COUNT)
+           ? library_view_idx : platform_view_style;
+}
 int bookshelf_sort = 0;      // 0 = A-Z, 1 = Z-A, 2 = release year (persisted)
 const char *bookshelf_sort_names[3] = { "A-Z", "Z-A", "Year" };
 #define CARD_SHAPE_COUNT 2
@@ -4244,7 +4236,9 @@ int build_display_rows(int *row_type, int *row_extra) {
     D_ADD(ROW_DISP_GRP_HOME, 0);
     if (disp_grp_home_open) {
         D_ADD(ROW_DISP_HOME_VIEW, 0);
-        D_ADD(ROW_DISP_ICON_PACK, 0);
+        // The icon pack only affects the App Focused home; showing it for the
+        // other views offered a setting that could not do anything.
+        if (home_view_idx == HOME_VIEW_APPS) D_ADD(ROW_DISP_ICON_PACK, 0);
         D_ADD(ROW_DISP_GREETING, 0);
         if (greeting_enabled) D_ADD(ROW_DISP_PLAYER_NAME, 0);
         D_ADD(ROW_DISP_GRP_WIDGETS, 0);
@@ -4275,7 +4269,40 @@ int build_display_rows(int *row_type, int *row_extra) {
             for (int _a = 0; _a < APP_COUNT; _a++) { row_type[idx] = ROW_DISP_APP_ITEM; row_extra[idx] = _a; idx++; }
         D_ADD(ROW_DISP_SURPRISE, 0);
     }
-    // Screen & Power (2nd position -- the most-adjusted stuff)
+    // Systems View, and the Library View that follows from it. Both lived in
+    // the Game tab for a while, which had grown crowded; they are display
+    // choices, so they belong here.
+    D_ADD(ROW_DISP_GRP_VIEW, 0);
+    if (disp_grp_view_open) {
+        D_ADD(ROW_DISP_CONSOLE_VIEW, 0);
+        D_ADD(ROW_DISP_FAVORITES_VIEW, 0);
+        D_ADD(ROW_DISP_SHOW_EMPTY, 0);
+        if (platform_view_style == 1) D_ADD(ROW_DISP_CAROUSEL_TITLES, 0);
+        if (platform_view_style == 2) {
+            D_ADD(ROW_DISP_PGRID_COLS, 0);
+            D_ADD(ROW_DISP_PGRID_ROWS, 0);
+        }
+        if (platform_view_style == 3) {
+            D_ADD(ROW_DISP_LIST_BAR_COLOR, 0);
+            D_ADD(ROW_DISP_LIST_FRAME_COLOR, 0);
+            D_ADD(ROW_DISP_LIST_TEXT_COLOR, 0);
+        }
+        D_ADD(ROW_DISP_RST_VIEW, 0);
+    }
+
+    // Library View -- was "Columns/Rows". The layout is always changeable now,
+    // even when the active Systems View supplies one of its own; it just starts
+    // out following it.
+    D_ADD(ROW_DISP_GRP_LIBVIEW, 0);
+    if (disp_grp_libview_open) {
+        D_ADD(ROW_DISP_LIB_VIEW, 0);
+        if (library_view_style() == 2) {   // only the Grid layout uses columns/rows
+            D_ADD(ROW_DISP_LIB_COLS, 0);
+            D_ADD(ROW_DISP_LIB_ROWS, 0);
+        }
+    }
+
+    // Screen & Power (the most-adjusted stuff)
     D_ADD(ROW_DISP_GRP_SCREEN, 0);
     if (disp_grp_screen_open) {
         D_ADD(ROW_DISP_BRIGHTNESS, 0);
@@ -4905,6 +4932,7 @@ void load_settings() {
         }
         else if (strcmp(key, "home_view_idx") == 0) home_view_idx = (val >= 0 && val < HOME_VIEW_COUNT) ? val : 0;
         else if (strcmp(key, "home_icon_pack_idx") == 0) home_icon_pack_idx = (val >= 0 && val < HOME_ICON_PACK_COUNT) ? val : 0;
+        else if (strcmp(key, "library_view_idx") == 0) library_view_idx = (val >= -1 && val < VIEW_STYLE_COUNT) ? val : -1;
         else if (strcmp(key, "favorites_view_idx") == 0) favorites_view_idx = (val >= 0 && val < FAVORITES_VIEW_COUNT) ? val : 0;
         else if (strcmp(key, "show_empty_systems") == 0) show_empty_systems = val;
         else if (strcmp(key, "setup_done") == 0) setup_done = val;
@@ -5060,6 +5088,7 @@ void save_settings() {
     fprintf(f, "menu_triple_action=%d\n", menu_triple_action);
     fprintf(f, "home_view_idx=%d\n", home_view_idx);
     fprintf(f, "home_icon_pack_idx=%d\n", home_icon_pack_idx);
+    fprintf(f, "library_view_idx=%d\n", library_view_idx);
     fprintf(f, "favorites_view_idx=%d\n", favorites_view_idx);
     fprintf(f, "show_empty_systems=%d\n", show_empty_systems);
     fprintf(f, "setup_done=%d\n", setup_done);
@@ -6701,7 +6730,8 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         if (wy + sh <= region_bot) SDL_RenderCopy(ren, snt, NULL, &(SDL_Rect){ wx, wy, sw, sh });
         wy += nameh + 4;
 
-        SDL_Texture *hint = render_text_fit(ren, font_label, "<L1 L2>   Sel. Play/Stop", g_ui_dim, wmaxw);
+        SDL_Texture *hint = render_text_fit(ren, font_label,
+            "Right: tune   Sel: Play/Stop", g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
         return;
@@ -8684,7 +8714,7 @@ void rebuild_visible_platforms_ex2(int force_counts, SDL_Renderer *ren) {
     int n = 0;
     for (int p = 0; p < PLATFORM_COUNT; p++) {
         int has;
-        if (ren) load_prog((float)(p + 1) / PLATFORM_COUNT);   // slice of the "Loading consoles" bar
+        if (ren) load_prog((float)(p + 1) / PLATFORM_COUNT);   // slice of the "Loading systems" bar
         if (platform_game_count_cache[p] >= 0)       has = platform_game_count_cache[p] > 0;
         else if (platform_has_games_cache[p] >= 0)   has = platform_has_games_cache[p];
         else if (force_counts) {
@@ -10743,28 +10773,28 @@ static void warm_console_assets(SDL_Renderer *ren) {
         return;
     }
 
-    load_prog_begin(ren, "Preparing consoles", 0.00f, 0.18f);
+    load_prog_begin(ren, "Preparing systems", 0.00f, 0.18f);
     rebuild_visible_platforms_ex2(1, ren);
 
     if (vs == VIEW_STYLE_BOOKSHELF) {
-        load_prog_begin(ren, "Loading console art", 0.18f, 0.46f);
+        load_prog_begin(ren, "Loading system art", 0.18f, 0.46f);
         ensure_bookshelf_assets(ren);
     } else if (vs == 3) {
-        load_prog_begin(ren, "Loading console art", 0.18f, 0.38f);
+        load_prog_begin(ren, "Loading system art", 0.18f, 0.38f);
         ensure_platform_icons_loaded(ren, ICON_STYLE_LIST);
-        load_prog_begin(ren, "Loading console art", 0.56f, 0.08f);
+        load_prog_begin(ren, "Loading system art", 0.56f, 0.08f);
         ensure_listview_bg(ren);
     } else if (vs == 2) {
-        load_prog_begin(ren, "Loading console art", 0.18f, 0.46f);
+        load_prog_begin(ren, "Loading system art", 0.18f, 0.46f);
         ensure_platform_icons_loaded(ren, ICON_STYLE_GRID);
     } else if (vs == 1) {
-        load_prog_begin(ren, "Loading console art", 0.18f, 0.20f);
+        load_prog_begin(ren, "Loading system art", 0.18f, 0.20f);
         ensure_platform_icons_loaded(ren, ICON_STYLE_CAROUSEL);
-        load_prog_begin(ren, "Building console cards", 0.38f, 0.26f);
+        load_prog_begin(ren, "Building system cards", 0.38f, 0.26f);
         ensure_platform_cards_built(ren, cw, ch);
     }
 
-    load_prog_begin(ren, "Warming console backgrounds", 0.64f, 0.34f);
+    load_prog_begin(ren, "Warming system backgrounds", 0.64f, 0.34f);
     for (int oi = 0; oi < g_nplat; oi++) {
         ensure_carousel_bg_loaded(ren, g_plat[oi]);
         load_prog((float)(oi + 1) / (g_nplat > 0 ? g_nplat : 1));
@@ -11442,6 +11472,7 @@ int link_game_count = 0, link_game_sel = 0, link_system_sel = 0, link_gba_availa
 const int link_system_platforms[] = { 2, 1, 0 }; // GB, GBC, GBA
 #define LINK_SYSTEM_COUNT ((int)(sizeof(link_system_platforms) / sizeof(link_system_platforms[0])))
 
+AppState ra_book_return_state = STATE_SETTINGS;   // where B leaves the Achievements book to
 char link_my_name[40] = "Snap FE";
 char link_my_game[128] = "", link_my_sys[8] = "", link_my_path[600] = "";
 // A link session outlives the game it launched. Quitting the game returns to
@@ -12459,6 +12490,8 @@ void restore_display_group(int which) {
         platform_view_style = 1; carousel_titles_on = 1;
         platform_grid_cols = 3; platform_grid_rows = 2;
         list_bar_color_idx = 1; list_frame_color_idx = 3; list_text_color_idx = 0;
+        library_view_idx = -1;          // back to following the Systems View
+        grid_cols = 3; grid_rows = 2;   // and the Library View's own grid
     } else if (which == ROW_DISP_RST_HUD) {
         hud_chrome_style = 0; hud_chrome_color_idx = 0; hud_font_color_idx = 0;
     } else if (which == ROW_DISP_RST_BG) {
@@ -13637,7 +13670,22 @@ static void draw_app_grid_widget(SDL_Renderer *ren, Theme *th, SDL_Rect box, int
         char big[24], sub[64];
         strftime(big, sizeof big, clock_24h ? "%H:%M" : "%I:%M", lt);
         if (!clock_24h && big[0] == '0') memmove(big, big + 1, strlen(big));
-        strftime(sub, sizeof sub, clock_24h ? "%A, %B %d" : "%p  -  %A, %B %d", lt);
+        // The full date does not fit a two-cell widget in 12-hour mode
+        // ("AM  -  Wednesday, September 03"), and render_text_fit would just
+        // ellipsise the month away. Step down to shorter forms until one fits
+        // so the date stays readable instead of truncated.
+        static const char *date_fmt_24[] = { "%A, %B %d", "%a, %b %d", "%b %d", NULL };
+        static const char *date_fmt_12[] = { "%p  -  %A, %B %d", "%p  -  %a, %b %d",
+                                             "%a, %b %d", "%b %d", NULL };
+        const char **fmts = clock_24h ? date_fmt_24 : date_fmt_12;
+        sub[0] = '\0';
+        for (int fi = 0; fmts[fi]; fi++) {
+            char cand[64]; int cw = 0, chh = 0;
+            strftime(cand, sizeof cand, fmts[fi], lt);
+            TTF_SizeUTF8(font_label, cand, &cw, &chh);
+            snprintf(sub, sizeof sub, "%s", cand);
+            if (cw <= w) break;    // this one fits; otherwise keep the shortest tried
+        }
         SDL_Texture *bt = render_text_fit(ren, font_big, big, g_ui_text, w);
         int bw,bh; SDL_QueryTexture(bt,NULL,NULL,&bw,&bh);
         SDL_RenderCopy(ren,bt,NULL,&(SDL_Rect){x,y,bw,bh}); y += bh + 2;
@@ -13780,7 +13828,7 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
             FavoriteEntry *fv = &favorites[rx[i]];
             art = hgrid_cover(ren, fv->platform_dir, fv->path);
             snprintf(label, sizeof label, "%s", fv->title);
-        } else if (trt == ROW_H_QUICK_CONSOLES) { slug = "consoles";  snprintf(label, sizeof label, "Consoles"); }
+        } else if (trt == ROW_H_QUICK_CONSOLES) { slug = "consoles";  snprintf(label, sizeof label, "Systems"); }
         else if (trt == ROW_H_QUICK_LIBRARY)    { slug = "library";   snprintf(label, sizeof label, "Library"); }
         else if (trt == ROW_H_QUICK_FAVORITES)  { slug = "favorites"; snprintf(label, sizeof label, "Favorites"); }
         else if (trt == ROW_H_QUICK_RADIO)      { slug = "radio";     snprintf(label, sizeof label, radio_now[0] ? "Radio *" : "Radio"); }
@@ -15194,7 +15242,7 @@ int main(int argc, char *argv[]) {
     g_boot_loading_mode = 1;
     play_chime();
     g_boot_stage_base = 0.00f; g_boot_stage_span = 0.38f;
-    draw_progress(ren, "Preparing consoles", 0.0f);
+    draw_progress(ren, "Preparing systems", 0.0f);
     warm_console_assets(ren);
     g_boot_stage_base = 0.38f; g_boot_stage_span = 0.40f;
     library_search[0] = '\0';
@@ -15556,14 +15604,14 @@ int main(int argc, char *argv[]) {
                     }
 
                     // L1/R1 move backward/forward through the top slot; L2/R2
-                    // do the same for the bottom. When Radio is visible its
-                    // explicitly advertised L1/L2 tuner controls take priority.
+                    // do the same for the bottom. These always cycle: the Radio
+                    // card used to claim L1/L2 for tuning, which silently took
+                    // widget cycling away from the whole screen whenever Radio
+                    // was in either slot. Tuning now lives behind Right-to-focus,
+                    // the same as Calendar and Recently Played.
                     // Conflict rules still prevent duplicate/incompatible cards.
-                    int home_radio_visible = (home_widget_idx == HOME_WIDGET_RADIO ||
-                                              home_widget2_idx == HOME_WIDGET_RADIO);
                     if (home_view_idx != HOME_VIEW_APPS &&
-                        (e.key.keysym.sym == SDLK_e ||
-                         (e.key.keysym.sym == SDLK_q && !home_radio_visible))) {
+                        (e.key.keysym.sym == SDLK_e || e.key.keysym.sym == SDLK_q)) {
                         int dir = e.key.keysym.sym == SDLK_e ? 1 : -1;
                         home_widget_idx = home_widget_cycle(home_widget_idx, home_widget2_idx, dir);
                         home_recent_focus_slot = 0;
@@ -15571,8 +15619,7 @@ int main(int argc, char *argv[]) {
                         save_settings(); play_click(); continue;
                     }
                     if (home_view_idx != HOME_VIEW_APPS &&
-                        (e.key.keysym.sym == SDLK_PAGEDOWN ||
-                         (e.key.keysym.sym == SDLK_PAGEUP && !home_radio_visible))) {
+                        (e.key.keysym.sym == SDLK_PAGEDOWN || e.key.keysym.sym == SDLK_PAGEUP)) {
                         int dir = e.key.keysym.sym == SDLK_PAGEDOWN ? 1 : -1;
                         home_widget2_idx = home_widget_cycle(home_widget2_idx, home_widget_idx, dir);
                         home_recent_focus_slot = 0;
@@ -15586,8 +15633,10 @@ int main(int argc, char *argv[]) {
                     if (home_view_idx != HOME_VIEW_APPS) {
                         int kind1 = home_widget_idx, kind2 = home_widget2_idx;
                         int ridx[4] = {0}; int rn = recent_activity_indices(1, 3, ridx);
-                        int focusable1 = kind1 == HOME_WIDGET_CALENDAR || (kind1 == HOME_WIDGET_RECENT && rn > 0);
-                        int focusable2 = kind2 == HOME_WIDGET_CALENDAR || (kind2 == HOME_WIDGET_RECENT && rn > 0);
+                        int focusable1 = kind1 == HOME_WIDGET_CALENDAR || (kind1 == HOME_WIDGET_RECENT && rn > 0)
+                                         || kind1 == HOME_WIDGET_RADIO;
+                        int focusable2 = kind2 == HOME_WIDGET_CALENDAR || (kind2 == HOME_WIDGET_RECENT && rn > 0)
+                                         || kind2 == HOME_WIDGET_RADIO;
                         if (!home_recent_focus_slot && e.key.keysym.sym == SDLK_RIGHT && (focusable1 || focusable2)) {
                             home_recent_focus_slot = focusable1 ? 1 : 2;
                             if (rn > 0 && home_recent_widget_sel >= rn) home_recent_widget_sel = rn - 1;
@@ -15596,7 +15645,8 @@ int main(int argc, char *argv[]) {
                         if (home_recent_focus_slot) {
                             int focused_kind = home_recent_focus_slot == 1 ? kind1 : kind2;
                             int focused_ok = focused_kind == HOME_WIDGET_CALENDAR ||
-                                             (focused_kind == HOME_WIDGET_RECENT && rn > 0);
+                                             (focused_kind == HOME_WIDGET_RECENT && rn > 0) ||
+                                             focused_kind == HOME_WIDGET_RADIO;
                             if (!focused_ok) {
                                 home_recent_focus_slot = 0;
                             } else if (e.key.keysym.sym == SDLK_ESCAPE || e.key.keysym.sym == SDLK_LEFT) {
@@ -15611,6 +15661,20 @@ int main(int argc, char *argv[]) {
                                 home_recent_focus_slot = 0;
                                 state = STATE_CALENDAR;
                                 play_click(); continue;
+                            } else if (focused_kind == HOME_WIDGET_RADIO &&
+                                       (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN)) {
+                                if (radio_count > 0) {
+                                    radio_sel = (radio_sel + (e.key.keysym.sym == SDLK_DOWN ? 1 : -1)
+                                                 + radio_count) % radio_count;
+                                    play_click();
+                                    if (radio_pid > 0) radio_play(radio_sel);   // live re-tune, like a dial
+                                }
+                                continue;
+                            } else if (focused_kind == HOME_WIDGET_RADIO && e.key.keysym.sym == SDLK_RETURN) {
+                                play_click();
+                                if (radio_pid > 0) radio_stop();
+                                else if (radio_count > 0) radio_play(radio_sel);
+                                continue;
                             } else if (focused_kind == HOME_WIDGET_RECENT && e.key.keysym.sym == SDLK_UP) {
                                 home_recent_widget_sel = (home_recent_widget_sel - 1 + rn) % rn; continue;
                             } else if (focused_kind == HOME_WIDGET_RECENT && e.key.keysym.sym == SDLK_DOWN) {
@@ -15774,6 +15838,7 @@ int main(int argc, char *argv[]) {
                             state = STATE_MINIGAMES;
                         } else if (rt == ROW_H_QUICK_ACHIEVEMENTS) {
                             ra_book_load(); ra_book_selected = 0;
+                            ra_book_return_state = STATE_HOME;
                             play_click(); state = STATE_ACHIEVEMENTS;
                         } else if (rt == ROW_H_QUICK_CALCULATOR) {
                             calculator_selected = 0;
@@ -15788,16 +15853,10 @@ int main(int argc, char *argv[]) {
                         if (home_widget_idx  == HOME_WIDGET_MUSIC || home_widget_idx  == HOME_WIDGET_RADIO) mw = home_widget_idx;
                         else if (home_widget2_idx == HOME_WIDGET_MUSIC || home_widget2_idx == HOME_WIDGET_RADIO) mw = home_widget2_idx;
                         SDL_Keycode mk = e.key.keysym.sym;
-                        if (mw == HOME_WIDGET_RADIO && (mk == SDLK_q || mk == SDLK_PAGEUP || mk == SDLK_SLASH)) {
-                            if (mk == SDLK_SLASH) {
-                                play_click();
-                                if (radio_pid > 0) radio_stop();
-                                else if (radio_count > 0) radio_play(radio_sel);
-                            } else if (radio_count > 0) {
-                                radio_sel = (radio_sel + (mk == SDLK_PAGEUP ? 1 : -1) + radio_count) % radio_count;
-                                play_click();
-                                if (radio_pid > 0) radio_play(radio_sel);   // live re-tune, like a dial
-                            }
+                        if (mw == HOME_WIDGET_RADIO && mk == SDLK_SLASH) {
+                            play_click();
+                            if (radio_pid > 0) radio_stop();
+                            else if (radio_count > 0) radio_play(radio_sel);
                         } else if (mw == HOME_WIDGET_MUSIC && (mk == SDLK_q || mk == SDLK_SLASH)) {
                             if (!music_scanned) music_scan();
                             if (mk == SDLK_SLASH) {
@@ -16329,7 +16388,7 @@ int main(int argc, char *argv[]) {
                 else if (state == STATE_MENU) {
                     // List layout only: L1/R1 step through this game's artwork,
                     // L2/R2 scroll the write-up beside it.
-                    if (platform_view_style == 3 && game_count > 0) {
+                    if (library_view_style() == 3 && game_count > 0) {
                         if (e.key.keysym.sym == SDLK_e) { gm_art_type = (gm_art_type + 2) % (ART_TYPE_COUNT + 1) - 1; }
                         if (e.key.keysym.sym == SDLK_q) { gm_art_type = (gm_art_type + ART_TYPE_COUNT + 1) % (ART_TYPE_COUNT + 1) - 1; }
                         if (e.key.keysym.sym == SDLK_PAGEDOWN) { if (gm_desc_more) gm_desc_scroll += 3; }
@@ -16358,7 +16417,7 @@ int main(int argc, char *argv[]) {
                         if (e.key.keysym.sym == SDLK_LEFT) selected = (selected - 1 + game_count) % game_count;
                         // The List layout is a single column, so a grid row step would
                         // skip a whole screenful per press.
-                        int nav_cols = (platform_view_style == 3 || platform_view_style == 1)
+                        int nav_cols = (library_view_style() == 3 || library_view_style() == 1)
                                        ? 1 : active_game_cols();
                         if (e.key.keysym.sym == SDLK_DOWN) {
                             int target = selected + nav_cols;
@@ -16537,7 +16596,7 @@ int main(int argc, char *argv[]) {
                 }
                 else if (state == STATE_ACHIEVEMENTS) {
                     SDL_Keycode k = e.key.keysym.sym;
-                    if (k == SDLK_ESCAPE) { play_click(); state = STATE_SETTINGS; }
+                    if (k == SDLK_ESCAPE) { play_click(); state = ra_book_return_state; }
                     if (k == SDLK_s) { play_click(); ra_book_refresh(); }
                     if (ra_achievement_count > 0) {
                         if (k == SDLK_DOWN) { ra_book_selected = (ra_book_selected + 1) % ra_achievement_count; play_click(); }
@@ -16858,6 +16917,22 @@ int main(int argc, char *argv[]) {
                                 else if (stats_count() < STATS_PICK_MAX) stats_mask |= (1 << it);
                             } else if (rt == ROW_DISP_APP_ITEM) {
                                 home_apps_mask ^= (1 << disp_row_extra[settings_selected]);
+                            } else if (rt == ROW_DISP_LIB_VIEW) {
+                                // -1 (follow) sits one step below the first
+                                // explicit layout, so the wheel is
+                                // Follow, Single Card, Carousel, Grid, List, Bookshelf.
+                                int v = library_view_idx + 1 + dir;          // 0..VIEW_STYLE_COUNT
+                                int n = VIEW_STYLE_COUNT + 1;
+                                v = ((v % n) + n) % n;
+                                library_view_idx = v - 1;
+                            } else if (rt == ROW_DISP_LIB_COLS) {
+                                grid_cols += dir;
+                                if (grid_cols < 1) grid_cols = 1;
+                                if (grid_cols > 6) grid_cols = 6;
+                            } else if (rt == ROW_DISP_LIB_ROWS) {
+                                grid_rows += dir;
+                                if (grid_rows < 1) grid_rows = 1;
+                                if (grid_rows > 6) grid_rows = 6;
                             } else if (rt == ROW_DISP_CONSOLE_VIEW) {
                                 platform_view_style = (platform_view_style + dir + VIEW_STYLE_COUNT) % VIEW_STYLE_COUNT;
                             } else if (rt == ROW_DISP_ART_HEADER || rt == ROW_DISP_ART_ITEM) {
@@ -17283,6 +17358,8 @@ int main(int argc, char *argv[]) {
                                 disp_grp_text_open = !disp_grp_text_open;
                             } else if (rt == ROW_DISP_GRP_VIEW) {
                                 disp_grp_view_open = !disp_grp_view_open;
+                            } else if (rt == ROW_DISP_GRP_LIBVIEW) {
+                                disp_grp_libview_open = !disp_grp_libview_open;
                             } else if (rt == ROW_DISP_ART_HEADER) {
                                 display_dropdown_open = !display_dropdown_open;
                             } else if (rt == ROW_DISP_ART_ITEM) {
@@ -17420,6 +17497,7 @@ int main(int argc, char *argv[]) {
                                     snprintf(ra_book_status, sizeof ra_book_status,
                                              "Add your Web API Key in Account settings, then press X to refresh");
                                 ra_book_selected = 0;
+                                ra_book_return_state = STATE_SETTINGS;
                                 play_click();
                                 state = STATE_ACHIEVEMENTS;
                             } else if (rt == ROW_RA_HARDCORE) {
@@ -18231,7 +18309,7 @@ int main(int argc, char *argv[]) {
                 } else if (rt == ROW_H_SURPRISE) {
                     snprintf(text, sizeof(text), "SURPRISE ME");
                 } else if (rt == ROW_H_QUICK_CONSOLES) {
-                    snprintf(text, sizeof(text), "Consoles");
+                    snprintf(text, sizeof(text), "Systems");
                 } else if (rt == ROW_H_QUICK_LIBRARY) {
                     snprintf(text, sizeof(text), "Game Library");
                 } else if (rt == ROW_H_QUICK_FAVORITES) {
@@ -19520,6 +19598,16 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_APP_ITEM: { int a = row_extra[i]; snprintf(text, sizeof(text), "%s: %s", home_app_names[a], (home_apps_mask & (1 << a)) ? "Shown" : "Hidden"); indent = 2; } break;
                         case ROW_DISP_GRP_TEXT: snprintf(text, sizeof(text), "%c Theme & Text", disp_grp_text_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Systems View", disp_grp_view_open ? 'v' : '>'); indent = 0; break;
+                        case ROW_DISP_GRP_LIBVIEW: snprintf(text, sizeof(text), "%c Library View", disp_grp_libview_open ? 'v' : '>'); indent = 0; break;
+                        case ROW_DISP_LIB_VIEW:
+                            if (library_view_idx < 0)
+                                snprintf(text, sizeof(text), "Library View: Follow Systems View (%s)",
+                                         view_style_names[platform_view_style % VIEW_STYLE_COUNT]);
+                            else
+                                snprintf(text, sizeof(text), "Library View: %s", view_style_names[library_view_idx]);
+                            indent = 1; break;
+                        case ROW_DISP_LIB_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
+                        case ROW_DISP_LIB_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
                         case ROW_DISP_GRP_HUD: snprintf(text, sizeof(text), "%c Status Bar", disp_grp_hud_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_GRP_SCREEN: snprintf(text, sizeof(text), "%c Screen & Power", disp_grp_screen_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_BG_HEADER: snprintf(text, sizeof(text), "%c Background", bg_dropdown_open ? 'v' : '>'); indent = 0; break;
@@ -19600,8 +19688,8 @@ int main(int argc, char *argv[]) {
                         case ROW_G_FAVORITES_VIEW: snprintf(text, sizeof(text), "Favorites View: %s", favorite_view_names[(favorites_view_idx >= 0 && favorites_view_idx < FAVORITES_VIEW_COUNT) ? favorites_view_idx : 0]); indent = 1; break;
                         case ROW_G_SHOW_EMPTY: snprintf(text, sizeof(text), "Show Systems Without Games: %s", show_empty_systems ? "ON" : "OFF"); indent = 1; break;
                         case ROW_G_CAROUSEL_TITLES: snprintf(text, sizeof(text), "System Titles: %s", carousel_titles_on ? "ON" : "OFF"); indent = 1; break;
-                        case ROW_G_PGRID_COLS: snprintf(text, sizeof(text), "Console Grid Columns: %d", platform_grid_cols); indent = 1; break;
-                        case ROW_G_PGRID_ROWS: snprintf(text, sizeof(text), "Console Grid Rows: %d", platform_grid_rows); indent = 1; break;
+                        case ROW_G_PGRID_COLS: snprintf(text, sizeof(text), "Systems Grid Columns: %d", platform_grid_cols); indent = 1; break;
+                        case ROW_G_PGRID_ROWS: snprintf(text, sizeof(text), "Systems Grid Rows: %d", platform_grid_rows); indent = 1; break;
                         case ROW_G_LIST_BAR_COLOR: snprintf(text, sizeof(text), "List Bar Color: %s", hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0].name); indent = 1; break;
                         case ROW_G_LIST_FRAME_COLOR: snprintf(text, sizeof(text), "List Image Frame Color: %s", hud_chrome_colors[(list_frame_color_idx >= 0 && list_frame_color_idx < HUD_CHROME_COLOR_COUNT) ? list_frame_color_idx : 0].name); indent = 1; break;
                         case ROW_G_LIST_TEXT_COLOR: snprintf(text, sizeof(text), "List Text Color: %s", list_text_color_idx == 0 ? "Auto" : font_color_names[(list_text_color_idx > 0 && list_text_color_idx < FONT_COLOR_COUNT) ? list_text_color_idx : 0]); indent = 1; break;
@@ -21013,7 +21101,7 @@ int main(int argc, char *argv[]) {
                 else
                     snprintf(sortline, sizeof(sortline), "Sort: %s  (X)   \xC2\xB7   Select: Options",
                              library_sort_names[library_sort_idx % LIBRARY_SORT_COUNT]);
-                if (platform_view_style != 3) {   // List draws this above its own list
+                if (library_view_style() != 3) {   // List draws this above its own list
                     SDL_Texture *so = render_text_fit(ren, font_label, sortline, th->accent2, WIN_W - 32);
                     int sow, soh;
                     SDL_QueryTexture(so, NULL, NULL, &sow, &soh);
@@ -21033,7 +21121,7 @@ int main(int argc, char *argv[]) {
                 SDL_QueryTexture(m, NULL, NULL, &mw, &mh);
                 SDL_Rect mdst = { WIN_W/2 - mw/2, WIN_H/2 - mh/2, mw, mh };
                 SDL_RenderCopy(ren, m, NULL, &mdst);
-            } else if (platform_view_style == 1) {
+            } else if (library_view_style() == 1) {
                 // Games Carousel -- the library shaped like the Systems Carousel
                 // you arrived from, each game shown as its cartridge: the
                 // scraped "Cartridge" art when the user has it, otherwise one
@@ -21232,7 +21320,7 @@ int main(int argc, char *argv[]) {
                 }
                 #undef GCART_CAP
 
-            } else if (platform_view_style == 3) {
+            } else if (library_view_style() == 3) {
                 // Games List -- deliberately shaped like the Systems List you
                 // arrived from: titles down the left over a feathered scrim,
                 // and a detail panel on the right with the artwork on top, a
