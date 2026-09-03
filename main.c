@@ -5118,19 +5118,23 @@ static void cpu_launch_boost_stop(void) {
     cpu_apply_pref();
 }
 
-// Exact RG34XX-SP panel curve. Absolute 1 is the lowest visible panel level;
-// absolute 0 is display-off. Knulli normally clamps at 3, which is still too
-// bright in a dark room. The panel tops out at 200, so using Knulli's
-// generic 255-based helper collapses several high levels and makes the steps
-// inconsistent. Snap owns one precise 1%, 5%, 10% ... 100% sequence instead.
+// H700 panel curve. Absolute 1 is the lowest still-lit level and 0 is
+// display-off; Knulli normally clamps at 3, which is still too bright in a
+// dark room, so Snap owns one precise 1%, 5%, 10% ... 100% sequence instead.
+//
+// The ceiling used to be 200, which was wrong. Both the RG34XX-SP and the
+// RG35XX-SP declare lcd_pwm_max_limit = 255 in their device trees and both
+// accept a set of 255, so capping at 200 spent only ~78% of the panel's PWM
+// range and 100% was never actually full brightness.
+#define BRIGHT_ABS_MAX 255
 int bright_pct_to_abs(int p) {
     if (p < 0) p = 0;
     if (p > 100) p = 100;
     if (p == 0) return 0;          // Off -- backlight down, screen dark
     if (p <= 1) return 1;          // 1% is the dimmest still-lit step
-    int v = p * 200 / 100;
+    int v = p * BRIGHT_ABS_MAX / 100;
     if (v < 1) v = 1;
-    if (v > 200) v = 200;
+    if (v > BRIGHT_ABS_MAX) v = BRIGHT_ABS_MAX;
     return v;
 }
 
@@ -17742,7 +17746,7 @@ int main(int argc, char *argv[]) {
             static int g_fl_active = 0;
             if (state == STATE_FLASHLIGHT && !g_fl_active) {
 #ifdef SNAPOS_TARGET_KNULLI
-                system("/usr/bin/brightness set 200 >/dev/null 2>&1");
+                system("/usr/bin/brightness set 255 >/dev/null 2>&1");   // a flashlight wants the full panel
 #endif
                 g_fl_active = 1;
             } else if (state != STATE_FLASHLIGHT && g_fl_active) {

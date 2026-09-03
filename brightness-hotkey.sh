@@ -26,7 +26,10 @@ else
   [ "$pct" -lt 5 ] && pct=1
 fi
 
-if [ "$pct" -le 1 ]; then absolute=1; else absolute=$((pct * 2)); fi
+# The panel's PWM range is 0-255 (lcd_pwm_max_limit in the device tree on both
+# the RG34XX-SP and the RG35XX-SP), not 0-200. Doubling the percentage capped
+# the backlight at ~78% of what the panel can actually do.
+if [ "$pct" -le 1 ]; then absolute=1; else absolute=$((pct * 255 / 100)); fi
 [ "$absolute" -lt 1 ] && absolute=1
 printf '%s\n' "$pct" > "$desired"
 LCD_BRIGHTNESS_MINIMUM=1 /usr/bin/brightness set "$absolute" >/dev/null 2>&1
