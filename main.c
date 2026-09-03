@@ -280,6 +280,13 @@ int gm_desc_more   = 0;      // set by the renderer when the write-up overflows
 SDL_Texture *platform_bg_cache[PLATFORM_COUNT] = { NULL };
 int platform_bg_cache_attempted[PLATFORM_COUNT] = { 0 }; // true once we've tried loading, even if none found
 int platform_game_count_cache[PLATFORM_COUNT] = { [0 ... PLATFORM_COUNT - 1] = -1 };
+// Which folder spelling each system actually uses (genesis/ vs megadrive/).
+// Resolved once per system by looking at the cards, so it has to be dropped
+// whenever the set of ROM roots changes.
+int g_platform_dir_done[PLATFORM_COUNT] = { 0 };
+static void platform_roms_dir_reset(void) {
+    for (int i = 0; i < PLATFORM_COUNT; i++) g_platform_dir_done[i] = 0;
+}
 // Cheap "has ANY rom" flag, filled by a first-hit check (no full walk). The
 // console browser only needs this to decide visibility; the exact count fills
 // in lazily when you actually land on a system. -1 = unknown.
@@ -7295,22 +7302,28 @@ static int dir_has_rom(const char *dir, int p, int depth) {
 
 const char* platform_roms_dir(int p) {
     static char resolved[PLATFORM_COUNT][32];
-    static int done[PLATFORM_COUNT] = { 0 };
     if (p < 0 || p >= PLATFORM_COUNT) return "";
-    if (done[p]) return resolved[p];
-    done[p] = 1;
+    if (g_platform_dir_done[p]) return resolved[p];
+    g_platform_dir_done[p] = 1;
     snprintf(resolved[p], sizeof(resolved[p]), "%s", platform_dirs[p]); // default
     const char *cands[2] = { platform_dirs[p], platform_dir_alt[p] };
+    const char *roots[ROMS_ROOT_MAX];
+    int nr = sn_roms_roots(roots);
     int best = -1;
-    for (int c = 0; c < 2; c++) {
-        if (!cands[c] || !cands[c][0]) continue;
-        char path[600];
-        snprintf(path, sizeof(path), "%s/%s", sn_roms_root(), cands[c]);
-        DIR *d = opendir(path);
-        if (!d) continue;
-        closedir(d);
-        int score = dir_has_rom(path, p, 0) ? 2 : 1;  // 2 = has ROMs, 1 = exists but empty
-        if (score > best) { best = score; snprintf(resolved[p], sizeof(resolved[p]), "%s", cands[c]); }
+    // Every root, not just the primary: a system whose games live on the second
+    // card used to resolve to the default slug here, and this answer is cached
+    // for the rest of the session.
+    for (int r = 0; r < nr; r++) {
+        for (int c = 0; c < 2; c++) {
+            if (!cands[c] || !cands[c][0]) continue;
+            char path[700];
+            snprintf(path, sizeof(path), "%s/%s", roots[r], cands[c]);
+            DIR *d = opendir(path);
+            if (!d) continue;
+            closedir(d);
+            int score = dir_has_rom(path, p, 0) ? 2 : 1;  // 2 = has ROMs, 1 = exists but empty
+            if (score > best) { best = score; snprintf(resolved[p], sizeof(resolved[p]), "%s", cands[c]); }
+        }
     }
     return resolved[p];
 }
@@ -9140,6 +9153,7 @@ void roms_detect_and_apply(int verbose) {
         platform_game_count_cache[p] = -1;
         platform_has_games_cache[p]  = -1;
     }
+    platform_roms_dir_reset();
     save_settings();
 }
 
@@ -9544,6 +9558,7 @@ static int romfs_card_actions(int idx, char labels[8][96], int ids[8]) {
 }
 
 static void storage_row_text(int i, char *out, size_t n) {
+    if (i < 0 || i >= g_storage_count) { snprintf(out, n, "(card no longer present)"); return; }
     StorageCard *c = &g_storage[i];
     unsigned long long b = c->part_bytes ? c->part_bytes : c->disk_bytes;
     char where[80], games[64];
@@ -9562,6 +9577,7 @@ static void storage_row_text(int i, char *out, size_t n) {
 
 // Longer form for the card-options header, where there is a full line to spare.
 static void storage_row_text_long(int i, char *out, size_t n) {
+    if (i < 0 || i >= g_storage_count) { snprintf(out, n, "(card no longer present)"); return; }
     StorageCard *c = &g_storage[i];
     char base[220]; storage_row_text(i, base, sizeof base);
     snprintf(out, n, "%s  (%s, %s)", base, c->fstype[0] ? c->fstype : "unknown fs", c->dev);
@@ -10046,10 +10062,8 @@ void list_preview_build(SDL_Renderer *ren, int platform) {
     if (list_prev_for == platform) return;
     if (list_prev_one) { SDL_DestroyTexture(list_prev_one); list_prev_one = NULL; }
     list_prev_for = platform;
-    char dirpath[600];
-    snprintf(dirpath, sizeof dirpath, "%s/%s", sn_roms_root(), platform_roms_dir(platform));
     struct lp_ctx c; c.n = 0;
-    walk_roms(dirpath, platform, 0, lp_cb, &c);
+    roms_walk_platform(platform, lp_cb, &c);
     if (c.n == 0) return;
     // Shuffle, then take the first game that actually has scraped art -- so a
     // game with no cover never shows, but a system with none just shows nothing.
@@ -10553,7 +10567,8 @@ static SDL_Rect draw_cartridge_donor(SDL_Renderer *ren, SDL_Rect box, CartDonor 
         int pad = 5, avail = lab.w - pad * 2;
         int lh = TTF_FontHeight(font_label);
         int maxlines = (lab.h - 8) / (lh + 1);
-        if (maxlines < 1) maxlines = 1; if (maxlines > 3) maxlines = 3;
+        if (maxlines < 1) maxlines = 1;
+        if (maxlines > 3) maxlines = 3;
         char lines[3][96]; int nl = 0; char cur[96] = "";
         const char *w = title;
         while (*w && nl < maxlines) {
@@ -17372,6 +17387,7 @@ int main(int argc, char *argv[]) {
                                     platform_game_count_cache[gp] = -1;
                                     platform_has_games_cache[gp] = -1;
                                 }
+                                platform_roms_dir_reset();
                                 free_games(ren); rescan_active_games(ren, font_label);
                             } else if (rt == ROW_SCRAPE_NOW) {
                                 if (scrape_in_progress) stop_scrape(ren, font_label, platform_selected);
@@ -17509,6 +17525,7 @@ int main(int argc, char *argv[]) {
                                 for (int p = 0; p < PLATFORM_COUNT; p++) {
                                     platform_game_count_cache[p] = -1; platform_has_games_cache[p] = -1;
                                 }
+                                platform_roms_dir_reset();
                                 free_games(ren); library_search[0] = '\0'; scan_all_games(ren, font_label);
                                 snprintf(romfs_message, sizeof romfs_message, "Library rescan complete");
                                 play_click();
@@ -17931,14 +17948,21 @@ int main(int argc, char *argv[]) {
         if (state == STATE_LINK && link_phase >= LP_LOBBY) {
             if (link_tick()) {
                 link_launch(&win, &ren, &game_video_released);
-                // Come back to Link Play, not Home: the session is still open,
-                // so the pair can start another game without rebuilding it.
-                state = STATE_LINK;
-                // Link Play launches later in the frame than the normal
-                // game-running fast path. Its handoff has already destroyed
-                // the renderer, so restart the loop before any UI service or
-                // draw call can touch the null renderer.
-                if (game_running) continue;
+                if (game_running) {
+                    // Come back to Link Play, not Home: the session is still
+                    // open, so the pair can start another game without
+                    // rebuilding it. Link Play launches later in the frame than
+                    // the normal game-running fast path, and its handoff has
+                    // already destroyed the renderer, so restart the loop
+                    // before any UI service or draw call touches it.
+                    state = STATE_LINK;
+                    continue;
+                }
+                // The emulator never started. link_launch has already closed the
+                // session, so staying on Link Play would show its screen with no
+                // sockets behind it -- go back to a working screen instead.
+                link_phase = LP_LOBBY;
+                state = STATE_HOME;
             }
         }
 
@@ -19889,6 +19913,7 @@ int main(int argc, char *argv[]) {
             SDL_RenderCopy(ren, hdr, NULL, &(SDL_Rect){ hx, y, hw, hh });
             int pitch = TTF_FontHeight(font_label) + 12;
 
+            if (romfs_card >= g_storage_count) romfs_card = -1;   // card went away
             if (romfs_card >= 0) {
                 char labels[8][96]; int ids[8];
                 int n = romfs_card_actions(romfs_card, labels, ids);
@@ -19923,6 +19948,8 @@ int main(int argc, char *argv[]) {
                 int ns = g_storage_count;
                 y += hh + 10;
                 int total = ns + 1 + roots + (roots < ROMS_ROOT_MAX ? 1 : 0);
+                if (romfs_sel >= total) romfs_sel = total - 1;
+                if (romfs_sel < 0) romfs_sel = 0;
                 int lblh = TTF_FontHeight(font_label);
                 // Everything below the list: message line (when shown) + hint.
                 int reserved = lblh + 22 + (romfs_message[0] ? lblh + 10 : 0);
@@ -21736,11 +21763,21 @@ int main(int argc, char *argv[]) {
                     }
                 } else if (book_info_page == 2) {
                     const char *ud = sn_userdata_root();
-                    char m1[600], m2[600], m3[600];
-                    snprintf(m1, sizeof m1, "%s/system/manuals/%s/%s.pdf", ud, g->platform_dir, g->raw_filename);
-                    snprintf(m2, sizeof m2, "%s/%s/manuals/%s.pdf", sn_roms_root(), g->platform_dir, g->raw_filename);
-                    snprintf(m3, sizeof m3, "%s/%s/%s.pdf", sn_roms_root(), g->platform_dir, g->raw_filename);
-                    const char *found = sn_path_exists(m1) ? m1 : sn_path_exists(m2) ? m2 : sn_path_exists(m3) ? m3 : NULL;
+                    static char mbuf[700];
+                    const char *found = NULL;
+                    snprintf(mbuf, sizeof mbuf, "%s/system/manuals/%s/%s.pdf", ud, g->platform_dir, g->raw_filename);
+                    if (sn_path_exists(mbuf)) found = mbuf;
+                    // Then beside the ROM, on whichever card it actually lives on.
+                    if (!found) {
+                        const char *roots[ROMS_ROOT_MAX];
+                        int nr = sn_roms_roots(roots);
+                        for (int r = 0; r < nr && !found; r++) {
+                            snprintf(mbuf, sizeof mbuf, "%s/%s/manuals/%s.pdf", roots[r], g->platform_dir, g->raw_filename);
+                            if (sn_path_exists(mbuf)) { found = mbuf; break; }
+                            snprintf(mbuf, sizeof mbuf, "%s/%s/%s.pdf", roots[r], g->platform_dir, g->raw_filename);
+                            if (sn_path_exists(mbuf)) { found = mbuf; break; }
+                        }
+                    }
                     if (found) { BLINE("Manual found:", ink); BLINE(found, dim);
                                  BLINE("Open it from RetroArch's quick menu once the game is running.", dim); }
                     else       { BLINE("No manual found for this game.", dim);
