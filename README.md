@@ -1,4 +1,3 @@
-[README 1.2.8.md](https://github.com/user-attachments/files/31846094/README.1.2.8.md)
 # Snap FE
 
 A frontend (menu / game launcher) for **Knulli** CFW on Anbernic handhelds,
