@@ -412,6 +412,20 @@ Theme themes[THEME_COUNT] = {
 // A vertical spectrum wash for Rainbow Road. Everything else paints flat, so
 // this is opt-in per theme rather than a field on every entry.
 #define THEME_RAINBOW 16
+static SDL_Color hue_rgb(float h, float sat, float val) {
+    while (h < 0) h += 360.0f;
+    while (h >= 360.0f) h -= 360.0f;
+    float c = val * sat, x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f)), m = val - c;
+    float r = 0, g = 0, b = 0;
+    if      (h <  60) { r = c; g = x; }
+    else if (h < 120) { r = x; g = c; }
+    else if (h < 180) { g = c; b = x; }
+    else if (h < 240) { g = x; b = c; }
+    else if (h < 300) { r = x; b = c; }
+    else              { r = c; b = x; }
+    return (SDL_Color){ (Uint8)((r + m) * 255), (Uint8)((g + m) * 255), (Uint8)((b + m) * 255), 255 };
+}
+
 static void draw_theme_background(SDL_Renderer *ren, Theme *th, int idx) {
     if (idx != THEME_RAINBOW) {
         SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 255);
@@ -443,31 +457,50 @@ static void draw_theme_background(SDL_Renderer *ren, Theme *th, int idx) {
 }
 int theme_idx = 0;
 int g_ps_saved_theme = 0;   // theme to restore when Power Save Mode is turned off
+// Returns the theme to draw with. Everything is the stored theme unchanged
+// except Rainbow Road, whose accents shimmer -- so headers and highlights are
+// rainbow rather than one fixed turquoise.
+Theme *theme_for_frame(void) {
+    static Theme shimmer;
+    int i = (theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0;
+    if (i != THEME_RAINBOW) return &themes[i];
+    shimmer = themes[i];
+    float base = (float)(SDL_GetTicks() % 6000) * (360.0f / 6000.0f);
+    shimmer.accent1 = hue_rgb(base,         0.72f, 1.00f);
+    shimmer.accent2 = hue_rgb(base + 120.f, 0.68f, 1.00f);
+    shimmer.accent3 = hue_rgb(base + 240.f, 0.55f, 1.00f);
+    return &shimmer;
+}
+
 
 // --- Font choice: applies GLOBALLY to every text element in the app --
 // headers, menu rows, hints, everything follows the same choice. Five real
 // bundled fonts, each with its own per-size tuning since pixel fonts and
 // normal fonts need very different point sizes to read well at the same
 // visual size.
-#define FONT_CHOICE_COUNT 10
+#define FONT_CHOICE_COUNT 14
 // All bundled (assets/fonts/) so no font choice depends on what the device
 // happens to ship. Index 0 "Modern" (Ubuntu) is the default.
 const char *font_choice_names[] = {
     "Modern", "Modern Bold", "Condensed", "Rounded", "Serif",
-    "Sans", "Terminal", "Mono", "Retro Pixel", "Pixel Small"
+    "Sans", "Terminal", "Mono", "Retro Pixel", "Pixel Small",
+    "Signage", "Techno", "Slab", "Marker"
 };
 const char *font_choice_files[] = {
     "Ubuntu-R.ttf", "Ubuntu-B.ttf", "Ubuntu-C.ttf", "Poppins-Bold.ttf", "DejaVuSerif.ttf",
-    "DejaVuSans.ttf", "VT323-Regular.ttf", "UbuntuMono-R.ttf", "PressStart2P.ttf", "Silkscreen-Regular.ttf"
+    "DejaVuSans.ttf", "VT323-Regular.ttf", "UbuntuMono-R.ttf", "PressStart2P.ttf", "Silkscreen-Regular.ttf",
+    // Four faces with no relative in the set above: blocky signage, squared
+    // techno, a slab serif, and a handwritten marker.
+    "Bungee-Regular.ttf", "Audiowide-Regular.ttf", "ZillaSlab-Regular.ttf", "PermanentMarker-Regular.ttf"
 };
 // Per-font base point sizes for the three slots. Tuned so the *label* slot --
 // which renders most primary UI text (settings rows, the Home list, menus) --
 // stays comfortably readable on the 720x480 panel even at the "Small" Font Size.
 // Pixel fonts (PressStart2P, Silkscreen) keep smaller bases: they're very wide
 // and only legible near integer pixel sizes.
-int font_choice_big_size[]   = { 34, 34, 34, 34, 33, 33, 40, 33, 26, 24 };
-int font_choice_small_size[] = { 20, 20, 20, 20, 20, 20, 23, 20, 15, 15 };
-int font_choice_label_size[] = { 17, 17, 17, 17, 17, 17, 20, 17, 13, 13 };
+int font_choice_big_size[]   = { 34, 34, 34, 34, 33, 33, 40, 33, 26, 24,  28, 30, 33, 34 };
+int font_choice_small_size[] = { 20, 20, 20, 20, 20, 20, 23, 20, 15, 15,  17, 18, 20, 21 };
+int font_choice_label_size[] = { 17, 17, 17, 17, 17, 17, 20, 17, 13, 13,  14, 15, 17, 18 };
 int font_choice_idx = 5;   // "Sans" (DejaVuSans) out of the box
 TTF_Font *font_big = NULL;
 TTF_Font *font_small = NULL;
@@ -488,7 +521,8 @@ int font_size_idx = 1; // Medium by default (== the old X-Large size)
 
 // Faux-bold toggle. Skipped for fonts that are already bold and for the pixel
 // fonts (synthetic bold turns those to mush). 1 = can be bolded.
-int font_choice_boldable[] = { 1, 0, 1, 0, 1, 1, 1, 1, 0, 0 };
+// Bungee and Permanent Marker are already heavy; synthetic bold smears them.
+int font_choice_boldable[] = { 1, 0, 1, 0, 1, 1, 1, 1, 0, 0,  0, 1, 1, 0 };
 int font_bold = 0;   // persisted
 
 // NULL in font_choice_files means "use the system DejaVu font" (our one
@@ -4394,7 +4428,6 @@ int build_display_rows(int *row_type, int *row_extra) {
     // choices, so they belong here.
     D_ADD(ROW_DISP_GRP_VIEW, 0);
     if (disp_grp_view_open) {
-        D_ADD(ROW_DISP_CONSOLE_VIEW, 0);
         D_ADD(ROW_DISP_FAVORITES_VIEW, 0);
         D_ADD(ROW_DISP_SHOW_EMPTY, 0);
         // Carousel, Grid and Single Card overlay a title that can be turned
@@ -4418,7 +4451,6 @@ int build_display_rows(int *row_type, int *row_extra) {
     // out following it.
     D_ADD(ROW_DISP_GRP_LIBVIEW, 0);
     if (disp_grp_libview_open) {
-        D_ADD(ROW_DISP_LIB_VIEW, 0);
         if (library_view_style() == 2) {   // only the Grid layout uses columns/rows
             D_ADD(ROW_DISP_LIB_COLS, 0);
             D_ADD(ROW_DISP_LIB_ROWS, 0);
@@ -17255,7 +17287,13 @@ int main(int argc, char *argv[]) {
                                 else if (stats_count() < STATS_PICK_MAX) stats_mask |= (1 << it);
                             } else if (rt == ROW_DISP_APP_ITEM) {
                                 home_apps_mask ^= (1 << disp_row_extra[settings_selected]);
-                            } else if (rt == ROW_DISP_LIB_VIEW) {
+                            } else if (rt == ROW_DISP_GRP_VIEW) {
+                                platform_view_style = (platform_view_style + dir + VIEW_STYLE_COUNT) % VIEW_STYLE_COUNT;
+                                carousel_prev_selected = platform_selected;
+                                g_prev_ord = g_sel_ord;
+                                carousel_transition_start = anim_start();
+                                platform_assets_loaded_for = -1;
+                            } else if (rt == ROW_DISP_GRP_LIBVIEW || rt == ROW_DISP_LIB_VIEW) {
                                 // -1 (follow) sits one step below the first
                                 // explicit layout, so the wheel is
                                 // Follow, Single Card, Carousel, Grid, List, Bookshelf.
@@ -18456,7 +18494,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        Theme *th = &themes[theme_idx];
+        Theme *th = theme_for_frame();
         resolve_font_colors(th); // sets g_ui_text / g_ui_dim / g_hud_text for this frame
         // First-run setup: always show a plain status bar in the theme's own
         // text colour, whatever the user later customises it to.
@@ -19985,8 +20023,15 @@ int main(int argc, char *argv[]) {
                             snprintf(text, sizeof(text), "%c Home Apps (%d/%d)", disp_grp_apps_open ? 'v' : '>', n, APP_COUNT); indent = 1; } break;
                         case ROW_DISP_APP_ITEM: { int a = row_extra[i]; snprintf(text, sizeof(text), "%s: %s", home_app_names[a], (home_apps_mask & (1 << a)) ? "Shown" : "Hidden"); indent = 2; } break;
                         case ROW_DISP_GRP_TEXT: snprintf(text, sizeof(text), "%c Theme & Text", disp_grp_text_open ? 'v' : '>'); indent = 0; break;
-                        case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Systems View", disp_grp_view_open ? 'v' : '>'); indent = 0; break;
-                        case ROW_DISP_GRP_LIBVIEW: snprintf(text, sizeof(text), "%c Library View", disp_grp_libview_open ? 'v' : '>'); indent = 0; break;
+                        // The layout lives on the header, so it is named once
+                        // per group instead of again on a row underneath.
+                        case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Systems View: %s", disp_grp_view_open ? 'v' : '>', view_style_names[platform_view_style % VIEW_STYLE_COUNT]); indent = 0; break;
+                        case ROW_DISP_GRP_LIBVIEW:
+                            if (library_view_idx < 0)
+                                snprintf(text, sizeof(text), "%c Library View: Follow Systems View", disp_grp_libview_open ? 'v' : '>');
+                            else
+                                snprintf(text, sizeof(text), "%c Library View: %s", disp_grp_libview_open ? 'v' : '>', library_view_names[library_view_idx]);
+                            indent = 0; break;
                         case ROW_DISP_LIB_VIEW:
                             if (library_view_idx < 0)
                                 snprintf(text, sizeof(text), "Layout: Follow Systems View (%s)",

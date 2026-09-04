@@ -15,9 +15,15 @@
 | `PressStart2P.ttf` | Press Start 2P | SIL Open Font License 1.1 |
 | `Silkscreen-Regular.ttf` | Silkscreen | SIL Open Font License 1.1 |
 | `VT323-Regular.ttf` | VT323 | SIL Open Font License 1.1 |
+| `Bungee-Regular.ttf` | Bungee | SIL Open Font License 1.1 |
+| `Audiowide-Regular.ttf` | Audiowide | SIL Open Font License 1.1 |
+| `ZillaSlab-Regular.ttf` | Zilla Slab | SIL Open Font License 1.1 |
+| `PermanentMarker-Regular.ttf` | Permanent Marker | Apache License 2.0 |
 
 All are redistributable under the terms above. Full license texts ship with
-each font upstream (Google Fonts / the DejaVu and Ubuntu projects).
+each font upstream (Google Fonts / the DejaVu and Ubuntu projects); copies of
+the licenses for the four fonts added in 1.2.7 are in
+`assets/fonts/licenses/`.
 
 ## Bundled sounds — `assets/sounds/`
 
