@@ -426,6 +426,27 @@ static SDL_Color hue_rgb(float h, float sat, float val) {
     return (SDL_Color){ (Uint8)((r + m) * 255), (Uint8)((g + m) * 255), (Uint8)((b + m) * 255), 255 };
 }
 
+SDL_Texture* render_text(SDL_Renderer *ren, TTF_Font *font, const char *text, SDL_Color color);
+
+// Draw a string with a rainbow running across its glyphs, drifting slowly.
+// The texture is cached white and tinted per strip at draw time, so this costs
+// no extra text rasterisation and no extra cache entries.
+void draw_text_rainbow(SDL_Renderer *ren, TTF_Font *f, const char *str, int x, int y) {
+    SDL_Texture *t = render_text(ren, f, str, (SDL_Color){ 255, 255, 255, 255 });
+    if (!t) return;
+    int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+    float base = (float)(SDL_GetTicks() % 9000) * (360.0f / 9000.0f);
+    const int STRIPS = 14;
+    for (int i = 0; i < STRIPS; i++) {
+        int sx = w * i / STRIPS, sw = w * (i + 1) / STRIPS - sx;
+        if (sw <= 0) continue;
+        SDL_Color c = hue_rgb(base + (float)i * (300.0f / STRIPS), 0.55f, 1.0f);
+        SDL_SetTextureColorMod(t, c.r, c.g, c.b);
+        SDL_RenderCopy(ren, t, &(SDL_Rect){ sx, 0, sw, h }, &(SDL_Rect){ x + sx, y, sw, h });
+    }
+    SDL_SetTextureColorMod(t, 255, 255, 255);
+}
+
 static void draw_theme_background(SDL_Renderer *ren, Theme *th, int idx) {
     if (idx != THEME_RAINBOW) {
         SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 255);
@@ -465,10 +486,10 @@ Theme *theme_for_frame(void) {
     int i = (theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0;
     if (i != THEME_RAINBOW) return &themes[i];
     shimmer = themes[i];
-    float base = (float)(SDL_GetTicks() % 6000) * (360.0f / 6000.0f);
-    shimmer.accent1 = hue_rgb(base,         0.72f, 1.00f);
-    shimmer.accent2 = hue_rgb(base + 120.f, 0.68f, 1.00f);
-    shimmer.accent3 = hue_rgb(base + 240.f, 0.55f, 1.00f);
+    float base = (float)(SDL_GetTicks() % 9000) * (360.0f / 9000.0f);
+    shimmer.accent1 = hue_rgb(base,        0.55f, 1.00f);
+    shimmer.accent2 = hue_rgb(base + 40.f, 0.50f, 1.00f);
+    shimmer.accent3 = hue_rgb(base + 80.f, 0.42f, 1.00f);
     return &shimmer;
 }
 
@@ -6096,7 +6117,7 @@ void night_tint_overlay(SDL_Renderer *ren) {
 // Immediately paint one "<msg>..." frame and present it, so a blocking scan
 // that follows doesn't look like a freeze. font_small / theme are globals.
 void splash_now(SDL_Renderer *ren, const char *msg) {
-    Theme *t = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *t = theme_for_frame();
     SDL_SetRenderDrawColor(ren, t->bg.r, t->bg.g, t->bg.b, 255);
     SDL_RenderClear(ren);
     char m[96]; snprintf(m, sizeof m, "%s...", msg);
@@ -6130,11 +6151,11 @@ static float g_boot_stage_base = 0.0f, g_boot_stage_span = 1.0f;
 static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
                                const char *status, float progress) {
     brightness_frontend_guard_tick(0);
-    Theme *t = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *t = theme_for_frame();
     if (progress < 0.0f) progress = 0.0f;
     if (progress > 1.0f) progress = 1.0f;
-    SDL_SetRenderDrawColor(ren, t->bg.r, t->bg.g, t->bg.b, 255);
-    SDL_RenderClear(ren);
+    draw_theme_background(ren, t, theme_idx);
+
 
     int fade_ms = reduce_motion ? 1 : 1200;
     int alpha = elapsed < (Uint32)fade_ms ? (int)(elapsed * 255 / fade_ms) : 255;
@@ -6156,7 +6177,10 @@ static void draw_boot_sequence(SDL_Renderer *ren, Uint32 elapsed,
                 SDL_RenderFillRect(ren, &(SDL_Rect){ px, py, 2, 2 });
             }
         }
-        SDL_RenderCopy(ren, logo, NULL, &dst);
+        if (theme_idx == THEME_RAINBOW && alpha >= 250)
+            draw_text_rainbow(ren, font_big, "SNAP FE", dst.x, dst.y);
+        else
+            SDL_RenderCopy(ren, logo, NULL, &dst);
         int seg = tw / 3, sy = dst.y + tht + 10;
         SDL_SetRenderDrawColor(ren, t->accent1.r, t->accent1.g, t->accent1.b, (Uint8)alpha);
         SDL_RenderFillRect(ren, &(SDL_Rect){ dst.x, sy, seg, 5 });
@@ -6208,7 +6232,7 @@ void draw_progress(SDL_Renderer *ren, const char *msg, float frac) {
         SDL_RenderPresent(ren);
         return;
     }
-    Theme *t = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *t = theme_for_frame();
     SDL_SetRenderDrawColor(ren, t->bg.r, t->bg.g, t->bg.b, 255);
     SDL_RenderClear(ren);
     char m[110]; snprintf(m, sizeof m, "%s  %d%%", msg, (int)(frac * 100.0f + 0.5f));
@@ -6607,7 +6631,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
     home_widget_draw_top[anchor_bottom ? 1 : 0] = region_top;
     if (kind == HOME_WIDGET_NONE) return;
     if (region_bot - region_top < 28) return;
-    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *th = theme_for_frame();
 
     // ---------------- Calendar: a useful current-week glance --------------
     // The widget itself never browses or remembers another date. A opens the
@@ -7240,7 +7264,7 @@ static int art_prefers_silhouette(int art_idx) {
 // return a bright, lightly-tinted colour and draw_silhouette_shadow renders it
 // as a luminous halo instead of a shadow. Light theme, day -> ordinary black.
 static SDL_Color selection_shadow_color(void) {
-    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *th = theme_for_frame();
     int bg_lum = (th->bg.r * 30 + th->bg.g * 59 + th->bg.b * 11) / 100;
     int night = night_active_now();
 
@@ -7263,7 +7287,7 @@ static SDL_Color selection_shadow_color(void) {
 // Transparent 3D boxes and logos use the silhouette treatment instead.
 static void draw_art_outline(SDL_Renderer *ren, SDL_Rect d) {
     if (d.w < 11 || d.h < 11) return;
-    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *th = theme_for_frame();
     SDL_BlendMode pbm; SDL_GetRenderDrawBlendMode(ren, &pbm);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);                       // dark seat reads on pale artwork
@@ -10323,7 +10347,7 @@ void ensure_platform_icons_loaded(SDL_Renderer *ren, int style) {
 // "GENE..." is worse than smaller text that says "GENESIS".
 static void draw_platform_placeholder(SDL_Renderer *ren, int p, SDL_Rect r, int selected) {
     if (p < 0 || p >= PLATFORM_COUNT || r.w <= 2 || r.h <= 2) return;
-    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *th = theme_for_frame();
 
     SDL_Color plate = selected ? th->accent1 : th->select_bg;
     fill_rounded(ren, r, r.w < 60 ? 5 : 10, plate.r, plate.g, plate.b, selected ? 240 : 215);
@@ -10494,7 +10518,7 @@ static const CartSpec *cart_spec_for(int p) {
 static SDL_Rect draw_cartridge(SDL_Renderer *ren, SDL_Rect box, int p, const char *title, int prominent) {
     if (box.w < 8 || box.h < 8) return box;
     const CartSpec *c = cart_spec_for(p);
-    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *th = theme_for_frame();
 
     // Disc systems get a disc. A cartridge silhouette would be nonsense for a
     // PlayStation or a Saturn, and a blank CD-R with the title written across
@@ -10715,7 +10739,7 @@ static CartDonor *cart_donor_for(SDL_Renderer *ren, const char *pdir) {
 // Returns the rect it occupied.
 static SDL_Rect draw_cartridge_donor(SDL_Renderer *ren, SDL_Rect box, CartDonor *d,
                                      int p, const char *title, int prominent) {
-    Theme *th = &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
+    Theme *th = theme_for_frame();
     const CartSpec *cs = cart_spec_for(p);
 
     float ar = (d->h > 0) ? (float)d->w / (float)d->h : 1.0f;
@@ -12737,7 +12761,8 @@ void draw_dock_logo(SDL_Renderer *ren, TTF_Font *font) {
     SDL_QueryTexture(logo, NULL, NULL, &tw, &tht);
     SDL_Rect dst = { 24, 16, tw, tht };
     draw_hud_backing(ren, dst);
-    SDL_RenderCopy(ren, logo, NULL, &dst);
+    if (theme_idx == THEME_RAINBOW) draw_text_rainbow(ren, font_label, "SNAP FE", dst.x, dst.y);
+    else                            SDL_RenderCopy(ren, logo, NULL, &dst);
 }
 
 // --- Gamepad -> keyboard bridge ---------------------------------------------
@@ -14366,9 +14391,7 @@ static void mg_icon(SDL_Renderer *ren, int id, int x, int y, int s, SDL_Color c)
     }
 }
 
-static Theme *mg_theme(void) {
-    return &themes[(theme_idx >= 0 && theme_idx < THEME_COUNT) ? theme_idx : 0];
-}
+static Theme *mg_theme(void) { return theme_for_frame(); }
 // shared: game name + exit hint across the top -- kept clear of the status bar
 static void mg_chrome(SDL_Renderer *ren, const char *name) {
     Theme *th = mg_theme();
