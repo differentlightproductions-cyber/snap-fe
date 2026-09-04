@@ -3,6 +3,20 @@
 Snap FE now draws on top of a running game, every system has carousel art, and
 several settings rows that looked wrong or behaved badly are fixed.
 
+## Link Play hotfix
+
+- **Direct local connections work again.** A RetroArch relay saved in Knulli's
+  per-system settings could override Snap FE's local host/client address at the
+  last moment. That split the two handhelds between different connection paths
+  and made the second device fail as the game launched.
+- Snap FE now disables conflicting relay, public-room, NAT-traversal and
+  password overrides only for the active GBA Link Play session. The complete
+  original configuration is restored when the game exits, so personal
+  RetroArch settings are not erased.
+- Compatible Link Play games may connect across different game revisions, as
+  supported by the gpSP serial-link implementation; the hotfix does not impose
+  a matching-ROM restriction.
+
 ## The overlay survives the game
 
 The performance overlay used to vanish the moment a game started. Everything

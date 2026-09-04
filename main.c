@@ -12250,7 +12250,22 @@ static void link_write_core_opts(int is_host, const char *peer_ip) {
             // drop any of our own prior link lines (belt-and-braces vs restore)
             if (strstr(line, "gambatte_gb_link_") || strstr(line, "gpsp_serial") ||
                 strstr(line, "gba.core=gpsp") || strstr(line, "netplay_check_frames") ||
-                strstr(line, "netplay.security")) continue;
+                strstr(line, "netplay.security") ||
+                // Knulli applies raw *.retroarch.* overrides after it builds
+                // the command-line host/client configuration.  A relay saved
+                // by RetroArch therefore wins over Snap's LAN address unless
+                // it is removed for this transaction.  The untouched file is
+                // already backed up above and is restored when the game exits.
+                strstr(line, ".retroarch.netplay_use_mitm_server") ||
+                strstr(line, ".retroarch.netplay_mitm_server") ||
+                strstr(line, ".retroarch.netplay_custom_mitm_server") ||
+                strstr(line, ".retroarch.netplay_password") ||
+                strstr(line, ".retroarch.netplay_spectate_password") ||
+                strstr(line, ".retroarch.netplay_public_announce") ||
+                strstr(line, ".retroarch.netplay_nat_traversal") ||
+                strstr(line, ".netplay.relay=") ||
+                strstr(line, ".netplay.password=") ||
+                strstr(line, ".netplay.spectatepassword=")) continue;
             int n = (int)strlen(line);
             if (kl + n < (int)sizeof(keep) - 1) { memcpy(keep + kl, line, n); kl += n; keep[kl] = '\0'; }
         }
@@ -12284,6 +12299,22 @@ static void link_write_core_opts(int is_host, const char *peer_ip) {
         fprintf(w, "gba.gpsp_serial=%s\n", serial);
         fprintf(w, "gba.retroarch.netplay_check_frames=0\n");
         fprintf(w, "global.netplay.security=none\n");
+        // Link Play is a direct connection on the current Wi-Fi network.  Pin
+        // both Knulli's high-level setting and RetroArch's late raw overrides
+        // so a previously selected Internet relay cannot split the host and
+        // client between two different transports.  link_restore_core_opts()
+        // puts every original value back after the session.
+        fprintf(w, "gba.netplay.relay=none\n");
+        fprintf(w, "gba.netplay.password=\n");
+        fprintf(w, "gba.netplay.spectatepassword=\n");
+        fprintf(w, "gba.netplay_public_announce=false\n");
+        fprintf(w, "gba.retroarch.netplay_use_mitm_server=false\n");
+        fprintf(w, "gba.retroarch.netplay_mitm_server=\n");
+        fprintf(w, "gba.retroarch.netplay_custom_mitm_server=\n");
+        fprintf(w, "gba.retroarch.netplay_password=\n");
+        fprintf(w, "gba.retroarch.netplay_spectate_password=\n");
+        fprintf(w, "gba.retroarch.netplay_public_announce=false\n");
+        fprintf(w, "gba.retroarch.netplay_nat_traversal=false\n");
     } else {
         // GB/GBC: gambatte opens its own link socket. Set both folders since we
         // don't know which the partner used.
