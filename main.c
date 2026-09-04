@@ -361,7 +361,7 @@ typedef struct {
     SDL_Color bg, text, dim, accent1, accent2, accent3, select_bg;
 } Theme;
 
-#define THEME_COUNT 16
+#define THEME_COUNT 20
 #define THEME_MIDNIGHT 8   // auto-selected by Power Save Mode (low white -> less glare/GPU)
 Theme themes[THEME_COUNT] = {
     { "Indigo",    {245,245,248,255}, {35,30,70,255},  {150,148,165,255}, {75,60,140,255},  {110,80,160,255}, {150,110,190,255}, {225,220,240,255} },
@@ -398,7 +398,49 @@ Theme themes[THEME_COUNT] = {
     { "RGSPink",   {244,188,207,255}, {62,25,58,255},    {126,77,112,255},  {179,70,132,255}, {111,52,142,255}, {255,232,242,255}, {226,145,181,255} },
     // Pokemon Yellow / HeartGold: warm gold field, deep-brown type and amber highlights.
     { "Yellow / Gold", {244,199,54,255}, {54,35,10,255}, {122,87,22,255}, {224,145,24,255}, {117,72,12,255}, {255,239,156,255}, {231,169,39,255} },
+    // Rainbow Road: deep space under a full-spectrum sweep. The only theme that
+    // paints a gradient instead of a flat field -- see draw_theme_background.
+    { "Rainbow Road", {14,10,30,255},  {252,250,255,255}, {158,150,186,255}, {255,86,142,255}, {86,220,255,255}, {255,214,92,255},  {44,32,78,255} },
+    // Sunset Drive: dusk plum with coral and amber -- warm where Rainbow is cool.
+    { "Sunset Drive", {34,18,36,255},  {255,238,230,255}, {176,142,152,255}, {255,118,80,255}, {255,164,92,255}, {255,206,132,255}, {64,32,60,255} },
+    // Moss: forest floor. Deep green with cream type, the only natural dark theme.
+    { "Moss",         {18,33,25,255},  {233,241,225,255}, {136,158,141,255}, {108,180,112,255},{152,206,132,255},{201,226,172,255}, {33,56,41,255} },
+    // Sepia: warm parchment and brown ink -- a light theme with no blue in it,
+    // which none of the other light themes can say.
+    { "Sepia",        {243,233,213,255}, {58,42,28,255},  {150,130,105,255}, {150,95,45,255},  {181,126,66,255}, {206,161,101,255}, {228,214,188,255} },
 };
+// A vertical spectrum wash for Rainbow Road. Everything else paints flat, so
+// this is opt-in per theme rather than a field on every entry.
+#define THEME_RAINBOW 16
+static void draw_theme_background(SDL_Renderer *ren, Theme *th, int idx) {
+    if (idx != THEME_RAINBOW) {
+        SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 255);
+        SDL_RenderClear(ren);
+        return;
+    }
+    SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 255);
+    SDL_RenderClear(ren);
+    // Six stops through the spectrum, blended down the screen and kept dim so
+    // foreground text stays readable over any band.
+    static const SDL_Color stops[] = {
+        { 118, 40, 150, 255 }, {  40, 70, 190, 255 }, {  30, 150, 170, 255 },
+        {  40, 150,  70, 255 }, { 180, 140, 40, 255 }, { 170,  50,  80, 255 },
+    };
+    const int NS = (int)(sizeof stops / sizeof stops[0]);
+    int h = WIN_H;
+    for (int y = 0; y < h; y++) {
+        float t = (float)y / (float)(h - 1) * (NS - 1);
+        int i = (int)t; if (i > NS - 2) i = NS - 2;
+        float f = t - i;
+        SDL_Color a = stops[i], b = stops[i + 1];
+        Uint8 r = (Uint8)(a.r + (b.r - a.r) * f);
+        Uint8 g = (Uint8)(a.g + (b.g - a.g) * f);
+        Uint8 bl = (Uint8)(a.b + (b.b - a.b) * f);
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ren, r, g, bl, 150);
+        SDL_RenderDrawLine(ren, 0, y, WIN_W, y);
+    }
+}
 int theme_idx = 0;
 int g_ps_saved_theme = 0;   // theme to restore when Power Save Mode is turned off
 
@@ -4355,7 +4397,10 @@ int build_display_rows(int *row_type, int *row_extra) {
         D_ADD(ROW_DISP_CONSOLE_VIEW, 0);
         D_ADD(ROW_DISP_FAVORITES_VIEW, 0);
         D_ADD(ROW_DISP_SHOW_EMPTY, 0);
-        if (platform_view_style == 1) D_ADD(ROW_DISP_CAROUSEL_TITLES, 0);
+        // Carousel, Grid and Single Card overlay a title that can be turned
+        // off. List and Bookshelf ARE their titles, so it is not offered there.
+        if (platform_view_style == 0 || platform_view_style == 1 || platform_view_style == 2)
+            D_ADD(ROW_DISP_CAROUSEL_TITLES, 0);
         if (platform_view_style == 2) {
             D_ADD(ROW_DISP_PGRID_COLS, 0);
             D_ADD(ROW_DISP_PGRID_ROWS, 0);
@@ -18461,8 +18506,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 255);
-        SDL_RenderClear(ren);
+        draw_theme_background(ren, th, theme_idx);
 
         // Flashlight: nothing but a pure-white field and one tiny hint. Drawn
         // here so no HUD, dim overlay or night tint can touch it.
@@ -19190,12 +19234,15 @@ int main(int argc, char *argv[]) {
 
                     // Name UNDER the box, scaled to fit the cell width so it
                     // never spills past the box edges at any grid size.
-                    SDL_Texture *lbl = render_text_fit(ren, font_label, platform_maker[p],
-                                                       selected ? g_ui_text : g_ui_dim, cell_w);
-                    int lw, lh;
-                    SDL_QueryTexture(lbl, NULL, NULL, &lw, &lh);
-                    SDL_Rect ldst = { cx + cell_w/2 - lw/2, cy + box_h + 3, lw, lh };
-                    SDL_RenderCopy(ren, lbl, NULL, &ldst);
+                    // "System Titles" turns these off for a pure-artwork grid.
+                    if (carousel_titles_on) {
+                        SDL_Texture *lbl = render_text_fit(ren, font_label, platform_maker[p],
+                                                           selected ? g_ui_text : g_ui_dim, cell_w);
+                        int lw, lh;
+                        SDL_QueryTexture(lbl, NULL, NULL, &lw, &lh);
+                        SDL_Rect ldst = { cx + cell_w/2 - lw/2, cy + box_h + 3, lw, lh };
+                        SDL_RenderCopy(ren, lbl, NULL, &ldst);
+                    }
                 }
 
                 if (page_count > 1) {
@@ -19558,16 +19605,20 @@ int main(int argc, char *argv[]) {
                 SDL_Rect panel_clip = { 0, panel_y, panel_w, panel_h };
                 SDL_RenderSetClipRect(ren, &panel_clip);
 
-                char name_lines[MAX_LINES][128];
-                int name_n = wrap_text(font_small, platform_names[platform_selected], panel_text_w, name_lines);
-                if (name_n > 2) name_n = 2;
-                for (int ni = 0; ni < name_n; ni++) {
-                    SDL_Texture *nt = render_text(ren, font_small, name_lines[ni], g_ui_text);
-                    int ntw, nth; SDL_QueryTexture(nt, NULL, NULL, &ntw, &nth);
-                    SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ cx, cy, ntw, nth });
-                    cy += nth + 2;
+                // The big system name is this view's title; "System Titles"
+                // turns it off and leaves the maker, year and blurb.
+                if (carousel_titles_on) {
+                    char name_lines[MAX_LINES][128];
+                    int name_n = wrap_text(font_small, platform_names[platform_selected], panel_text_w, name_lines);
+                    if (name_n > 2) name_n = 2;
+                    for (int ni = 0; ni < name_n; ni++) {
+                        SDL_Texture *nt = render_text(ren, font_small, name_lines[ni], g_ui_text);
+                        int ntw, nth; SDL_QueryTexture(nt, NULL, NULL, &ntw, &nth);
+                        SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ cx, cy, ntw, nth });
+                        cy += nth + 2;
+                    }
+                    cy += 2;
                 }
-                cy += 2;
 
                 SDL_Texture *mt = render_text_fit(ren, font_label, platform_maker[platform_selected], g_ui_dim, panel_text_w);
                 int mtw, mth;
