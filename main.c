@@ -4069,10 +4069,13 @@ int build_sound_rows(int *row_type, int *row_extra) {
 #define ROW_DEV_GRP_NIGHT 20      // Night Mode's related controls stay together
 #define ROW_DEV_SYNCTHING 21
 #define ROW_DEV_SYNCTHING_INFO 22
+#define ROW_DEV_PERF_OVERLAY 23   // moved from Display: it reports on the device
+#define ROW_DEV_PERF_OPACITY 24
+#define ROW_DEV_PERF_TEXT 25
 int dev_grp_batt_open = 0;
 int dev_grp_night_open = 0;
 int confirm_es_pending = 0;   // ROW_DEV_EXIT_ES needs a second Enter to confirm
-#define MAX_DEVICE_ROWS 25
+#define MAX_DEVICE_ROWS 32
 
 static void syncthing_apply(void) {
 #ifdef SNAPOS_TARGET_KNULLI
@@ -4100,6 +4103,13 @@ int build_device_rows(int *row_type, int *row_extra) {
         row_type[idx] = ROW_DEV_BATTERY_ICON; row_extra[idx] = 0; idx++;
     }
     row_type[idx] = ROW_DEV_CPU_PERF; row_extra[idx] = 0; idx++;
+    // What the handheld is doing belongs with the handheld, next to the mode
+    // that governs it -- not under Display, which is about how the UI looks.
+    row_type[idx] = ROW_DEV_PERF_OVERLAY; row_extra[idx] = 0; idx++;
+    if (show_perf_overlay) {
+        row_type[idx] = ROW_DEV_PERF_OPACITY; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_PERF_TEXT; row_extra[idx] = 0; idx++;
+    }
     row_type[idx] = ROW_DEV_GRP_NIGHT; row_extra[idx] = 0; idx++;
     if (dev_grp_night_open) {
         row_type[idx] = ROW_DEV_NIGHT; row_extra[idx] = 0; idx++;
@@ -4134,7 +4144,6 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_LAUNCHMODE 6
 #define ROW_DISP_REDUCEMOTION 7
 #define ROW_DISP_SHOWFPS 8
-#define ROW_DISP_PERF_OVERLAY 9
 #define ROW_DISP_BG_HEADER 10
 #define ROW_DISP_BG_ITEM 11
 #define ROW_DISP_RESTORE 12
@@ -4182,8 +4191,6 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_STAT_GRP 50    // row_extra = stat sub-group index (Playtime/Systems/Activity)
 #define ROW_DISP_GRP_APPS 51    // collapsible "Home Apps" (which apps show on Home)
 #define ROW_DISP_APP_ITEM 52    // row_extra = APP_* index
-#define ROW_DISP_PERF_OPACITY 53   // perf overlay: panel opacity (shown when overlay on)
-#define ROW_DISP_PERF_TEXT 54      // perf overlay: text colour
 #define ROW_DISP_ART_HEADER 55     // legacy row id retained for settings compatibility; Game now owns this control
 #define ROW_DISP_ART_ITEM 56       // row_extra = art type index
 #define ROW_DISP_FAVORITES_VIEW 57 // independent layout for the Favorites library
@@ -4519,8 +4526,7 @@ int build_display_rows(int *row_type, int *row_extra) {
         D_ADD(ROW_DISP_GAME_ROTATION, 0);
         D_ADD(ROW_DISP_REDUCEMOTION, 0);
         D_ADD(ROW_DISP_SHOWFPS, 0);
-        D_ADD(ROW_DISP_PERF_OVERLAY, 0);
-        if (show_perf_overlay) { D_ADD(ROW_DISP_PERF_OPACITY, 0); D_ADD(ROW_DISP_PERF_TEXT, 0); }
+        // Performance Overlay and its two style rows moved to Device.
         D_ADD(ROW_DISP_RST_SCREEN, 0);
     }
     // Status Bar
@@ -11238,7 +11244,8 @@ static int grid_page_step(int idx, int n, int cols, int rows, int dir) {
     if (c >= cols)  { c = 0;        page = (page + 1) % pages; }
     else if (c < 0) { c = cols - 1; page = (page - 1 + pages) % pages; }
     int t = page * cap + r * cols + c;
-    if (t >= n) t = n - 1;   // a short last page: settle on its last tile
+    if (t >= n) t = n - 1;              // a short last page: settle on its last tile
+    if (t == idx) t = (idx + dir + n) % n;  // ...but never make the press do nothing
     return t;
 }
 
@@ -13164,8 +13171,7 @@ void restore_display_group(int which) {
         brightness_pct = 100; auto_sleep_idx = 0; launch_fullscreen = 1;
         sys_volume_pct = 80; sys_volume_apply(sys_volume_pct);
         game_aspect_idx = 0; game_rotation_idx = 0;
-        reduce_motion = 0; show_fps = 0; show_perf_overlay = 0;
-        perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
+        reduce_motion = 0; show_fps = 0;   // the perf overlay restores with Device
     }
     apply_brightness();
     settings_dirty = 1;
@@ -13189,7 +13195,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         brightness_pct = 100; auto_sleep_idx = 0; launch_fullscreen = 1; reduce_motion = 0;
         sys_volume_pct = 80; sys_volume_apply(sys_volume_pct);
         game_aspect_idx = 0; game_rotation_idx = 0;
-        show_fps = 0; show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
+        show_fps = 0;   // the perf overlay restores with Device
         home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
         app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
         surprise_me_enabled = 0; weather_unit = 0; home_view_idx = 0; home_icon_pack_idx = 0;
@@ -13212,6 +13218,7 @@ void restore_current_settings_tab(SettingsTab tab) {
     } else if (tab == TAB_DEVICE) {
         set_power_save(0, 0);
         cpu_perf_mode = 0; cpu_apply_pref();
+        show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
         auto_ps_pct = 0; battery_icon_enabled = 1;
         night_mode = 0; night_start_hour = 21; night_end_hour = 7; night_hotkey_on = 0; night_force = 0; night_brightness_pct = 35;
         dev_grp_batt_open = 0; dev_grp_night_open = 0;
@@ -17868,12 +17875,7 @@ int main(int argc, char *argv[]) {
                                 list_frame_color_idx = (list_frame_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
                             } else if (rt == ROW_DISP_LIST_TEXT_COLOR) {
                                 list_text_color_idx = (list_text_color_idx + dir + FONT_COLOR_COUNT) % FONT_COLOR_COUNT;
-                            } else if (rt == ROW_DISP_PERF_OPACITY) {
-                                perf_overlay_opacity += dir * 10;
-                                if (perf_overlay_opacity < 20) perf_overlay_opacity = 20;
-                                if (perf_overlay_opacity > 100) perf_overlay_opacity = 100;
-                            } else if (rt == ROW_DISP_PERF_TEXT) {
-                                perf_overlay_text_idx = (perf_overlay_text_idx + dir + FONT_COLOR_COUNT) % FONT_COLOR_COUNT;
+
                             } else if (rt == ROW_DISP_FONT_STYLE) {
                                 font_choice_idx = (font_choice_idx + dir + FONT_CHOICE_COUNT) % FONT_CHOICE_COUNT;
                                 reload_fonts();
@@ -17908,8 +17910,7 @@ int main(int argc, char *argv[]) {
                                 reduce_motion = !reduce_motion;
                             } else if (rt == ROW_DISP_SHOWFPS) {
                                 show_fps = !show_fps;
-                            } else if (rt == ROW_DISP_PERF_OVERLAY) {
-                                show_perf_overlay = !show_perf_overlay;
+
                             }
                         } else if (current_tab == TAB_GAME) {
                             int rt = game_row_type[settings_selected];
@@ -17967,6 +17968,14 @@ int main(int argc, char *argv[]) {
                                 set_power_save(!power_save_mode, 0);   // 30fps cap + gov + Midnight theme, applied live
                             } else if (dev_row_type[settings_selected] == ROW_DEV_CPU_PERF) {
                                 cpu_perf_mode = !cpu_perf_mode; cpu_apply_pref(); save_settings();
+                            } else if (dev_row_type[settings_selected] == ROW_DEV_PERF_OVERLAY) {
+                                show_perf_overlay = !show_perf_overlay;
+                            } else if (dev_row_type[settings_selected] == ROW_DEV_PERF_OPACITY) {
+                                perf_overlay_opacity += dir * 10;
+                                if (perf_overlay_opacity < 20) perf_overlay_opacity = 20;
+                                if (perf_overlay_opacity > 100) perf_overlay_opacity = 100;
+                            } else if (dev_row_type[settings_selected] == ROW_DEV_PERF_TEXT) {
+                                perf_overlay_text_idx = (perf_overlay_text_idx + dir + FONT_COLOR_COUNT) % FONT_COLOR_COUNT;
                             } else if (dev_row_type[settings_selected] == ROW_DEV_AUTOPS) {
                                 int n = (int)(sizeof(auto_ps_choices)/sizeof(auto_ps_choices[0]));
                                 int cur = 0; for (int i = 0; i < n; i++) if (auto_ps_choices[i] == auto_ps_pct) cur = i;
@@ -18082,6 +18091,18 @@ int main(int argc, char *argv[]) {
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_CPU_PERF) {
                             cpu_perf_mode = !cpu_perf_mode; cpu_apply_pref(); save_settings(); play_click();
+                        }
+                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_PERF_OVERLAY) {
+                            show_perf_overlay = !show_perf_overlay; save_settings(); settings_dirty = 0; play_click();
+                        }
+                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_PERF_OPACITY) {
+                            perf_overlay_opacity += 10;
+                            if (perf_overlay_opacity > 100) perf_overlay_opacity = 20;
+                            settings_dirty = 1; play_click();
+                        }
+                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_PERF_TEXT) {
+                            perf_overlay_text_idx = (perf_overlay_text_idx + 1) % FONT_COLOR_COUNT;
+                            settings_dirty = 1; play_click();
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_BATTERY_ICON) {
                             battery_icon_enabled = !battery_icon_enabled; save_settings(); settings_dirty = 0; play_click();
@@ -20675,9 +20696,6 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_GAME_ROTATION: snprintf(text, sizeof(text), "Game Rotation: %s", game_rotation_names[(game_rotation_idx >= 0 && game_rotation_idx < GAME_ROTATION_COUNT) ? game_rotation_idx : 0]); indent = 1; break;
                         case ROW_DISP_REDUCEMOTION: snprintf(text, sizeof(text), "Reduce Motion: %s", reduce_motion ? "ON" : "OFF"); indent = 1; break;
                         case ROW_DISP_SHOWFPS: snprintf(text, sizeof(text), "Show FPS: %s", show_fps ? "ON" : "OFF"); indent = 1; break;
-                        case ROW_DISP_PERF_OVERLAY: snprintf(text, sizeof(text), "Performance Overlay: %s", show_perf_overlay ? "ON" : "OFF"); indent = 1; break;
-                        case ROW_DISP_PERF_OPACITY: snprintf(text, sizeof(text), "Overlay Opacity: %d%%", perf_overlay_opacity); indent = 2; break;
-                        case ROW_DISP_PERF_TEXT: snprintf(text, sizeof(text), "Overlay Text Color: %s", perf_overlay_text_idx == 0 ? "Match UI" : font_color_names[(perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT) ? perf_overlay_text_idx : 1]); indent = 2; break;
 
                         case ROW_DISP_RST_TEXT:
                         case ROW_DISP_RST_VIEW:
@@ -20725,6 +20743,9 @@ int main(int argc, char *argv[]) {
                 } else if (current_tab == TAB_DEVICE) {
                     if (rt == ROW_DEV_POWERSAVE) snprintf(text, sizeof(text), "Power Save Mode: %s%s", power_save_mode ? "ON" : "OFF", (power_save_mode && power_save_auto) ? " (auto)" : "");
                     else if (rt == ROW_DEV_CPU_PERF) snprintf(text, sizeof(text), "CPU Performance Mode: %s%s", cpu_perf_mode ? "ON" : "OFF", power_save_mode ? "  (Power Save wins)" : (cpu_perf_mode ? "  (stays on in games)" : ""));
+                    else if (rt == ROW_DEV_PERF_OVERLAY) snprintf(text, sizeof(text), "Performance Overlay: %s%s", show_perf_overlay ? "ON" : "OFF", show_perf_overlay ? "  (stays up in games)" : "");
+                    else if (rt == ROW_DEV_PERF_OPACITY) { snprintf(text, sizeof(text), "Overlay Opacity: %d%%", perf_overlay_opacity); indent = 1; }
+                    else if (rt == ROW_DEV_PERF_TEXT) { snprintf(text, sizeof(text), "Overlay Text Color: %s", perf_overlay_text_idx == 0 ? "Match UI" : font_color_names[(perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT) ? perf_overlay_text_idx : 1]); indent = 1; }
                     else if (rt == ROW_DEV_GRP_BATT) snprintf(text, sizeof(text), "%c Battery", dev_grp_batt_open ? 'v' : '>');
                     else if (rt == ROW_DEV_GRP_NIGHT) snprintf(text, sizeof(text), "%c Night Mode & Schedule", dev_grp_night_open ? 'v' : '>');
                     else if (rt == ROW_DEV_AUTOPS) { int cur = 0; for (int k = 0; k < (int)(sizeof(auto_ps_labels)/sizeof(auto_ps_labels[0])); k++) if (auto_ps_choices[k] == auto_ps_pct) cur = k; snprintf(text, sizeof(text), "Auto Power Save at: %s", auto_ps_labels[cur]); indent = 1; }
