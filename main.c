@@ -19811,6 +19811,7 @@ int main(int argc, char *argv[]) {
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hw/2, WIN_H - hh - 12, hw, hh });
 
         } else if (state == STATE_SETTINGS) {
+            draw_dock_logo(ren, font_small);
             const char *tab_names[] = { "SOUND", "DISPLAY", "GAME", "DEVICE", "ACCOUNTS" };
             int tab_y = 56; // clears the top HUD / status bar
             const int TAB_GAP = 36, TAB_PAD = 20;   // gap between tabs; slop each side
@@ -22631,7 +22632,8 @@ int main(int argc, char *argv[]) {
             SDL_RenderFillRect(ren, &(SDL_Rect){ 0, HUD_BAR_H - 2, WIN_W, 2 });
             if (state == STATE_HOME || state == STATE_SURPRISE || state == STATE_PLATFORM ||
                 state == STATE_BG_PICKER || state == STATE_BG_ONLINE || state == STATE_BG_PREVIEW || state == STATE_BG_TARGET || state == STATE_MENU || state == STATE_BOOK ||
-                state == STATE_ACHIEVEMENTS || state == STATE_CALENDAR || state == STATE_CALCULATOR) {
+                state == STATE_ACHIEVEMENTS || state == STATE_CALENDAR || state == STATE_CALCULATOR ||
+                state == STATE_SETTINGS) {
                 draw_dock_logo(ren, font_small);
             }
         }
@@ -22678,7 +22680,13 @@ int main(int argc, char *argv[]) {
             int batt_icon_gap = battery_icon_enabled ? 7 : 0;
             int batt_group_w = batt_icon_w + batt_icon_gap + bw;
 
-            int right_group_x;   // left edge of the battery/FPS group
+            // Wi-Fi sits inside the same chrome as the battery and FPS rather
+            // than getting a pill of its own -- two pills with a gap between
+            // them read as a mistake under the Pill and Rectangle styles.
+            int wifi_gw = (g_wifi_bars > 0) ? (4 * 3 + 3 * 2) : 0;   // matches draw_wifi_glyph
+            int wifi_gap = (g_wifi_bars > 0) ? 10 : 0;
+
+            int right_group_x;   // left edge of the whole status group
             if (show_fps) {
                 char fps_str[24];
                 snprintf(fps_str, sizeof(fps_str), "%.0f FPS%s", fps_shown,
@@ -22688,39 +22696,39 @@ int main(int argc, char *argv[]) {
                 SDL_QueryTexture(fps_tex, NULL, NULL, &fw, &fh);
                 int gap = 12;
                 int h = bh > fh ? bh : fh;
-                int total_w = batt_group_w + gap + fw;
+                int total_w = wifi_gw + wifi_gap + batt_group_w + gap + fw;
                 int x0 = WIN_W - 16 - total_w;
                 draw_hud_backing(ren, (SDL_Rect){ x0, 16, total_w, h });
                 int text_x = x0;
+                if (g_wifi_bars > 0) {
+                    int gh = bh - 6;
+                    draw_wifi_glyph(ren, x0, 16 + (h - gh) / 2, gh, g_wifi_bars, g_hud_text);
+                    text_x += wifi_gw + wifi_gap;
+                }
+                int batt_x = text_x;
                 if (battery_icon_enabled) {
-                    draw_battery_glyph(ren, x0, 16 + (h - batt_icon_h) / 2, batt_icon_h, bpct, batt_color);
+                    draw_battery_glyph(ren, batt_x, 16 + (h - batt_icon_h) / 2, batt_icon_h, bpct, batt_color);
                     text_x += batt_icon_w + batt_icon_gap;
                 }
                 SDL_RenderCopy(ren, batt, NULL, &(SDL_Rect){ text_x, 16 + (h - bh) / 2, bw, bh });
-                SDL_RenderCopy(ren, fps_tex, NULL, &(SDL_Rect){ x0 + batt_group_w + gap, 16 + (h - fh) / 2, fw, fh });
+                SDL_RenderCopy(ren, fps_tex, NULL, &(SDL_Rect){ batt_x + batt_group_w + gap, 16 + (h - fh) / 2, fw, fh });
                 right_group_x = x0;
             } else {
-                SDL_Rect batt_dst = { WIN_W - batt_group_w - 16, 16, batt_group_w, bh };
-                draw_hud_backing(ren, batt_dst);
-                int text_x = batt_dst.x;
+                int total_w = wifi_gw + wifi_gap + batt_group_w;
+                int x0 = WIN_W - 16 - total_w;
+                draw_hud_backing(ren, (SDL_Rect){ x0, 16, total_w, bh });
+                int text_x = x0;
+                if (g_wifi_bars > 0) {
+                    int gh = bh - 6;
+                    draw_wifi_glyph(ren, x0, 16 + (bh - gh) / 2, gh, g_wifi_bars, g_hud_text);
+                    text_x += wifi_gw + wifi_gap;
+                }
                 if (battery_icon_enabled) {
-                    draw_battery_glyph(ren, batt_dst.x, 16 + (bh - batt_icon_h) / 2, batt_icon_h, bpct, batt_color);
+                    draw_battery_glyph(ren, text_x, 16 + (bh - batt_icon_h) / 2, batt_icon_h, bpct, batt_color);
                     text_x += batt_icon_w + batt_icon_gap;
                 }
                 SDL_RenderCopy(ren, batt, NULL, &(SDL_Rect){ text_x, 16, bw, bh });
-                right_group_x = batt_dst.x;
-            }
-
-            // Wi-Fi icon -- shown only while connected, left of the battery,
-            // wrapped in the same status-backdrop chrome as the other HUD items.
-            if (g_wifi_bars > 0) {
-                int gh = bh - 6;
-                int gw = 4 * 3 + 3 * 2;               // matches draw_wifi_glyph
-                int gx = right_group_x - 14 - gw;
-                int gy = 16 + (bh - gh) / 2;
-                draw_hud_backing(ren, (SDL_Rect){ gx, gy, gw, gh });
-                draw_wifi_glyph(ren, gx, gy, gh, g_wifi_bars, g_hud_text);
-                right_group_x = gx;
+                right_group_x = x0;
             }
 
             // CPU Performance Mode is a persistent hardware choice, so keep a
