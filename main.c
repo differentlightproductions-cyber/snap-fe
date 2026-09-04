@@ -2616,6 +2616,11 @@ HudChromeColor hud_chrome_colors[] = {
     { "Purple", 74,  44,  104, 255 },
 };
 #define HUD_CHROME_COLOR_COUNT 6
+// One past the fixed colours: "Theme", i.e. take the bar from the active theme
+// so it changes with it. The image frame is never picked directly -- it is
+// always derived from the bar, so the two can never be set to clash.
+#define LIST_BAR_THEME HUD_CHROME_COLOR_COUNT
+#define LIST_BAR_CHOICES (HUD_CHROME_COLOR_COUNT + 1)
 int hud_chrome_color_idx = 0;
 #define HUD_BAR_H 44 // height of the Top Bar style strip -- clears the wordmark,
                      // clock and battery/FPS text with a little breathing room
@@ -2625,7 +2630,30 @@ int hud_chrome_color_idx = 0;
 // indices into hud_chrome_colors[] and are user-picked under Settings > Game
 // when Systems View is List.
 int list_bar_color_idx = 1;   // Slate  (index into hud_chrome_colors)
-int list_frame_color_idx = 3; // Blue   (index into hud_chrome_colors)
+int list_frame_color_idx = 3; // legacy; kept only so old settings.cfg still loads
+struct Theme;
+// The list bar's colour, honouring the "Theme" choice.
+static SDL_Color list_bar_rgba(void);
+// The icon frame: always a readable sibling of the bar, light on a dark bar and
+// dark on a light one, so it tracks both the theme and any bar the user picks.
+static SDL_Color list_frame_rgba(void);
+static SDL_Color list_bar_rgba(void) {
+    extern int theme_idx; extern Theme themes[];
+    if (list_bar_color_idx == LIST_BAR_THEME) {
+        SDL_Color b = themes[theme_idx].select_bg;
+        return (SDL_Color){ b.r, b.g, b.b, 255 };
+    }
+    int i = (list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0;
+    HudChromeColor c = hud_chrome_colors[i];
+    return (SDL_Color){ c.r, c.g, c.b, c.a };
+}
+static SDL_Color list_frame_rgba(void) {
+    SDL_Color b = list_bar_rgba();
+    int lum = (b.r * 30 + b.g * 59 + b.b * 11) / 100;
+    if (lum < 128) return (SDL_Color){ (Uint8)((b.r + 255 * 2) / 3), (Uint8)((b.g + 255 * 2) / 3),
+                                       (Uint8)((b.b + 255 * 2) / 3), 255 };
+    return (SDL_Color){ (Uint8)(b.r / 2), (Uint8)(b.g / 2), (Uint8)(b.b / 2), 255 };
+}
 int list_text_color_idx = 0;  // 0 = Auto (contrast vs bar); else font_color_values[]
 
 // --- RetroAchievements: Snap OS stores the credentials and toggles; RetroArch
@@ -4089,6 +4117,7 @@ static void settings_close_all_groups(void) {
     snd_grp_radio_open = snd_grp_music_open = 0;
     dev_grp_batt_open = dev_grp_night_open = 0;
     disp_grp_home_open = disp_grp_text_open = disp_grp_view_open = 0;
+    disp_grp_libview_open = 0;
     disp_grp_hud_open = disp_grp_screen_open = 0;
     disp_grp_stats_open = disp_grp_apps_open = disp_grp_widgets_open = 0;
     bg_dropdown_open = game_art_dropdown_open = display_dropdown_open = 0;
@@ -4105,6 +4134,9 @@ static void settings_close_all_groups(void) {
 // touching and the setting can come back later without re-deriving it.
 #define VIEW_STYLE_COUNT 5
 const char *view_style_names[VIEW_STYLE_COUNT] = { "Single Card", "Carousel (AI Art)", "Grid", "List", "Bookshelf (AI Art)" };
+// Library layouts share the same indices but not the same names: index 1 fans
+// the games out as cartridges, which are drawn here rather than scraped art.
+const char *library_view_names[VIEW_STYLE_COUNT] = { "Single Card", "Cartridges", "Grid", "List", "Bookshelf" };
 #define VIEW_STYLE_BOOKSHELF 4
 int platform_view_style = 1; // Carousel out of the box
 // Which layout the GAME LIBRARY uses. -1 means "follow the Systems View",
@@ -4303,6 +4335,18 @@ int build_display_rows(int *row_type, int *row_extra) {
             for (int _a = 0; _a < APP_COUNT; _a++) { row_type[idx] = ROW_DISP_APP_ITEM; row_extra[idx] = _a; idx++; }
         D_ADD(ROW_DISP_SURPRISE, 0);
     }
+    // Theme & Text
+    D_ADD(ROW_DISP_GRP_TEXT, 0);
+    if (disp_grp_text_open) {
+        D_ADD(ROW_DISP_THEME, 0);
+        D_ADD(ROW_DISP_FONT_STYLE, 0);
+        D_ADD(ROW_DISP_FONT_SIZE, 0);
+        if (font_choice_idx >= 0 && font_choice_idx < FONT_CHOICE_COUNT && font_choice_boldable[font_choice_idx])
+            D_ADD(ROW_DISP_FONT_BOLD, 0);
+        D_ADD(ROW_DISP_FONT_COLOR, 0);
+        D_ADD(ROW_DISP_RST_TEXT, 0);
+    }
+    // Systems View, Columns/Rows and Display Art now live under Game.
     // Systems View, and the Library View that follows from it. Both lived in
     // the Game tab for a while, which had grown crowded; they are display
     // choices, so they belong here.
@@ -4318,7 +4362,7 @@ int build_display_rows(int *row_type, int *row_extra) {
         }
         if (platform_view_style == 3) {
             D_ADD(ROW_DISP_LIST_BAR_COLOR, 0);
-            D_ADD(ROW_DISP_LIST_FRAME_COLOR, 0);
+            // No frame-colour row: it is derived from the bar so the two always agree.
             D_ADD(ROW_DISP_LIST_TEXT_COLOR, 0);
         }
         D_ADD(ROW_DISP_RST_VIEW, 0);
@@ -4350,18 +4394,6 @@ int build_display_rows(int *row_type, int *row_extra) {
         if (show_perf_overlay) { D_ADD(ROW_DISP_PERF_OPACITY, 0); D_ADD(ROW_DISP_PERF_TEXT, 0); }
         D_ADD(ROW_DISP_RST_SCREEN, 0);
     }
-    // Theme & Text
-    D_ADD(ROW_DISP_GRP_TEXT, 0);
-    if (disp_grp_text_open) {
-        D_ADD(ROW_DISP_THEME, 0);
-        D_ADD(ROW_DISP_FONT_STYLE, 0);
-        D_ADD(ROW_DISP_FONT_SIZE, 0);
-        if (font_choice_idx >= 0 && font_choice_idx < FONT_CHOICE_COUNT && font_choice_boldable[font_choice_idx])
-            D_ADD(ROW_DISP_FONT_BOLD, 0);
-        D_ADD(ROW_DISP_FONT_COLOR, 0);
-        D_ADD(ROW_DISP_RST_TEXT, 0);
-    }
-    // Systems View, Columns/Rows and Display Art now live under Game.
     // Status Bar
     D_ADD(ROW_DISP_GRP_HUD, 0);
     if (disp_grp_hud_open) {
@@ -11030,12 +11062,17 @@ static void rescan_active_games(SDL_Renderer *ren, TTF_Font *label) {
     else scan_games(ren, label, platform_selected);
 }
 
+int library_view_style(void);   // defined with the view state above
 static int active_game_cols(void) {
+    // Single Card is a one-at-a-time grid. Without this it fell through to the
+    // ordinary grid and the setting appeared to do nothing.
+    if (!in_favorites_view && library_view_style() == 0) return 1;
     if (!in_favorites_view || favorites_view_idx == 0) return grid_cols;
     static const int cols[FAVORITES_VIEW_COUNT] = { 0, 1, 2, 3, 4 };
     return cols[favorites_view_idx];
 }
 static int active_game_rows(void) {
+    if (!in_favorites_view && library_view_style() == 0) return 1;
     if (!in_favorites_view || favorites_view_idx == 0) return grid_rows;
     static const int rows[FAVORITES_VIEW_COUNT] = { 0, 1, 2, 2, 3 };
     return rows[favorites_view_idx];
@@ -12518,7 +12555,7 @@ void factory_reset() {
     home_icon_pack_idx = 0;
     show_empty_systems = 0;
     platform_grid_cols = 3; platform_grid_rows = 2; carousel_titles_on = 1;
-    list_bar_color_idx = 1; list_frame_color_idx = 3; list_text_color_idx = 0;
+    list_bar_color_idx = LIST_BAR_THEME; list_frame_color_idx = 3; list_text_color_idx = 0;
     hud_chrome_style = 0; hud_chrome_color_idx = 0;
     global_font_color_idx = 0; hud_font_color_idx = 0;
     for (int i = 0; i < PLATFORM_COUNT; i++) invalidate_carousel_bg(i);
@@ -12538,7 +12575,7 @@ void restore_display_group(int which) {
     } else if (which == ROW_DISP_RST_VIEW) {
         platform_view_style = 1; carousel_titles_on = 1;
         platform_grid_cols = 3; platform_grid_rows = 2;
-        list_bar_color_idx = 1; list_frame_color_idx = 3; list_text_color_idx = 0;
+        list_bar_color_idx = LIST_BAR_THEME; list_frame_color_idx = 3; list_text_color_idx = 0;
         library_view_idx = -1;          // back to following the Systems View
         grid_cols = 3; grid_rows = 2;   // and the Library View's own grid
     } else if (which == ROW_DISP_RST_HUD) {
@@ -12594,7 +12631,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         fast_forward_idx = 1; fast_forward_mode = 0; auto_save_games = 0; grid_cols = 1; grid_rows = 1;
         platform_view_style = 1; carousel_titles_on = 1; show_empty_systems = 0;
         platform_grid_cols = 3; platform_grid_rows = 2;
-        list_bar_color_idx = 1; list_frame_color_idx = 3; list_text_color_idx = 0;
+        list_bar_color_idx = LIST_BAR_THEME; list_frame_color_idx = 3; list_text_color_idx = 0;
         display_art_idx = 0;
         disp_grp_view_open = 0; game_art_dropdown_open = 0; display_dropdown_open = 0;
     } else if (tab == TAB_DEVICE) {
@@ -17056,14 +17093,20 @@ int main(int argc, char *argv[]) {
                             }
                             settings_dirty = 0; settings_confirm_pending = 0;
                             current_tab = settings_pending_tab; settings_selected = 0; settings_scroll_offset = 0;
-                            if (leave_to != STATE_SETTINGS) settings_close_all_groups();
+                            // Groups close whether we are leaving Settings or
+                            // just moving to another tab -- an open dropdown
+                            // should never greet you on a page you just opened.
+                            settings_close_all_groups();
                             state = leave_to;
                         } else if (e.key.keysym.sym == SDLK_d || e.key.keysym.sym == SDLK_f) {
                             AppState leave_to = settings_pending_state;
                             load_settings(); build_chime_sound(); build_theme_music(); reload_fonts();
                             settings_dirty = 0; settings_confirm_pending = 0;
                             current_tab = settings_pending_tab; settings_selected = 0; settings_scroll_offset = 0;
-                            if (leave_to != STATE_SETTINGS) settings_close_all_groups();
+                            // Groups close whether we are leaving Settings or
+                            // just moving to another tab -- an open dropdown
+                            // should never greet you on a page you just opened.
+                            settings_close_all_groups();
                             state = leave_to;
                         } else if (e.key.keysym.sym == SDLK_ESCAPE) {
                             settings_confirm_pending = 0;
@@ -17079,11 +17122,11 @@ int main(int argc, char *argv[]) {
                     }
                     if (e.key.keysym.sym == SDLK_e) {   // R1 -> next settings tab
                         if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = STATE_SETTINGS; settings_pending_tab = (current_tab + 1) % TAB_COUNT; }
-                        else { current_tab = (current_tab + 1) % TAB_COUNT; settings_selected = 0; settings_scroll_offset = 0; }
+                        else { settings_close_all_groups(); current_tab = (current_tab + 1) % TAB_COUNT; settings_selected = 0; settings_scroll_offset = 0; }
                     }
                     if (e.key.keysym.sym == SDLK_q) {   // L1 -> previous settings tab
                         if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = STATE_SETTINGS; settings_pending_tab = (current_tab - 1 + TAB_COUNT) % TAB_COUNT; }
-                        else { current_tab = (current_tab - 1 + TAB_COUNT) % TAB_COUNT; settings_selected = 0; settings_scroll_offset = 0; }
+                        else { settings_close_all_groups(); current_tab = (current_tab - 1 + TAB_COUNT) % TAB_COUNT; settings_selected = 0; settings_scroll_offset = 0; }
                     }
                     int sound_row_type[MAX_SOUND_ROWS], sound_row_extra[MAX_SOUND_ROWS];
                     int disp_row_type[MAX_DISPLAY_ROWS], disp_row_extra[MAX_DISPLAY_ROWS];
@@ -17222,7 +17265,7 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_HUD_FONT_COLOR) {
                                 hud_font_color_idx = (hud_font_color_idx + dir + FONT_COLOR_COUNT) % FONT_COLOR_COUNT;
                             } else if (rt == ROW_DISP_LIST_BAR_COLOR) {
-                                list_bar_color_idx = (list_bar_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
+                                list_bar_color_idx = (list_bar_color_idx + dir + LIST_BAR_CHOICES) % LIST_BAR_CHOICES;
                             } else if (rt == ROW_DISP_LIST_FRAME_COLOR) {
                                 list_frame_color_idx = (list_frame_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
                             } else if (rt == ROW_DISP_LIST_TEXT_COLOR) {
@@ -17300,7 +17343,7 @@ int main(int argc, char *argv[]) {
                                 if (platform_grid_rows < 1) platform_grid_rows = 1;
                                 if (platform_grid_rows > 6) platform_grid_rows = 6;
                             } else if (rt == ROW_G_LIST_BAR_COLOR) {
-                                list_bar_color_idx = (list_bar_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
+                                list_bar_color_idx = (list_bar_color_idx + dir + LIST_BAR_CHOICES) % LIST_BAR_CHOICES;
                             } else if (rt == ROW_G_LIST_FRAME_COLOR) {
                                 list_frame_color_idx = (list_frame_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
                             } else if (rt == ROW_G_LIST_TEXT_COLOR) {
@@ -19257,7 +19300,8 @@ int main(int argc, char *argv[]) {
                        if (scroll > content_h - view_h) scroll = content_h - view_h; }
                 plat_list_scroll = scroll;
 
-                HudChromeColor barc = hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0];
+                SDL_Color _bc = list_bar_rgba();
+                HudChromeColor barc = { "", _bc.r, _bc.g, _bc.b, _bc.a };
                 SDL_Rect lclip = { list_x - 6, list_top, list_w + 14, view_h };
                 SDL_RenderSetClipRect(ren, &lclip);
                 for (int oi = 0; oi < g_nplat; oi++) {
@@ -19288,6 +19332,12 @@ int main(int argc, char *argv[]) {
                         draw_platform_placeholder(ren, p, ib, selp);
                         SDL_RenderSetClipRect(ren, &lclip);
                     }
+                    // Frame around the artwork, derived from the bar colour so
+                    // it reads against whatever the bar is set to.
+                    { SDL_Color fc = list_frame_rgba();
+                      SDL_SetRenderDrawColor(ren, fc.r, fc.g, fc.b, 255);
+                      SDL_RenderDrawRect(ren, &ib);
+                      SDL_RenderDrawRect(ren, &(SDL_Rect){ ib.x - 1, ib.y - 1, ib.w + 2, ib.h + 2 }); }
                     int bl = (barc.r*54 + barc.g*183 + barc.b*19) >> 8;
                     SDL_Color ink = bl > 128 ? (SDL_Color){ 18,18,22,255 } : (SDL_Color){ 244,244,248,255 };
                     SDL_Color nc = selp ? ink : mix_col(ink, (SDL_Color){ barc.r, barc.g, barc.b, 255 }, 0.35f);
@@ -19887,12 +19937,10 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_GRP_LIBVIEW: snprintf(text, sizeof(text), "%c Library View", disp_grp_libview_open ? 'v' : '>'); indent = 0; break;
                         case ROW_DISP_LIB_VIEW:
                             if (library_view_idx < 0)
-                                // The resolved name is long enough to be
-                                // ellipsised here, and the Systems View group
-                                // right above already shows it.
-                                snprintf(text, sizeof(text), "Layout: Follow Systems View");
+                                snprintf(text, sizeof(text), "Layout: Follow Systems View (%s)",
+                                         library_view_names[platform_view_style % VIEW_STYLE_COUNT]);
                             else
-                                snprintf(text, sizeof(text), "Layout: %s", view_style_names[library_view_idx]);
+                                snprintf(text, sizeof(text), "Layout: %s", library_view_names[library_view_idx]);
                             indent = 1; break;
                         case ROW_DISP_LIB_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
                         case ROW_DISP_LIB_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
@@ -19922,7 +19970,7 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_CAROUSEL_TITLES: snprintf(text, sizeof(text), "System Titles: %s", carousel_titles_on ? "ON" : "OFF"); indent = 1; break;
                         case ROW_DISP_PGRID_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", platform_grid_cols); indent = 1; break;
                         case ROW_DISP_PGRID_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", platform_grid_rows); indent = 1; break;
-                        case ROW_DISP_LIST_BAR_COLOR: snprintf(text, sizeof(text), "List Bar Color: %s", hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0].name); indent = 1; break;
+                        case ROW_DISP_LIST_BAR_COLOR: snprintf(text, sizeof(text), "List Bar Color: %s", list_bar_color_idx == LIST_BAR_THEME ? "Theme" : hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0].name); indent = 1; break;
                         case ROW_DISP_LIST_FRAME_COLOR: snprintf(text, sizeof(text), "List Image Frame Color: %s", hud_chrome_colors[(list_frame_color_idx >= 0 && list_frame_color_idx < HUD_CHROME_COLOR_COUNT) ? list_frame_color_idx : 0].name); indent = 1; break;
                         case ROW_DISP_LIST_TEXT_COLOR: snprintf(text, sizeof(text), "List Text Color: %s", list_text_color_idx == 0 ? "Auto" : font_color_names[(list_text_color_idx > 0 && list_text_color_idx < FONT_COLOR_COUNT) ? list_text_color_idx : 0]); indent = 1; break;
 
@@ -21663,7 +21711,8 @@ int main(int argc, char *argv[]) {
                        if (scroll > content_h - view_h) scroll = content_h - view_h; }
                 gm_list_scroll = scroll;
 
-                HudChromeColor barc = hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0];
+                SDL_Color _bc = list_bar_rgba();
+                HudChromeColor barc = { "", _bc.r, _bc.g, _bc.b, _bc.a };
                 SDL_Rect lclip = { list_x - 6, list_top, list_w + 14, view_h };
                 SDL_RenderSetClipRect(ren, &lclip);
                 for (int gi2 = 0; gi2 < game_count; gi2++) {
@@ -21736,6 +21785,11 @@ int main(int argc, char *argv[]) {
                     if (games[gi].box_shadow && gm_art_type < 0)
                         draw_silhouette_shadow(ren, games[gi].box_shadow, fit, selection_shadow_color());
                     SDL_RenderCopy(ren, art, NULL, &fit);
+                    // Same derived frame as the Systems List uses on its icons.
+                    { SDL_Color fc = list_frame_rgba();
+                      SDL_SetRenderDrawColor(ren, fc.r, fc.g, fc.b, 255);
+                      SDL_RenderDrawRect(ren, &fit);
+                      SDL_RenderDrawRect(ren, &(SDL_Rect){ fit.x - 1, fit.y - 1, fit.w + 2, fit.h + 2 }); }
                 } else {
                     SDL_Texture *na = render_text_fit(ren, font_label, "No artwork", g_ui_dim, pw);
                     int nw2, nh2; SDL_QueryTexture(na, NULL, NULL, &nw2, &nh2);
