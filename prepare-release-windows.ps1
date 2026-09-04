@@ -60,6 +60,21 @@ Final check before Publish release:
   - Latest is selected.
 "@
 
+$gitHead = 'unavailable'
+$gitBranchState = 'unavailable'
+try {
+    $headOutput = & git -C $repoRoot rev-parse --short HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $headOutput) {
+        $gitHead = ($headOutput | Select-Object -First 1).Trim()
+    }
+    $statusOutput = & git -C $repoRoot status -sb 2>$null
+    if ($LASTEXITCODE -eq 0 -and $statusOutput) {
+        $gitBranchState = ($statusOutput | Select-Object -First 1).Trim()
+    }
+} catch {
+    # Git metadata is helpful context, but never blocks a completed package.
+}
+
 $claudeHandoff = @"
 # SNAP FE handoff for Claude - local/private, do not upload
 
@@ -69,11 +84,13 @@ $claudeHandoff = @"
 - Git tag intended: V$Version
 - Release title: Snap FE Alpha $Version
 - Git branch: main
+- Source commit at packaging: $gitHead
+- Branch state at packaging: $gitBranchState
 - GitHub repository: https://github.com/differentlightproductions-cyber/snap-fe
 - Windows source checkout: $repoRoot
 - WSL working mirror used by Nick: /home/nick/snapos-ui
-- Final public attachments are `$zipName` and `$sumName` in this folder.
-- Paste `$notesName` into GitHub's Release description.
+- Final public attachments are $zipName and $sumName in this folder.
+- Paste $notesName into GitHub's Release description.
 
 ## Handheld development target
 
@@ -84,12 +101,10 @@ $claudeHandoff = @"
 
 ## Verified build and deployment commands (run from WSL)
 
-```bash
-cd "/mnt/c/Users/NickO/Desktop/Downloads/SNAP OS Backup/snapos-backup/bugfix-work/repo-publish"
-bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot
-bash ./knulli/deploy.sh root@192.168.4.29
-bash ./knulli/package.sh $Version
-```
+    cd "/mnt/c/Users/NickO/Desktop/Downloads/SNAP OS Backup/snapos-backup/bugfix-work/repo-publish"
+    bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot
+    bash ./knulli/deploy.sh root@192.168.4.29
+    bash ./knulli/package.sh $Version
 
 The package command now creates the ZIP, checksum, validates the archive, and
 automatically exports a clean Windows Downloads folder like this one.
@@ -98,24 +113,24 @@ automatically exports a clean Windows Downloads folder like this one.
 
 - App Focused has two icon packs: Simple and Pixel Art (AI Art).
 - Simple is the default and contains 13 real SVG files plus matching PNG
-  fallbacks in `assets/icons/home/simple`.
-- SVG rendering uses Knulli SDL_image 2.8's `IMG_LoadSizedSVG_RW`; no extra
+  fallbacks in assets/icons/home/simple.
+- SVG rendering uses Knulli SDL_image 2.8's IMG_LoadSizedSVG_RW; no extra
   runtime renderer library is bundled.
 - The illustrated console views are labeled Carousel (AI Art) and Bookshelf
   (AI Art).
-- Pixel Art remains preserved separately under `assets/icons/home/pixel-art`.
+- Pixel Art remains preserved separately under assets/icons/home/pixel-art.
 - The packager removes Windows Zone.Identifier sidecars and refuses to include
   ROMs, saves, API keys, user settings, account files, or scraped personal art.
 - Preserve all brightness and in-game hotkey behavior when making later edits.
 - Do not stage or commit the local-only untracked PC helpers
-  `launch_pc_preview.sh` or `snapos_ui.desktop` unless Nick explicitly asks.
+  launch_pc_preview.sh or snapos_ui.desktop unless Nick explicitly asks.
 
 ## GitHub state at handoff
 
-A V$Version release draft was open. Its two older attachments were marked for
-deletion in the GitHub editor, but the corrected attachments had not yet been
-uploaded and the release had not been published when this handoff was made.
-Use `PUBLISH-INSTRUCTIONS.txt` beside this file to finish manually.
+This exporter does not assume a GitHub draft exists. Before tagging or
+publishing, verify that all intended local commits are pushed to origin/main.
+Then create or update V$Version and follow PUBLISH-INSTRUCTIONS.txt beside this
+file.
 "@
 
 $readFirst = @"

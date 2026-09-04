@@ -5,7 +5,7 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.6.** Not every emulator or system Knulli supports
+**Current release: Alpha 1.2.7.** Not every emulator or system Knulli supports
 is wired up yet. Expect alpha rough edges.
 
 ### 1.2.6 highlights
@@ -227,7 +227,7 @@ has no SHARE drive — Knulli creates it on first boot, growing the partition to
 fill the card and formatting it exFAT so your computer can read it. Until then
 a PC sees only unreadable Linux partitions.
 
-Then download the release asset named `SnapFE-Alpha-1.2.6.zip`—not GitHub's
+Then download the release asset named `SnapFE-Alpha-1.2.7.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
