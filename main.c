@@ -21,6 +21,9 @@
 #include <arpa/inet.h>
 #ifdef SNAPOS_TARGET_KNULLI
 #include <linux/input.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #endif
 
 #define SNAPFE_VERSION "Alpha Build 1.2.7"
@@ -3908,8 +3911,6 @@ int build_account_rows(int *row_type, int *row_extra) {
 #define ROW_G_LIST_FRAME_COLOR 16
 #define ROW_G_LIST_TEXT_COLOR 17
 #define ROW_G_VIEW_RESTORE 18
-#define ROW_G_DISPLAY_ART_HEADER 19
-#define ROW_G_DISPLAY_ART_ITEM 20
 #define ROW_G_SHOW_DESC 21
 #define ROW_G_ROMS 22
 #define ROW_G_BG_HEADER 23
@@ -3917,6 +3918,7 @@ int build_account_rows(int *row_type, int *row_extra) {
 #define ROW_G_BG_COLOR 25
 #define ROW_G_BG_MAKER 26
 #define ROW_G_BG_ITEM 27
+#define ROW_G_BG_SEARCH 19    // Backgrounds page: search Wallhaven
 #define ROW_G_BG_RESTORE 28
 #define ROW_G_FAVORITES_VIEW 29
 #define MAX_GAME_ROWS 64
@@ -3936,10 +3938,7 @@ int build_game_rows(int *row_type, int *row_extra) {
     if (fast_forward_values[fast_forward_idx] != 0) { row_type[idx] = ROW_G_FASTFWD_MODE; row_extra[idx] = 0; idx++; }
     row_type[idx] = ROW_G_AUTOSAVE; row_extra[idx] = 0; idx++;
 
-    // Systems View and Library View now live in Settings > Display.
-    row_type[idx] = ROW_G_DISPLAY_ART_HEADER; row_extra[idx] = 0; idx++;
-    if (display_dropdown_open)
-        for (int i = 0; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_G_DISPLAY_ART_ITEM; row_extra[idx] = i; idx++; }
+    // Systems View, Library View and Display Art now live in Settings > Display.
     row_type[idx] = ROW_G_SHOW_DESC; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_G_ROMS; row_extra[idx] = 0; idx++;
     // Backgrounds is its own page now, under Display.
@@ -3961,6 +3960,8 @@ int build_bg_rows(int *row_type, int *row_extra) {
     int idx = 0;
     row_type[idx] = ROW_G_BG_MODE; row_extra[idx] = 0; idx++;
     if (platform_bg_mode == 1) { row_type[idx] = ROW_G_BG_COLOR; row_extra[idx] = 0; idx++; }
+    // Only Image backgrounds have anything to search for.
+    if (platform_bg_mode == 0) { row_type[idx] = ROW_G_BG_SEARCH; row_extra[idx] = 0; idx++; }
     if (platform_bg_mode == 0) {
         for (int m = 0; m < BG_MAKER_COUNT; m++) {
             int any = 0;
@@ -4493,12 +4494,16 @@ int build_display_rows(int *row_type, int *row_extra) {
     // even when the active Systems View supplies one of its own; it just starts
     // out following it.
     D_ADD(ROW_DISP_GRP_LIBVIEW, 0);
-    if (disp_grp_libview_open) {
-        if (library_view_style() == 2) {   // only the Grid layout uses columns/rows
-            D_ADD(ROW_DISP_LIB_COLS, 0);
-            D_ADD(ROW_DISP_LIB_ROWS, 0);
-        }
+    if (disp_grp_libview_open && library_view_style() == 2) {   // only Grid uses columns/rows
+        D_ADD(ROW_DISP_LIB_COLS, 0);
+        D_ADD(ROW_DISP_LIB_ROWS, 0);
     }
+
+    // Which artwork the library draws. It sat under Game, but it decides how
+    // the library looks, so it belongs beside the layout that arranges it.
+    D_ADD(ROW_DISP_ART_HEADER, 0);
+    if (display_dropdown_open)
+        for (int _t = 0; _t < ART_TYPE_COUNT; _t++) { row_type[idx] = ROW_DISP_ART_ITEM; row_extra[idx] = _t; idx++; }
 
     // Backgrounds: a page of its own rather than a dropdown, because the
     // per-system list is far too long to scroll inside a crowded tab.
@@ -4529,6 +4534,32 @@ int build_display_rows(int *row_type, int *row_extra) {
     D_ADD(ROW_DISP_RESTORE, 0);
     #undef D_ADD
     return idx;
+}
+
+// Which Display rows are plain values -- the ones whose whole job is the
+// Left/Right wheel. A used to fall past every one of them into the catch-all
+// that leaves Settings, so pressing it on Theme or Brightness threw you out of
+// the screen. A on a value row now nudges it forward, exactly as Right does.
+// Group headers, page openers and the Restore rows keep their own behaviour.
+static int disp_row_is_value(int rt) {
+    switch (rt) {
+        case ROW_DISP_GRP_HOME: case ROW_DISP_GRP_TEXT: case ROW_DISP_GRP_VIEW:
+        case ROW_DISP_GRP_HUD:  case ROW_DISP_GRP_SCREEN: case ROW_DISP_GRP_STATS:
+        case ROW_DISP_GRP_APPS: case ROW_DISP_GRP_WIDGETS: case ROW_DISP_STAT_GRP:
+        case ROW_DISP_STAT_ITEM: case ROW_DISP_APP_ITEM: case ROW_DISP_APP_WIDGET:
+        case ROW_DISP_ICON_PACK: case ROW_DISP_FONT_BOLD:
+        case ROW_DISP_GREETING: case ROW_DISP_PLAYER_NAME:
+        case ROW_DISP_BG_PAGE: case ROW_DISP_BG_HEADER: case ROW_DISP_BG_ITEM:
+        case ROW_DISP_ART_HEADER: case ROW_DISP_ART_ITEM:
+        case ROW_DISP_RESTORE: case ROW_DISP_RST_TEXT: case ROW_DISP_RST_VIEW:
+        case ROW_DISP_RST_HUD:  case ROW_DISP_RST_BG:   case ROW_DISP_RST_SCREEN:
+            return 0;
+        // The Library View row only has anything under it while the layout is
+        // Grid; the rest of the time A would open an empty dropdown and look
+        // like it had done nothing at all.
+        case ROW_DISP_GRP_LIBVIEW: return library_view_style() != 2;
+        default: return 1;
+    }
 }
 
 Uint32 last_input_time = 0;
@@ -11190,6 +11221,27 @@ static void rescan_active_games(SDL_Renderer *ren, TTF_Font *label) {
 }
 
 int library_view_style(void);   // defined with the view state above
+
+// Paged grids page sideways. Running off the end of a row lands on the SAME row
+// of the next page, not on the row below it -- Up/Down are what move between
+// rows, and Left/Right at the edge of the screen should take you to the next
+// screenful rather than doubling back into the one you can already see.
+static int grid_page_step(int idx, int n, int cols, int rows, int dir) {
+    if (n <= 0) return 0;
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    int cap = cols * rows;
+    int pages = (n + cap - 1) / cap;
+    if (pages < 1) pages = 1;
+    int page = idx / cap, r = (idx % cap) / cols, c = idx % cols;
+    c += dir;
+    if (c >= cols)  { c = 0;        page = (page + 1) % pages; }
+    else if (c < 0) { c = cols - 1; page = (page - 1 + pages) % pages; }
+    int t = page * cap + r * cols + c;
+    if (t >= n) t = n - 1;   // a short last page: settle on its last tile
+    return t;
+}
+
 static int active_game_cols(void) {
     // Single Card is a one-at-a-time grid. Without this it fell through to the
     // ordinary grid and the setting appeared to do nothing.
@@ -12296,6 +12348,402 @@ void link_launch(SDL_Window **win, SDL_Renderer **ren, int *video_released) {
     link_session_keep = 1;    // survives this game; ended only by leaving Link Play
     link_net_close_tcp();     // the emulator needs the pairing port, discovery stays up
 }
+
+// ---------------------------------------------------------------------------
+// In-game overlay
+//
+// Everything Snap FE draws normally goes through SDL, and SDL's video device
+// belongs to the emulator for as long as a game is running -- which is why the
+// performance overlay used to vanish the moment a game started.
+//
+// The panel is not a single image, though. Allwinner's display engine
+// composites several layers, and the framebuffer that SDL, RetroArch and mGBA
+// all end up drawing into is only one of them (channel 1, layer 0). Snap FE
+// claims spare channels above it and scans out its own ARGB buffers, so an
+// overlay survives the handoff without asking the emulator for anything -- and
+// without RetroArch's own notification bar, which draws inside the game's frame
+// and can be neither styled nor placed.
+//
+// Each buffer is a dmabuf from /dev/ion handed to /dev/disp by fd, so the
+// display engine's IOMMU reads it where it lies; nothing is copied per frame.
+// The layer config is re-asserted on every redraw, so an emulator that
+// reprograms the display on its way up cannot leave an overlay stranded.
+#ifdef SNAPOS_TARGET_KNULLI
+
+/* ION, legacy ABI (kernel 4.9 staging/android). */
+#define SN_ION_MAGIC 'I'
+struct sn_ion_alloc { size_t len; size_t align; unsigned int heap_id_mask; unsigned int flags; int handle; };
+struct sn_ion_fd    { int handle; int fd; };
+struct sn_ion_h     { int handle; };
+#define SN_ION_ALLOC _IOWR(SN_ION_MAGIC, 0, struct sn_ion_alloc)
+#define SN_ION_FREE  _IOWR(SN_ION_MAGIC, 1, struct sn_ion_h)
+#define SN_ION_SHARE _IOWR(SN_ION_MAGIC, 4, struct sn_ion_fd)
+
+/* sunxi disp2 layer ABI. Field order and types mirror the kernel's
+ * disp_layer_config2 exactly; the driver copies sizeof() bytes from us. */
+struct sn_rect   { int x, y; unsigned int width, height; };
+struct sn_rectsz { unsigned int width, height; };
+struct sn_rect64 { long long x, y, width, height; };
+struct sn_fb2 {
+    int fd;
+    struct sn_rectsz size[3];
+    unsigned int align[3];
+    int format, color_space;
+    int trd_right_fd;
+    unsigned char pre_multiply;
+    struct sn_rect64 crop;          /* 32.32 fixed point */
+    int flags, scan, eotf, depth;
+    unsigned int fbd_en;
+    int metadata_fd;
+    unsigned int metadata_size, metadata_flag;
+};
+struct sn_atw { unsigned char used; int mode; unsigned int b_row, b_col; int cof_fd; };
+struct sn_snr { unsigned char en, demo_en; struct sn_rect demo_win;
+                unsigned char y_strength, u_strength, v_strength, th_ver_line, th_hor_line; };
+struct sn_layer_info2 {
+    int mode;                                  /* 0 = LAYER_MODE_BUFFER */
+    unsigned char zorder, alpha_mode, alpha_value;
+    struct sn_rect screen_win;
+    unsigned char b_trd_out;
+    int out_trd_mode;
+    union { unsigned int color; struct sn_fb2 fb; };
+    unsigned int id;
+    struct sn_atw atw;
+    int transform;
+    struct sn_snr snr;
+};
+struct sn_layer_config2 { struct sn_layer_info2 info; unsigned char enable; unsigned int channel, layer_id; };
+
+#define SN_DISP_GET_SCN_WIDTH     0x07
+#define SN_DISP_GET_SCN_HEIGHT    0x08
+#define SN_DISP_LAYER_SET_CONFIG2 0x49
+
+// Channel 1 layer 0 is the framebuffer everyone else draws into. The H700's
+// display engine has six channels of four layers, so taking whole channels of
+// our own keeps us clear of anything the emulator does to its.
+#define SN_OSD_CH_PERF 2
+#define SN_OSD_CH_BAR  3
+#define SN_OSD_Z_PERF  10
+#define SN_OSD_Z_BAR   11
+
+typedef struct {
+    unsigned channel, zorder;
+    int buf_fd, ion_handle;
+    uint32_t *px;
+    size_t map_len;
+    int w, h;              // buffer size in pixels
+    int up;
+} OsdLayer;
+
+static int osd_disp_fd = -1, osd_ion_fd = -1;
+static int osd_scr_w = 0, osd_scr_h = 0;
+static int osd_unavailable = 0;   // probed once and found wanting; stop trying
+static OsdLayer osd_perf = { SN_OSD_CH_PERF, SN_OSD_Z_PERF, -1, 0, NULL, 0, 260, 200, 0 };
+static OsdLayer osd_bar  = { SN_OSD_CH_BAR,  SN_OSD_Z_BAR,  -1, 0, NULL, 0, 320,  64, 0 };
+
+// Hand a layer to the display engine, or take it away again. Cheap enough to
+// repeat every redraw: one ioctl, and the buffer never moves.
+static void osd_layer_commit(OsdLayer *L, int enable, int x, int y, int w, int h) {
+    if (osd_disp_fd < 0) return;
+    struct sn_layer_config2 cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.channel = L->channel;
+    cfg.layer_id = 0;
+    cfg.enable = enable ? 1 : 0;
+    if (enable) {
+        cfg.info.mode = 0;                       /* LAYER_MODE_BUFFER */
+        cfg.info.zorder = (unsigned char)L->zorder;
+        cfg.info.alpha_mode = 0;                 /* per-pixel alpha */
+        cfg.info.alpha_value = 255;
+        cfg.info.screen_win.x = x;
+        cfg.info.screen_win.y = y;
+        cfg.info.screen_win.width  = (unsigned)w;
+        cfg.info.screen_win.height = (unsigned)h;
+        cfg.info.fb.fd = L->buf_fd;
+        cfg.info.fb.size[0].width  = (unsigned)L->w;
+        cfg.info.fb.size[0].height = (unsigned)L->h;
+        cfg.info.fb.size[1] = cfg.info.fb.size[2] = cfg.info.fb.size[0];
+        cfg.info.fb.format = 0;                  /* DISP_FORMAT_ARGB_8888 */
+        cfg.info.fb.color_space = 0x204;         /* DISP_BT601_F, as the panel */
+        cfg.info.fb.crop.width  = (long long)w << 32;
+        cfg.info.fb.crop.height = (long long)h << 32;
+        cfg.info.fb.eotf = 4;                    /* DISP_EOTF_GAMMA22 */
+    }
+    unsigned long ub[4] = { 0, (unsigned long)&cfg, 1, 0 };
+    if (ioctl(osd_disp_fd, SN_DISP_LAYER_SET_CONFIG2, ub) == 0) L->up = enable ? 1 : 0;
+}
+
+static void osd_layer_hide(OsdLayer *L) { if (L->up) osd_layer_commit(L, 0, 0, 0, 0, 0); }
+
+static void osd_layer_free(OsdLayer *L) {
+    osd_layer_hide(L);
+    if (L->px) { munmap(L->px, L->map_len); L->px = NULL; }
+    if (L->buf_fd >= 0) { close(L->buf_fd); L->buf_fd = -1; }
+    if (L->ion_handle && osd_ion_fd >= 0) {
+        struct sn_ion_h h = { L->ion_handle };
+        ioctl(osd_ion_fd, SN_ION_FREE, &h);
+    }
+    L->ion_handle = 0;
+}
+
+static void ingame_osd_close(void) {
+    osd_layer_free(&osd_perf);
+    osd_layer_free(&osd_bar);
+    if (osd_ion_fd >= 0) { close(osd_ion_fd); osd_ion_fd = -1; }
+    if (osd_disp_fd >= 0) { close(osd_disp_fd); osd_disp_fd = -1; }
+}
+
+// Open the display and the allocator once; each layer's buffer follows on first
+// use. Any failure disables the whole feature rather than retrying every frame.
+static int osd_device_open(void) {
+    if (osd_unavailable) return 0;
+    if (osd_disp_fd >= 0 && osd_ion_fd >= 0) return 1;
+    osd_disp_fd = open("/dev/disp", O_RDWR);
+    if (osd_disp_fd >= 0) {
+        unsigned long ub[4] = { 0, 0, 0, 0 };
+        osd_scr_w = ioctl(osd_disp_fd, SN_DISP_GET_SCN_WIDTH, ub);
+        osd_scr_h = ioctl(osd_disp_fd, SN_DISP_GET_SCN_HEIGHT, ub);
+    }
+    osd_ion_fd = (osd_disp_fd >= 0) ? open("/dev/ion", O_RDWR) : -1;
+    if (osd_disp_fd < 0 || osd_ion_fd < 0 || osd_scr_w <= 0 || osd_scr_h <= 0) {
+        ingame_osd_close(); osd_unavailable = 1; return 0;
+    }
+    return 1;
+}
+
+static int osd_layer_alloc(OsdLayer *L) {
+    if (L->px) return 1;
+    if (!osd_device_open()) return 0;
+    L->map_len = ((size_t)L->w * L->h * 4 + 4095) & ~(size_t)4095;
+    // CMA first (contiguous, what the display engine likes best), then the
+    // system heap -- the DE's IOMMU can scatter-gather that one.
+    const unsigned int heaps[] = { 1u << 4, 1u << 0 };
+    struct sn_ion_alloc a; int ok = 0;
+    for (unsigned i = 0; i < sizeof heaps / sizeof heaps[0] && !ok; i++) {
+        memset(&a, 0, sizeof a);
+        a.len = L->map_len; a.align = 4096; a.heap_id_mask = heaps[i];
+        if (ioctl(osd_ion_fd, SN_ION_ALLOC, &a) == 0) ok = 1;
+    }
+    if (!ok) { osd_unavailable = 1; return 0; }
+    L->ion_handle = a.handle;
+    struct sn_ion_fd sh; memset(&sh, 0, sizeof sh); sh.handle = a.handle;
+    if (ioctl(osd_ion_fd, SN_ION_SHARE, &sh) != 0) { osd_layer_free(L); osd_unavailable = 1; return 0; }
+    L->buf_fd = sh.fd;
+    L->px = mmap(NULL, L->map_len, PROT_READ | PROT_WRITE, MAP_SHARED, L->buf_fd, 0);
+    if (L->px == MAP_FAILED) { L->px = NULL; osd_layer_free(L); osd_unavailable = 1; return 0; }
+    return 1;
+}
+
+static void ingame_osd_hide(void) { osd_layer_hide(&osd_perf); osd_layer_hide(&osd_bar); }
+
+// The display engine keeps a layer until someone takes it away, so a crash with
+// an overlay up would leave a rectangle stranded on the panel for the next
+// session to puzzle over. Clear both channels once at startup.
+static void ingame_osd_clear_stale(void) {
+    int fd = open("/dev/disp", O_RDWR);
+    if (fd < 0) return;
+    unsigned chans[] = { SN_OSD_CH_PERF, SN_OSD_CH_BAR };
+    for (unsigned i = 0; i < 2; i++) {
+        struct sn_layer_config2 cfg;
+        memset(&cfg, 0, sizeof cfg);
+        cfg.channel = chans[i]; cfg.layer_id = 0; cfg.enable = 0;
+        unsigned long ub[4] = { 0, (unsigned long)&cfg, 1, 0 };
+        ioctl(fd, SN_DISP_LAYER_SET_CONFIG2, ub);
+    }
+    close(fd);
+}
+
+/* --- drawing into a layer's buffer ------------------------------------ */
+
+static void osd_fill(OsdLayer *L, int x, int y, int w, int h, uint32_t argb) {
+    for (int j = y; j < y + h && j < L->h; j++) {
+        if (j < 0) continue;
+        uint32_t *row = L->px + (size_t)j * L->w;
+        for (int i = x; i < x + w && i < L->w; i++) if (i >= 0) row[i] = argb;
+    }
+}
+
+static void osd_frame(OsdLayer *L, int w, int h, uint32_t c) {
+    osd_fill(L, 0, 0, w, 1, c);
+    osd_fill(L, 0, h - 1, w, 1, c);
+    osd_fill(L, 0, 0, 1, h, c);
+    osd_fill(L, w - 1, 0, 1, h, c);
+}
+
+// Source-over blend of an SDL surface. The buffer starts transparent, so the
+// panel fill underneath is what the text ends up sitting on.
+static void osd_blit(OsdLayer *L, SDL_Surface *s, int x, int y) {
+    if (!s) return;
+    SDL_Surface *c = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_ARGB8888, 0);
+    if (!c) return;
+    for (int j = 0; j < c->h; j++) {
+        int dy = y + j;
+        if (dy < 0 || dy >= L->h) continue;
+        const uint32_t *src = (const uint32_t *)((const Uint8 *)c->pixels + (size_t)j * c->pitch);
+        uint32_t *dst = L->px + (size_t)dy * L->w;
+        for (int i = 0; i < c->w; i++) {
+            int dx = x + i;
+            if (dx < 0 || dx >= L->w) continue;
+            uint32_t sp = src[i];
+            unsigned sa = sp >> 24;
+            if (!sa) continue;
+            if (sa == 255) { dst[dx] = sp; continue; }
+            uint32_t dp = dst[dx];
+            unsigned da = dp >> 24;
+            unsigned oa = sa + da * (255 - sa) / 255;
+            if (!oa) { dst[dx] = 0; continue; }
+            unsigned r = (((sp >> 16) & 0xff) * sa + ((dp >> 16) & 0xff) * da * (255 - sa) / 255) / oa;
+            unsigned g = (((sp >>  8) & 0xff) * sa + ((dp >>  8) & 0xff) * da * (255 - sa) / 255) / oa;
+            unsigned b = (((sp      ) & 0xff) * sa + ((dp      ) & 0xff) * da * (255 - sa) / 255) / oa;
+            dst[dx] = (oa << 24) | ((r > 255 ? 255 : r) << 16) | ((g > 255 ? 255 : g) << 8) | (b > 255 ? 255 : b);
+        }
+    }
+    SDL_FreeSurface(c);
+}
+
+static uint32_t osd_argb(SDL_Color c, unsigned a) {
+    return (a << 24) | ((unsigned)c.r << 16) | ((unsigned)c.g << 8) | c.b;
+}
+
+/* --- the performance panel -------------------------------------------- */
+
+static void ingame_osd_perf(void) {
+    static Uint32 last = 0;
+    static float  cpu = -1, ram = -1, ram_total = 0;
+    static int    bat = -1;
+
+    if (!show_perf_overlay) { osd_layer_hide(&osd_perf); return; }
+    if (!osd_layer_alloc(&osd_perf)) return;
+
+    Uint32 now = SDL_GetTicks();
+    if (last && now - last < 900) return;
+    last = now;
+
+    float c = get_cpu_percent();
+    if (c >= 0) cpu = (cpu < 0) ? c : cpu * 0.6f + c * 0.4f;
+    float t = 0; float r = get_ram_used_gb_ex(&t);
+    if (r >= 0) { ram = r; ram_total = t; }
+    bat = get_battery_percent();
+
+    // No FPS line here: the frame rate on screen is the emulator's, and it
+    // reports that to nothing but its own notification bar.
+    const char *tnames[] = { "COOL", "WARM", "HOT", "CRIT" };
+    char lines[6][64];
+    int n = 0;
+    snprintf(lines[n++], 64, cpu >= 0 ? "CPU  %.0f%%" : "CPU  --", cpu);
+    if (g_temp_c >= 0) snprintf(lines[n++], 64, "TEMP %.0fC %s", g_temp_c, tnames[g_thermal_level & 3]);
+    else               snprintf(lines[n++], 64, "TEMP -- %s", tnames[g_thermal_level & 3]);
+    if (ram >= 0 && ram_total > 0) snprintf(lines[n++], 64, "RAM  %.1f/%.1fG", ram, ram_total);
+    else                           snprintf(lines[n++], 64, "RAM  --");
+    snprintf(lines[n++], 64, bat >= 0 ? "BAT  %d%%" : "BAT  --", bat);
+    if (is_battery_charging()) {
+        float cv, cw; int slow, at_max; read_charge_telemetry(&cv, &cw, &slow, &at_max);
+        if (cv > 0 && cw > 0) snprintf(lines[n++], 64, "CHG  %.1fV %.1fW", cv, cw);
+        else                  snprintf(lines[n++], 64, "CHG  connected");
+    }
+
+    TTF_Font *pf = font_fixed ? font_fixed : font_label;
+    if (!pf) return;
+    SDL_Color txt = (perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT)
+                    ? font_color_values[perf_overlay_text_idx] : (SDL_Color){ 235, 235, 240, 255 };
+    Theme *th = theme_for_frame();
+
+    SDL_Surface *surf[6]; int maxw = 0;
+    int lh = TTF_FontHeight(pf) + 3;
+    for (int i = 0; i < n; i++) {
+        surf[i] = TTF_RenderUTF8_Blended(pf, lines[i], txt);
+        if (surf[i] && surf[i]->w > maxw) maxw = surf[i]->w;
+    }
+    int pad = 8;
+    int pw = maxw + pad * 2, ph = n * lh + pad * 2 - 3;
+    if (pw > osd_perf.w) pw = osd_perf.w;
+    if (ph > osd_perf.h) ph = osd_perf.h;
+
+    memset(osd_perf.px, 0, (size_t)osd_perf.w * osd_perf.h * 4);
+    osd_fill(&osd_perf, 0, 0, pw, ph, osd_argb(th->select_bg, (unsigned)(perf_overlay_opacity * 255 / 100)));
+    osd_frame(&osd_perf, pw, ph, osd_argb(th->accent2, 255));
+    for (int i = 0; i < n; i++) {
+        osd_blit(&osd_perf, surf[i], pad, pad - 2 + i * lh);
+        if (surf[i]) SDL_FreeSurface(surf[i]);
+    }
+
+    // The same corner the on-screen overlay uses, so turning it on in the menu
+    // and then starting a game does not make it appear to jump.
+    int x = osd_scr_w - pw - 10;
+    osd_layer_commit(&osd_perf, 1, x < 0 ? 0 : x, 10, pw, ph);
+}
+
+/* --- volume and brightness ------------------------------------------- */
+//
+// Snap FE does not drive either of these during a game -- Knulli's own volume
+// helper and the Fn+Volume brightness helper do, through triggerhappy, and both
+// leave the value they settled on in a small file. Reading those is a couple of
+// fopen()s, cheap enough to poll while an emulator has the CPU; asking the
+// mixer would mean spawning a process several times a second.
+static int osd_read_int_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int v = -1;
+    if (fscanf(f, "%d", &v) != 1) v = -1;
+    fclose(f);
+    return (v >= 0 && v <= 100) ? v : -1;
+}
+
+static void ingame_osd_bar(void) {
+    static Uint32 last_poll = 0, show_until = 0;
+    static int last_vol = -1, last_bri = -1;
+    static int bar_pct = 0, bar_is_vol = 0;
+
+    Uint32 now = SDL_GetTicks();
+    if (now - last_poll >= 200) {
+        last_poll = now;
+        int v = osd_read_int_file("/userdata/system/snapos/.volume-current");
+        int b = osd_read_int_file(brightness_guard_path());
+        // First reading only establishes a baseline -- a bar on the way into a
+        // game would be noise, not feedback.
+        if (v >= 0 && last_vol >= 0 && v != last_vol) { bar_pct = v; bar_is_vol = 1; show_until = now + 1600; }
+        else if (b >= 0 && last_bri >= 0 && b != last_bri) { bar_pct = b; bar_is_vol = 0; show_until = now + 1600; }
+        if (v >= 0) last_vol = v;
+        if (b >= 0) last_bri = b;
+    }
+    if (now >= show_until) { osd_layer_hide(&osd_bar); return; }
+    if (!osd_layer_alloc(&osd_bar)) return;
+
+    TTF_Font *pf = font_fixed ? font_fixed : font_label;
+    if (!pf) return;
+    Theme *th = theme_for_frame();
+    char label[48];
+    snprintf(label, sizeof label, "%s  %d%%", bar_is_vol ? "VOLUME" : "BRIGHTNESS", bar_pct);
+    SDL_Surface *ls = TTF_RenderUTF8_Blended(pf, label, (SDL_Color){ 240, 240, 245, 255 });
+
+    int pad = 10, track_h = 10;
+    int pw = osd_bar.w, ph = (ls ? ls->h : 16) + track_h + pad * 3;
+    if (ph > osd_bar.h) ph = osd_bar.h;
+
+    memset(osd_bar.px, 0, (size_t)osd_bar.w * osd_bar.h * 4);
+    osd_fill(&osd_bar, 0, 0, pw, ph, osd_argb(th->select_bg, 225));
+    osd_frame(&osd_bar, pw, ph, osd_argb(th->accent2, 255));
+    if (ls) osd_blit(&osd_bar, ls, pad, pad - 2);
+    int ty = ph - pad - track_h, tw = pw - pad * 2;
+    osd_fill(&osd_bar, pad, ty, tw, track_h, osd_argb(th->bg, 210));
+    osd_fill(&osd_bar, pad, ty, tw * bar_pct / 100, track_h, osd_argb(th->accent1, 255));
+    if (ls) SDL_FreeSurface(ls);
+
+    // Centred along the bottom, clear of the perf panel in the top corner.
+    osd_layer_commit(&osd_bar, 1, (osd_scr_w - pw) / 2, osd_scr_h - ph - 24, pw, ph);
+}
+
+static void ingame_osd_tick(void) {
+    if (osd_unavailable) return;
+    ingame_osd_perf();
+    ingame_osd_bar();
+}
+#else
+static void ingame_osd_tick(void) {}
+static void ingame_osd_hide(void) {}
+static void ingame_osd_close(void) {}
+static void ingame_osd_clear_stale(void) {}
+#endif
 
 void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
                  const char *path, const char *title, const char *platform_dir) {
@@ -15582,6 +16030,7 @@ int main(int argc, char *argv[]) {
     // load_settings(), so a binding saved on a handheld with more buttons can
     // be corrected for this one.
     pad_indices_build();
+    ingame_osd_clear_stale();   // in case a previous run died with its layer up
 
     // Knulli mounts one data partition as /userdata and leaves the other card
     // unmounted, so a two-card handheld shows one card's games and no sign the
@@ -16334,8 +16783,15 @@ int main(int argc, char *argv[]) {
                         carousel_prev_selected = platform_selected;
                         g_prev_ord = g_sel_ord;
                         carousel_transition_start = anim_start();
-                        if (nk == SDLK_RIGHT) { carousel_dir = 1;  g_sel_ord = (g_sel_ord + 1) % g_nplat; }
-                        else                  { carousel_dir = -1; g_sel_ord = (g_sel_ord - 1 + g_nplat) % g_nplat; }
+                        int gcols = platform_grid_cols, grows = platform_grid_rows;
+                        if (gcols < 1) gcols = 1; else if (gcols > 6) gcols = 6;
+                        if (grows < 1) grows = 1; else if (grows > 6) grows = 6;
+                        int paged = (platform_view_style == 2 && gcols > 1);
+                        int step_dir = (nk == SDLK_RIGHT) ? 1 : -1;
+                        carousel_dir = step_dir;
+                        g_sel_ord = paged
+                            ? grid_page_step(g_sel_ord, g_nplat, gcols, grows, step_dir)
+                            : (g_sel_ord + step_dir + g_nplat) % g_nplat;
                         platform_selected = g_plat[g_sel_ord];
                     }
                     // Grid view is 2D -- Up/Down move a whole row (by column count).
@@ -16826,12 +17282,19 @@ int main(int argc, char *argv[]) {
                         play_click();
                     }
                     if (game_count > 0) {
-                        if (e.key.keysym.sym == SDLK_RIGHT) selected = (selected + 1) % game_count;
-                        if (e.key.keysym.sym == SDLK_LEFT) selected = (selected - 1 + game_count) % game_count;
                         // The List layout is a single column, so a grid row step would
                         // skip a whole screenful per press.
                         int nav_cols = (library_view_style() == 3 || library_view_style() == 1)
                                        ? 1 : active_game_cols();
+                        int nav_rows = (nav_cols <= 1) ? 1 : active_game_rows();
+                        if (e.key.keysym.sym == SDLK_RIGHT)
+                            selected = (nav_cols > 1)
+                                       ? grid_page_step(selected, game_count, nav_cols, nav_rows, 1)
+                                       : (selected + 1) % game_count;
+                        if (e.key.keysym.sym == SDLK_LEFT)
+                            selected = (nav_cols > 1)
+                                       ? grid_page_step(selected, game_count, nav_cols, nav_rows, -1)
+                                       : (selected - 1 + game_count) % game_count;
                         if (e.key.keysym.sym == SDLK_DOWN) {
                             int target = selected + nav_cols;
                             selected = (target < game_count) ? target : game_count - 1;
@@ -17273,10 +17736,13 @@ int main(int argc, char *argv[]) {
                     if (settings_selected < settings_scroll_offset) settings_scroll_offset = settings_selected;
                     if (settings_selected >= settings_scroll_offset + vis_rows) settings_scroll_offset = settings_selected - vis_rows + 1;
 
-                    if (e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT) {
+                    // A on a Display value row means the same as Right.
+                    int a_as_right = (e.key.keysym.sym == SDLK_RETURN && current_tab == TAB_DISPLAY &&
+                                      disp_row_is_value(disp_row_type[settings_selected]));
+                    if (e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT || a_as_right) {
                         int dirty_before = settings_dirty;
                         settings_dirty = 1;
-                        int dir = (e.key.keysym.sym == SDLK_RIGHT) ? 1 : -1;
+                        int dir = (e.key.keysym.sym == SDLK_LEFT) ? -1 : 1;
                         if (current_tab == TAB_SOUND) {
                             int rt = sound_row_type[settings_selected];
                             if (rt == ROW_SND_MASTER_VOLUME) { master_volume_pct += dir; if (master_volume_pct < 0) master_volume_pct = 0; if (master_volume_pct > 100) master_volume_pct = 100; }
@@ -17480,8 +17946,6 @@ int main(int argc, char *argv[]) {
                                 list_frame_color_idx = (list_frame_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
                             } else if (rt == ROW_G_LIST_TEXT_COLOR) {
                                 list_text_color_idx = (list_text_color_idx + dir + FONT_COLOR_COUNT) % FONT_COLOR_COUNT;
-                            } else if (rt == ROW_G_DISPLAY_ART_HEADER || rt == ROW_G_DISPLAY_ART_ITEM) {
-                                display_art_idx = (display_art_idx + dir + ART_TYPE_COUNT) % ART_TYPE_COUNT;
                             } else if (rt == ROW_G_SHOW_DESC) {
                                 show_description = !show_description;
                             } else if (rt == ROW_G_GRID_COLS) {
@@ -17578,7 +18042,7 @@ int main(int argc, char *argv[]) {
                             }
                         }
                     }
-                    if (e.key.keysym.sym == SDLK_RETURN) {
+                    if (e.key.keysym.sym == SDLK_RETURN && !a_as_right) {
                         if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_OSUI)  { play_click(); snd_grp_osui_open  = !snd_grp_osui_open; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_BOOT)  { play_click(); snd_grp_boot_open  = !snd_grp_boot_open; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_RADIO) { play_click(); snd_grp_radio_open = !snd_grp_radio_open; }
@@ -17704,14 +18168,6 @@ int main(int argc, char *argv[]) {
                                 restore_display_group(ROW_DISP_RST_VIEW);
                             } else if (rt == ROW_G_ART_HEADER) {
                                 game_art_dropdown_open = !game_art_dropdown_open;
-                                play_click();
-                            } else if (rt == ROW_G_DISPLAY_ART_HEADER) {
-                                display_dropdown_open = !display_dropdown_open;
-                                play_click();
-                            } else if (rt == ROW_G_DISPLAY_ART_ITEM) {
-                                display_art_idx = game_row_extra[settings_selected];
-                                display_dropdown_open = 0;
-                                settings_dirty = 1;
                                 play_click();
                             } else if (rt == ROW_G_SHOW_DESC) {
                                 show_description = !show_description;
@@ -17988,7 +18444,21 @@ int main(int argc, char *argv[]) {
                     }
                     if (k == SDLK_RETURN) {
                         play_click();
-                        if (rt == ROW_G_BG_MAKER) {
+                        if (rt == ROW_G_BG_SEARCH) {
+                            // The online browser needs a system to fall back on for
+                            // its default query and download target; this page is
+                            // about all of them, so start from the one on screen.
+                            if (bg_picker_platform < 0 || bg_picker_platform >= PLATFORM_COUNT)
+                                bg_picker_platform = platform_selected;
+                            bg_online_return_state = STATE_BGCONFIG;
+                            snprintf(kb_buffer, sizeof kb_buffer, "%s", bg_online_query);
+                            kb_len = (int)strlen(kb_buffer); kb_row = kb_col = 0;
+                            // Backing out of the keyboard returns here; kb_commit
+                            // sends a real query on to the browser itself.
+                            kb_return_state = STATE_BGCONFIG;
+                            kb_purpose = KB_PURPOSE_BG_SEARCH;
+                            state = STATE_KEYBOARD;
+                        } else if (rt == ROW_G_BG_MAKER) {
                             int m = rx_[bgcfg_sel];
                             if (m >= 0 && m < BG_MAKER_COUNT) bg_maker_open[m] = !bg_maker_open[m];
                         } else if (rt == ROW_G_BG_ITEM) {
@@ -18313,6 +18783,7 @@ int main(int argc, char *argv[]) {
                 last_input_time = SDL_GetTicks();
             }
             brightness_guard_tick();
+            ingame_osd_tick();      // Snap FE's own layer, above the emulator's
             // Drain the queue so nothing piles up, but honour ONE gesture:
             // Menu(16) + Start(9) held together -> kill the game. This is the
             // backup for when RetroArch's own exit hotkey doesn't fire (e.g. a
@@ -18337,6 +18808,7 @@ int main(int argc, char *argv[]) {
             if (r != 0) {
                 game_running = 0; emu_pid = -1;
                 game_lid_paused = 0;
+                ingame_osd_hide();         // the frontend draws its own again from here
                 brightness_guard_stop();   // import the final in-game brightness before anything saves
                 gamepad_evdev_reset();     // discard queued UI events before the next emulator session
                 if (ingame_volume_changed) { save_settings(); ingame_volume_changed = 0; } // persist volume nudged mid-game
@@ -20122,12 +20594,20 @@ int main(int argc, char *argv[]) {
                         // per group instead of again on a row underneath.
                         case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Systems View: %s", disp_grp_view_open ? 'v' : '>', view_style_names[platform_view_style % VIEW_STYLE_COUNT]); indent = 0; break;
                         case ROW_DISP_BG_PAGE: snprintf(text, sizeof(text), "> Backgrounds"); indent = 0; break;
-                        case ROW_DISP_GRP_LIBVIEW:
-                            if (library_view_idx < 0)
-                                snprintf(text, sizeof(text), "%c Library View: Follow Systems View", disp_grp_libview_open ? 'v' : '>');
+                        case ROW_DISP_GRP_LIBVIEW: {
+                            // Naming the Systems View again here read as a second
+                            // copy of the row above it. The library's own layout
+                            // is what matters; "(Auto)" says where it came from.
+                            const char *lvn = (library_view_idx < 0)
+                                ? library_view_names[platform_view_style % VIEW_STYLE_COUNT]
+                                : library_view_names[library_view_idx];
+                            const char *auto_tag = (library_view_idx < 0) ? "  (Auto)" : "";
+                            if (library_view_style() == 2)   // only Grid has rows under it
+                                snprintf(text, sizeof(text), "%c Library View: %s%s",
+                                         disp_grp_libview_open ? 'v' : '>', lvn, auto_tag);
                             else
-                                snprintf(text, sizeof(text), "%c Library View: %s", disp_grp_libview_open ? 'v' : '>', library_view_names[library_view_idx]);
-                            indent = 0; break;
+                                snprintf(text, sizeof(text), "Library View: %s%s", lvn, auto_tag);
+                            indent = 0; } break;
                         case ROW_DISP_LIB_VIEW:
                             if (library_view_idx < 0)
                                 snprintf(text, sizeof(text), "Layout: Follow Systems View (%s)",
@@ -20152,11 +20632,17 @@ int main(int argc, char *argv[]) {
                         case ROW_DISP_FONT_COLOR: snprintf(text, sizeof(text), "System Font Color: %s", font_color_names[(global_font_color_idx >= 0 && global_font_color_idx < FONT_COLOR_COUNT) ? global_font_color_idx : 0]); indent = 1; break;
 
                         case ROW_DISP_CONSOLE_VIEW: snprintf(text, sizeof(text), "Layout: %s", view_style_names[platform_view_style]); indent = 1; break;
-                        case ROW_DISP_ART_HEADER: snprintf(text, sizeof(text), "%c Display Art: %s", display_dropdown_open ? 'v' : '>', art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0]); indent = 1; break;
+                        case ROW_DISP_ART_HEADER: {
+                            const char *an = art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0];
+                            // Some layouts draw their own art; say so, but briefly
+                            // enough that the row still fits on a 640px panel.
+                            snprintf(text, sizeof(text), "%c Display Art: %s%s", display_dropdown_open ? 'v' : '>',
+                                     an, view_overrides_art() ? "  (Favorites only)" : "");
+                            indent = 0; break; }
                         case ROW_DISP_ART_ITEM: {
                             int is_current = (row_extra[i] == display_art_idx);
                             snprintf(text, sizeof(text), "%s %s", is_current ? "*" : " ", art_type_names[row_extra[i]]);
-                            indent = 2;
+                            indent = 1;
                             break;
                         }
                         case ROW_DISP_SHOW_EMPTY: snprintf(text, sizeof(text), "Show Systems Without Games: %s", show_empty_systems ? "ON" : "OFF"); indent = 1; break;
@@ -20226,19 +20712,6 @@ int main(int argc, char *argv[]) {
                         case ROW_G_ART_HEADER: snprintf(text, sizeof(text), "%c Columns/Rows", game_art_dropdown_open ? 'v' : '>'); break;
                         case ROW_G_GRID_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
                         case ROW_G_GRID_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
-                        case ROW_G_DISPLAY_ART_HEADER: {
-                            const char *ov = view_overrides_art();
-                            const char *an = art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0];
-                            if (ov) snprintf(text, sizeof(text), "%c Display Art: %s   (Favorites only - %s sets its own)",
-                                             display_dropdown_open ? 'v' : '>', an, ov);
-                            else    snprintf(text, sizeof(text), "%c Display Art: %s", display_dropdown_open ? 'v' : '>', an);
-                            break; }
-                        case ROW_G_DISPLAY_ART_ITEM: {
-                            int is_current = (row_extra[i] == display_art_idx);
-                            snprintf(text, sizeof(text), "%s %s", is_current ? "*" : " ", art_type_names[row_extra[i]]);
-                            indent = 1;
-                            break;
-                        }
                         case ROW_G_SHOW_DESC: snprintf(text, sizeof(text), "Show Descriptions: %s", show_description ? "ON" : "OFF"); break;
                         case ROW_G_ROMS: if (g_storage_count > 1) snprintf(text, sizeof(text), "> Storage & Games Folders: %d cards, %d folder%s", g_storage_count, g_roms_nroots > 0 ? g_roms_nroots : 1, (g_roms_nroots > 0 ? g_roms_nroots : 1) == 1 ? "" : "s"); else if (g_roms_nroots > 1) snprintf(text, sizeof(text), "> Storage & Games Folders: %d / %d", g_roms_nroots, ROMS_ROOT_MAX); else snprintf(text, sizeof(text), "> Storage & Games Folders: %.44s", sn_roms_root()); break;
                         case ROW_G_BG_HEADER: snprintf(text, sizeof(text), "%c Backgrounds", bg_dropdown_open ? 'v' : '>'); break;
@@ -20354,8 +20827,10 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            // Build tag, bottom-right, faint.
-            {
+            // Build tag, bottom-right, faint -- but only while the list leaves
+            // room for it. A full screenful of rows reaches the bottom, and the
+            // tag would sit on top of the last one.
+            if (visible_end - visible_start < vis_rows) {
                 SDL_Texture *vt = render_text(ren, font_label, "Snap FE  " SNAPFE_VERSION, g_ui_dim);
                 int vw, vh; SDL_QueryTexture(vt, NULL, NULL, &vw, &vh);
                 SDL_SetTextureAlphaMod(vt, 130);
@@ -20562,6 +21037,10 @@ int main(int argc, char *argv[]) {
                     case ROW_G_BG_COLOR:
                         snprintf(row, sizeof row, "< Color: %s >",
                                  hud_chrome_colors[(platform_bg_color_idx >= 0 && platform_bg_color_idx < HUD_CHROME_COLOR_COUNT) ? platform_bg_color_idx : 0].name);
+                        break;
+                    case ROW_G_BG_SEARCH:
+                        snprintf(row, sizeof row, "> Search Backgrounds Online%s%s",
+                                 bg_online_query[0] ? "  -  " : "", bg_online_query);
                         break;
                     case ROW_G_BG_MAKER:
                         snprintf(row, sizeof row, "%c %s", bg_maker_open[rx_[i]] ? 'v' : '>', bg_maker_names[rx_[i]]);
