@@ -23857,6 +23857,11 @@ int main(int argc, char *argv[]) {
                 const char *name;
                 signed char kind;   // 0 Home 1 Systems 2 Library 3 Book 4 Settings 5 Radio 6 Mini
                 signed char theme, font, view, art, cols, rows, extra;
+                // Systems stops only: centre the view on this system's folder
+                // rather than whatever the sort happens to put first, so a
+                // theme sweep shows different artwork instead of the same card
+                // five times. Older rows leave it NULL and keep the default.
+                const char *sys;
             } PromoExtra;
             static const PromoExtra pextra[] = {
     { "systems-carousel-t02-modern", 1, 2, 0, 1, -1, -1, -1, -1 },
@@ -23923,6 +23928,59 @@ int main(int argc, char *argv[]) {
     { "radio-light", 5, 4, 2, -1, -1, -1, -1, -1 },
     { "minigames-list", 6, 6, 1, -1, -1, -1, -1, -1 },
     { "minigames-alt", 6, 13, 3, -1, -1, -1, -1, -1 },
+    { "art-psx-midnight-modern", 1, 0, 0, 1, -1, -1, -1, -1, "psx" },
+    { "art-saturn-rainbow-techno", 1, 16, 11, 1, -1, -1, -1, -1, "saturn" },
+    { "art-dreamcast-sunset-signage", 1, 17, 10, 1, -1, -1, -1, -1, "dreamcast" },
+    { "art-c64-moss-slab", 1, 18, 12, 1, -1, -1, -1, -1, "c64" },
+    { "art-vectrex-sepia-marker", 1, 19, 13, 1, -1, -1, -1, -1, "vectrex" },
+    { "art-neogeo-terminal", 1, 6, 6, 1, -1, -1, -1, -1, "neogeo" },
+    { "art-zxspectrum-serif", 1, 8, 4, 1, -1, -1, -1, -1, "zxspectrum" },
+    { "art-virtualboy-condensed", 1, 11, 2, 1, -1, -1, -1, -1, "virtualboy" },
+    { "art-wonderswan-rounded", 1, 4, 3, 1, -1, -1, -1, -1, "wswan" },
+    { "art-segacd-pixel", 1, 13, 8, 1, -1, -1, -1, -1, "segacd" },
+    { "art-atari800-mono", 1, 2, 7, 1, -1, -1, -1, -1, "atari800" },
+    { "art-intellivision-sans", 1, 9, 5, 1, -1, -1, -1, -1, "intellivision" },
+    { "art-msx2-bold", 1, 14, 1, 1, -1, -1, -1, -1, "msx2" },
+    { "art-lynx-rainbow-modern", 1, 16, 0, 1, -1, -1, -1, -1, "lynx" },
+    { "art-pcenginecd-sunset-techno", 1, 17, 11, 1, -1, -1, -1, -1, "pcenginecd" },
+    { "art-scummvm-moss-serif", 1, 18, 4, 1, -1, -1, -1, -1, "scummvm" },
+    { "art-quake-sepia-slab", 1, 19, 12, 1, -1, -1, -1, -1, "quake" },
+    { "art-gameandwatch-marker", 1, 5, 13, 1, -1, -1, -1, -1, "gameandwatch" },
+    { "art-supervision-signage", 1, 10, 10, 1, -1, -1, -1, -1, "supervision" },
+    { "art-pokemini-retro", 1, 3, 8, 1, -1, -1, -1, -1, "pokemini" },
+    { "grid-art-rainbow-techno", 1, 16, 11, 2, -1, -1, -1, -1, "psx" },
+    { "grid-art-sunset-slab", 1, 17, 12, 2, -1, -1, -1, -1, "dreamcast" },
+    { "grid-art-moss-signage", 1, 18, 10, 2, -1, -1, -1, -1, "saturn" },
+    { "grid-art-sepia-serif", 1, 19, 4, 2, -1, -1, -1, -1, "c64" },
+    { "grid-art-midnight-mono", 1, 0, 7, 2, -1, -1, -1, -1, "neogeo" },
+    { "single-psp-rainbow-marker", 1, 16, 13, 0, -1, -1, -1, -1, "psp" },
+    { "single-dreamcast-sunset-modern", 1, 17, 0, 0, -1, -1, -1, -1, "dreamcast" },
+    { "single-saturn-moss-techno", 1, 18, 11, 0, -1, -1, -1, -1, "saturn" },
+    { "list-sepia-slab", 1, 19, 12, 3, -1, -1, -1, -1, "psx" },
+    { "list-rainbow-signage", 1, 16, 10, 3, -1, -1, -1, -1, "c64" },
+    { "bookshelf-sunset-serif", 1, 17, 4, 4, -1, -1, -1, -1, "gba" },
+    { "bookshelf-moss-marker", 1, 18, 13, 4, -1, -1, -1, -1, "snes" },
+    { "library-rainbow-techno-box3d", 2, 16, 11, 2, 1, 3, 2, -1, NULL },
+    { "library-sunset-slab-mix",      2, 17, 12, 2, 6, 3, 2, -1, NULL },
+    { "library-moss-signage-cart",    2, 18, 10, 2, 7, 3, 2, -1, NULL },
+    { "library-sepia-serif-logo",     2, 19,  4, 3, 4, -1, -1, -1, NULL },
+    { "library-rainbow-marker-fanart",2, 16, 13, 0, 5, 1, 1, -1, NULL },
+    { "library-sunset-modern-2x2",    2, 17,  0, 2, 0, 2, 2, -1, NULL },
+    { "library-moss-mono-4x3",        2, 18,  7, 2, 2, 4, 3, -1, NULL },
+    { "home-rainbow-signage",         0, 16, 10, -1, -1, -1, -1, 0, NULL },
+    { "home-sunset-techno",           0, 17, 11, -1, -1, -1, -1, 1, NULL },
+    { "home-moss-slab",               0, 18, 12, -1, -1, -1, -1, 0, NULL },
+    { "home-sepia-marker",            0, 19, 13, -1, -1, -1, -1, 1, NULL },
+    { "settings-rainbow-techno",      4, 16, 11, -1, -1, -1, -1, 1, NULL },
+    { "settings-sunset-slab",         4, 17, 12, -1, -1, -1, -1, 3, NULL },
+    { "settings-moss-signage",        4, 18, 10, -1, -1, -1, -1, 2, NULL },
+    { "settings-sepia-marker",        4, 19, 13, -1, -1, -1, -1, 0, NULL },
+    { "book-rainbow-serif",           3, 16,  4, -1, -1, -1, -1, -1, NULL },
+    { "book-sunset-slab",             3, 17, 12, -1, -1, -1, -1, 1, NULL },
+    { "radio-rainbow-techno",         5, 16, 11, -1, -1, -1, -1, -1, NULL },
+    { "radio-moss-signage",           5, 18, 10, -1, -1, -1, -1, -1, NULL },
+    { "minigames-sunset-marker",      6, 17, 13, -1, -1, -1, -1, 0, NULL },
+    { "minigames-sepia-slab",         6, 19, 12, -1, -1, -1, -1, 1, NULL },
             };
             const int PROMO_BASE  = (int)(sizeof(pnames)/sizeof(pnames[0]));
             const int PROMO_EXTRA = (int)(sizeof(pextra)/sizeof(pextra[0]));
@@ -23933,6 +23991,11 @@ int main(int argc, char *argv[]) {
             }
             last_input_time = SDL_GetTicks();   // keep the loop at 60fps so anims settle
             if (pf == 0) {
+                // The storage stops point the ROM roots at the device's own
+                // paths to show a two-card handheld. Nothing restored them, so
+                // every stop after one of those scanned folders that do not
+                // exist here and drew an empty library.
+                g_roms_nroots = 0;
                 book_info_open = 0; book_l_scroll = book_r_scroll = 0;
                 home_grid_reorder = 0; home_grid_dragging = 0; app_widget_moving = 0;
                 settings_night_theme_confirm = 0; settings_autops_confirm = 0;
@@ -23971,7 +24034,16 @@ int main(int argc, char *argv[]) {
                               home_selected = 0;
                               home_widget_idx  = HOME_WIDGET_CLOCK;
                               home_widget2_idx = HOME_WIDGET_STATS; break;
-                      case 1: state = STATE_PLATFORM; break;
+                      case 1: state = STATE_PLATFORM;
+                              if (px->sys) {
+                                  for (int oi = 0; oi < g_nplat; oi++)
+                                      if (!strcmp(platform_dirs[g_plat[oi]], px->sys)) {
+                                          g_sel_ord = oi; platform_selected = g_plat[oi];
+                                          carousel_prev_selected = platform_selected; g_prev_ord = oi;
+                                          break;
+                                      }
+                              }
+                              break;
                       case 2: free_games(ren); scan_games(ren, font_label, 0);
                               selected = (psapphire >= 0 && psapphire < game_count) ? psapphire : 0;
                               state = STATE_MENU; break;
