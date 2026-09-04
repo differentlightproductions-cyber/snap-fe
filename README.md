@@ -1,3 +1,4 @@
+[README 1.2.8.md](https://github.com/user-attachments/files/31846094/README.1.2.8.md)
 # Snap FE
 
 A frontend (menu / game launcher) for **Knulli** CFW on Anbernic handhelds,
@@ -5,8 +6,107 @@ developed on the RG SP (Allwinner H700). It runs *instead of* the
 EmulationStation menu — Knulli still does everything under it (kernel, drivers,
 controllers, audio, RetroArch + cores, BIOS, `emulatorlauncher`). This is just the behavior for the Alpha. At full launch, we plan to turn this into an actual fork of Knulli that has nothing to do with Emulation Station. 
 
-**Current release: Alpha 1.2.5.** Not every emulator or system Knulli supports
+**Current release: Alpha 1.2.8.** Not every emulator or system Knulli supports
 is wired up yet. Expect alpha rough edges.
+
+### 1.2.8 highlights
+
+- **Snap FE now draws on top of a running game.** The performance overlay used
+  to disappear the moment a game started: everything Snap FE draws goes through
+  SDL, and SDL's video device belongs to the emulator for as long as one is
+  running. The panel is not a single image, though — the display engine on these
+  handhelds composites six layers, and the framebuffer that Snap FE, RetroArch
+  and mGBA all end up drawing into is only one of them. Snap FE now takes layers
+  of its own above it. Nothing is asked of the emulator, and none of it goes
+  through RetroArch's notification bar.
+  - **Performance Overlay** stays up for the whole session: CPU, temperature,
+    RAM, battery and charge. There is deliberately no FPS line — the frame rate
+    on screen belongs to the emulator, which reports it to nothing but its own
+    notifications.
+  - **Volume and brightness** get a bar along the bottom when you change them
+    in a game. Snap FE still does not *drive* either one during play; Knulli's
+    volume helper and the Fn+Volume brightness helper do, exactly as before.
+- **Carousel art for every system.** The Carousel had drawn art for fourteen
+  systems and a name card for the other thirty-nine; all 53 now have one. Grid,
+  List and Bookshelf still fall back to name cards for systems they have no art
+  for — only the Carousel is complete.
+- **A on a settings value row dropped you out of Settings.** Every Display row
+  that is only a Left/Right wheel fell past the handler chain into the catch-all
+  that leaves the page, so pressing A on Theme, Brightness or Font Size threw
+  you out. A now nudges the value forward, the same as Right.
+- **Grids page sideways.** Left/Right at the edge of a row landed on the row
+  below instead of moving on; they now go to the same row of the next page, in
+  both the systems grid and the game library.
+- **Search Backgrounds Online** is a row on the Backgrounds page. The Wallhaven
+  browser was already there, but the only way in was to open one system's picker
+  first.
+- **Performance Overlay** moves to Settings > Device, next to CPU Performance
+  Mode — it reports on the handheld, not on how the UI looks. **Display Art**
+  moves the other way, from Game to Display, under Library View.
+- "Library View: Follow Systems View" read as a second copy of the row above it
+  and opened an empty dropdown. It names its own layout now, tagged `(Auto)`.
+
+### 1.2.7 highlights
+
+- **Library View is its own setting.** The game library no longer just inherits
+  the Systems View; it defaults to following it, and once you pick a layout,
+  changing the Systems View stops silently reverting it. Systems View, Library
+  View and a new **Backgrounds page** move to Settings > Display.
+- **Four themes** — Rainbow Road (a full-spectrum gradient with shimmering
+  accents), Sunset Drive, Moss and Sepia — and **four fonts**: Signage (Bungee),
+  Techno (Audiowide), Slab (Zilla Slab) and Marker (Permanent Marker).
+- **Wi-Fi tells you what happened.** A wrong password, an out-of-range network
+  and a successful join all used to look identical; failures are now specific
+  and shown in red. Snap FE also stopped silently reconnecting to the saved
+  network every 45 seconds, which quietly undid joining a phone hotspot a minute
+  later — being moved to a network you did not pick now asks first. Forget a
+  network with X twice on its row.
+- **Link Play** lists only sessions that are actually hosting (peers used to
+  appear before anyone was hosting, and joining one could only fail), and
+  **Host Name** is editable from the lobby.
+- The Radio card was claiming L1/L2 for tuning, which silently disabled widget
+  cycling for the whole Informational home whenever Radio was in either slot.
+- The clock widget cut its date off in 12-hour mode, Wi-Fi drew a second pill
+  next to the battery's, and the Achievements list drew over its own subtitle at
+  larger font sizes.
+
+### 1.2.6 highlights
+
+- **Both SD cards are visible now.** Knulli mounts exactly one card as its data
+  drive and leaves the other completely unmounted, so a second card of games
+  could not be reached by any frontend. Snap FE mounts it at startup, adds its
+  games to the library, and tells the two apart as TF1 and TF2 (the card
+  carrying `/boot` is TF1, whichever device node it came up as).
+- **Settings > Games > Storage & Games Folders** — a card list with size, mount
+  point and game count, and per-card actions: use for games, check folders,
+  create missing folders, browse, mount, eject. A blank card gets its per-system
+  folders created by copying the names your main card already uses, so Knulli's
+  `megadrive/` never ends up shadowed by an empty `genesis/`.
+- The first-run wizard can set a second card up in one press.
+- **Link Play saw only the first card** and so could not list games that the
+  library launched fine. It now scans every ROM folder. The scraper had the same
+  bug and now scrapes all of them.
+- **Link Play sessions outlive the game.** Quitting no longer ends the session
+  for both sides: discovery stays up through a game, your partner shows as being
+  in a game, and you land back in the lobby ready to start another. Leaving Link
+  Play is what ends it.
+- **In-game brightness and the Menu button work on more handhelds.** Both were
+  bound to button numbers measured on one specific device. The pad is now
+  resolved from its evdev keycodes, which are the same across these handhelds
+  even when the button *indices* are not.
+- **Full panel brightness.** 100% was mapped to 200 of the panel's 0-255 PWM
+  range, so about a fifth of it was unreachable. The flashlight was capped the
+  same way.
+- **Fix Game Titles** (Settings > Scraping, on by default) uses the name the
+  scraper matched instead of the filename, in the library, favourites and Link
+  Play. The name is saved during a normal scrape at no extra API cost.
+- Wi-Fi shows whether you are connected in a banner under the header. The old
+  fixed-height network list ran into the status line and the button hint.
+- **RG35XX-SP** added to the handheld list, and that setup step is now one
+  cycling row instead of a line per model.
+- Turning the backlight to Off no longer survives a reboot — the handheld used
+  to come back up rendering correctly behind a dark panel, with no way to see
+  the menu that would turn it back on.
 
 ### 1.2.5 highlights
 
@@ -167,17 +267,22 @@ does not erase settings, favorites, ROMs, saves, scraped artwork, or accounts.
   - Link Play's packaged cores are kept under `system/snapos/cores/`; the boot
     hook backs up Knulli's stock gpSP/Gambatte cores and refreshes their runtime
     copies under `/usr/lib/libretro/`.
+- **The in-game overlay does not touch the emulator.** It composites onto spare
+  layers of the display hardware, above whatever the emulator is drawing. No
+  RetroArch setting is changed, no notification is injected, and the emulator is
+  never told about it.
 - **It never** repartitions, formats, runs `mkfs`/`dd`, or writes to a block
   device. It does not modify your ROMs, saves, save states, or BIOS.
 - **Removing it** is deleting `/userdata/system/custom.sh` (or running the
   "Restore EmulationStation" port). Nothing else needs to be undone.
 - **Network access** only happens when you use the feature that needs it, and
   only to these hosts:
-  | Feature | Host |
-  |---|---|
-  | Weather | `wttr.in`, `ip-api.com` (approx location) |
-  | Internet radio | `*.api.radio-browser.info` |
-  | RetroAchievements | `retroachievements.org` |
+
+| Feature | Host |
+|---|---|
+| Weather | `wttr.in`, `ip-api.com` (approx location) |
+| Internet radio | `*.api.radio-browser.info` |
+| RetroAchievements | `retroachievements.org` |
 | Box-art scraping (`scrape_boxart.py`) | `api.screenscraper.fr`, `api.thegamesdb.net` |
 | Free background browser | `wallhaven.cc` (SFW-only search; optional personal API key) |
 | Link Play | Other Snap FE devices on the same local network only |
@@ -189,7 +294,7 @@ has no SHARE drive — Knulli creates it on first boot, growing the partition to
 fill the card and formatting it exFAT so your computer can read it. Until then
 a PC sees only unreadable Linux partitions.
 
-Then download the release asset named `SnapFE-Alpha-1.2.5.zip`—not GitHub's
+Then download the release asset named `SnapFE-Alpha-1.2.8.zip`—not GitHub's
 automatically generated Source Code ZIP—and extract it **directly onto the
 SHARE drive**. `SHARE/system/snapos/snapos_ui` and
 `SHARE/roms/ports/Snap FE (Set As Default).sh` should then exist. Boot Knulli,
@@ -208,7 +313,7 @@ great deal of its code, while using AI to help research, implement, and review
 areas that are still being learned. The source is published so anyone can read,
 build, and check what it does. Issues and PRs welcome.
 
-It's a single C translation unit — [`main.c`](main.c) (~14k lines) — plus:
+It's a single C translation unit — [`main.c`](main.c) (~24k lines) — plus:
 
 | Path | What |
 |---|---|
@@ -219,6 +324,7 @@ It's a single C translation unit — [`main.c`](main.c) (~14k lines) — plus:
 | [`background_browser.py`](background_browser.py) | Downloads optional system backgrounds selected in the on-device browser. |
 | [`ra_achievements.py`](ra_achievements.py) | Fetches the signed-in user's unlocked RetroAchievements for the achievements book. |
 | [`brightness-hotkey.sh`](brightness-hotkey.sh) | Gives Function + Volume a reliable 5% panel-brightness step in every app and game without modifying RetroArch bindings. |
+| [`volume-gate.sh`](volume-gate.sh) | Keeps Knulli's stock Volume behaviour, stepping aside while the Fn brightness modifier is held, and records the resulting level for the in-game volume bar. |
 | [`assets/`](assets/) | Open-licensed fonts, sounds, and Snap FE's generated Home placeholder icons. Other wallpaper/console-art slots are documented by the included README files. |
 
 See **[BUILD.md](BUILD.md)** for exact build + install steps.
@@ -226,4 +332,5 @@ See **[BUILD.md](BUILD.md)** for exact build + install steps.
 ## License
 
 Code: MIT (see [LICENSE](LICENSE)). Bundled fonts keep their own licenses
-(OFL 1.1 / Ubuntu Font License / DejaVu) — [CREDITS.md](CREDITS.md).
+(OFL 1.1 / Ubuntu Font Licence 1.0 / DejaVu / Apache 2.0) —
+[CREDITS.md](CREDITS.md).
