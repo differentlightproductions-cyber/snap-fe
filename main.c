@@ -85,7 +85,7 @@ int WIN_H = 480;
 #define MAX_LINES 4
 #define MAX_GAMES 4000
 
-typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS, STATE_ROMFOLDERS, STATE_CALENDAR, STATE_CALCULATOR } AppState;
+typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS, STATE_ROMFOLDERS, STATE_CALENDAR, STATE_CALCULATOR, STATE_BGCONFIG } AppState;
 typedef enum { TAB_SOUND, TAB_DISPLAY, TAB_GAME, TAB_DEVICE, TAB_ACCOUNT, TAB_COUNT } SettingsTab;
 
 // Points at main()'s `state` so pre-main helpers (e.g. play_click) can tell
@@ -3942,23 +3942,44 @@ int build_game_rows(int *row_type, int *row_extra) {
         for (int i = 0; i < ART_TYPE_COUNT; i++) { row_type[idx] = ROW_G_DISPLAY_ART_ITEM; row_extra[idx] = i; idx++; }
     row_type[idx] = ROW_G_SHOW_DESC; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_G_ROMS; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_G_BG_HEADER; row_extra[idx] = 0; idx++;
-    if (bg_dropdown_open) {
-        row_type[idx] = ROW_G_BG_MODE; row_extra[idx] = 0; idx++;
-        if (platform_bg_mode == 1) { row_type[idx] = ROW_G_BG_COLOR; row_extra[idx] = 0; idx++; }
-        if (platform_bg_mode == 0) {
-            for (int m=0;m<BG_MAKER_COUNT;m++) {
-                row_type[idx]=ROW_G_BG_MAKER; row_extra[idx]=m; idx++;
-                if (bg_maker_open[m]) for(int p=0;p<PLATFORM_COUNT;p++) {
-                    int match = !strcmp(platform_maker[p],bg_maker_names[m]) ||
-                                (m==6 && !strcmp(platform_maker[p],"FINALBURN NEO"));
-                    if(match){row_type[idx]=ROW_G_BG_ITEM;row_extra[idx]=p;idx++;}
-                }
-            }
-        }
-        row_type[idx] = ROW_G_BG_RESTORE; row_extra[idx] = 0; idx++;
-    }
+    // Backgrounds is its own page now, under Display.
     row_type[idx] = ROW_G_RESTORE; row_extra[idx] = 0; idx++;
+    return idx;
+}
+
+int bgcfg_sel = 0, bgcfg_scroll = 0;
+
+// Is this system one the Systems view is currently showing? g_plat[] is already
+// filtered by "Show Systems Without Games", so reusing it keeps the two lists
+// in agreement without duplicating the rule.
+static int bg_platform_visible(int p) {
+    for (int i = 0; i < g_nplat; i++) if (g_plat[i] == p) return 1;
+    return 0;
+}
+
+int build_bg_rows(int *row_type, int *row_extra) {
+    int idx = 0;
+    row_type[idx] = ROW_G_BG_MODE; row_extra[idx] = 0; idx++;
+    if (platform_bg_mode == 1) { row_type[idx] = ROW_G_BG_COLOR; row_extra[idx] = 0; idx++; }
+    if (platform_bg_mode == 0) {
+        for (int m = 0; m < BG_MAKER_COUNT; m++) {
+            int any = 0;
+            for (int p = 0; p < PLATFORM_COUNT && !any; p++) {
+                int match = !strcmp(platform_maker[p], bg_maker_names[m]) ||
+                            (m == 6 && !strcmp(platform_maker[p], "FINALBURN NEO"));
+                if (match && bg_platform_visible(p)) any = 1;
+            }
+            if (!any) continue;               // no visible systems from this maker
+            row_type[idx] = ROW_G_BG_MAKER; row_extra[idx] = m; idx++;
+            if (bg_maker_open[m])
+                for (int p = 0; p < PLATFORM_COUNT; p++) {
+                    int match = !strcmp(platform_maker[p], bg_maker_names[m]) ||
+                                (m == 6 && !strcmp(platform_maker[p], "FINALBURN NEO"));
+                    if (match && bg_platform_visible(p)) { row_type[idx] = ROW_G_BG_ITEM; row_extra[idx] = p; idx++; }
+                }
+        }
+    }
+    row_type[idx] = ROW_G_BG_RESTORE; row_extra[idx] = 0; idx++;
     return idx;
 }
 
@@ -4172,6 +4193,7 @@ int build_device_rows(int *row_type, int *row_extra) {
 #define ROW_DISP_LIB_VIEW 62      // library layout (or Follow Systems View)
 #define ROW_DISP_LIB_COLS 63
 #define ROW_DISP_LIB_ROWS 64
+#define ROW_DISP_BG_PAGE 65       // opens the Backgrounds page
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
@@ -4477,6 +4499,10 @@ int build_display_rows(int *row_type, int *row_extra) {
             D_ADD(ROW_DISP_LIB_ROWS, 0);
         }
     }
+
+    // Backgrounds: a page of its own rather than a dropdown, because the
+    // per-system list is far too long to scroll inside a crowded tab.
+    D_ADD(ROW_DISP_BG_PAGE, 0);
 
     // Screen & Power (the most-adjusted stuff)
     D_ADD(ROW_DISP_GRP_SCREEN, 0);
@@ -17757,6 +17783,9 @@ int main(int argc, char *argv[]) {
                                 disp_grp_text_open = !disp_grp_text_open;
                             } else if (rt == ROW_DISP_GRP_VIEW) {
                                 disp_grp_view_open = !disp_grp_view_open;
+                            } else if (rt == ROW_DISP_BG_PAGE) {
+                                bgcfg_sel = 0; bgcfg_scroll = 0;
+                                state = STATE_BGCONFIG;
                             } else if (rt == ROW_DISP_GRP_LIBVIEW) {
                                 disp_grp_libview_open = !disp_grp_libview_open;
                             } else if (rt == ROW_DISP_ART_HEADER) {
@@ -17930,6 +17959,49 @@ int main(int argc, char *argv[]) {
                         } else {
                             if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
                             else { settings_close_all_groups(); state = settings_return_state; }
+                        }
+                    }
+                }
+                else if (state == STATE_BGCONFIG) {
+                    int rt_[256], rx_[256];
+                    int n = build_bg_rows(rt_, rx_);
+                    if (n < 1) n = 1;
+                    if (bgcfg_sel >= n) bgcfg_sel = n - 1;
+                    if (bgcfg_sel < 0) bgcfg_sel = 0;
+                    SDL_Keycode k = e.key.keysym.sym;
+                    if (k == SDLK_ESCAPE) { save_settings(); state = STATE_SETTINGS; play_click(); }
+                    if (k == SDLK_DOWN) bgcfg_sel = (bgcfg_sel + 1) % n;
+                    if (k == SDLK_UP)   bgcfg_sel = (bgcfg_sel - 1 + n) % n;
+                    int dir = (k == SDLK_RIGHT) ? 1 : (k == SDLK_LEFT) ? -1 : 0;
+                    int rt = rt_[bgcfg_sel];
+                    if (dir) {
+                        play_click();
+                        if (rt == ROW_G_BG_MODE) {
+                            platform_bg_mode = (platform_bg_mode + dir + BG_MODE_COUNT) % BG_MODE_COUNT;
+                            platform_assets_loaded_for = -1;
+                            for (int i = 0; i < PLATFORM_COUNT; i++) invalidate_carousel_bg(i);
+                        } else if (rt == ROW_G_BG_COLOR) {
+                            platform_bg_color_idx = (platform_bg_color_idx + dir + HUD_CHROME_COLOR_COUNT) % HUD_CHROME_COLOR_COUNT;
+                            platform_assets_loaded_for = -1;
+                            for (int i = 0; i < PLATFORM_COUNT; i++) invalidate_carousel_bg(i);
+                        }
+                    }
+                    if (k == SDLK_RETURN) {
+                        play_click();
+                        if (rt == ROW_G_BG_MAKER) {
+                            int m = rx_[bgcfg_sel];
+                            if (m >= 0 && m < BG_MAKER_COUNT) bg_maker_open[m] = !bg_maker_open[m];
+                        } else if (rt == ROW_G_BG_ITEM) {
+                            bg_picker_platform = rx_[bgcfg_sel];
+                            bg_picker_status[0] = '\0';
+                            bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
+                            refresh_background_picker();
+                            background_picker_selected = 0;
+                            for (int bi = 0; bi < background_file_count; bi++)
+                                if (!strcmp(background_files[bi], platform_bg_choice[bg_picker_platform])) { background_picker_selected = bi + 1; break; }
+                            state = STATE_BG_PICKER;
+                        } else if (rt == ROW_G_BG_RESTORE) {
+                            restore_display_group(ROW_DISP_RST_BG);
                         }
                     }
                 }
@@ -20049,6 +20121,7 @@ int main(int argc, char *argv[]) {
                         // The layout lives on the header, so it is named once
                         // per group instead of again on a row underneath.
                         case ROW_DISP_GRP_VIEW: snprintf(text, sizeof(text), "%c Systems View: %s", disp_grp_view_open ? 'v' : '>', view_style_names[platform_view_style % VIEW_STYLE_COUNT]); indent = 0; break;
+                        case ROW_DISP_BG_PAGE: snprintf(text, sizeof(text), "> Backgrounds"); indent = 0; break;
                         case ROW_DISP_GRP_LIBVIEW:
                             if (library_view_idx < 0)
                                 snprintf(text, sizeof(text), "%c Library View: Follow Systems View", disp_grp_libview_open ? 'v' : '>');
@@ -20461,6 +20534,65 @@ int main(int argc, char *argv[]) {
                 int stw, sth; SDL_QueryTexture(st, NULL, NULL, &stw, &sth);
                 SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ rp.x + 14, rp.y + bh - sth - 9, stw, sth });
             }
+        } else if (state == STATE_BGCONFIG) {
+            draw_dock_logo(ren, font_small);
+            int hx = 36, y = 62;
+            SDL_Texture *hdr = render_text(ren, font_small_bold, "BACKGROUNDS", th->accent2);
+            int hw, hh; SDL_QueryTexture(hdr, NULL, NULL, &hw, &hh);
+            SDL_RenderCopy(ren, hdr, NULL, &(SDL_Rect){ hx, y, hw, hh });
+            y += hh + 12;
+
+            int rt_[256], rx_[256];
+            int n = build_bg_rows(rt_, rx_);
+            int pitch = TTF_FontHeight(font_label) + 12;
+            int bottom = WIN_H - TTF_FontHeight(font_label) - 26;
+            int vis = (bottom - y) / pitch; if (vis < 3) vis = 3;
+            if (bgcfg_sel < bgcfg_scroll) bgcfg_scroll = bgcfg_sel;
+            if (bgcfg_sel >= bgcfg_scroll + vis) bgcfg_scroll = bgcfg_sel - vis + 1;
+            if (bgcfg_scroll > n - vis) bgcfg_scroll = n - vis;
+            if (bgcfg_scroll < 0) bgcfg_scroll = 0;
+
+            for (int i = bgcfg_scroll; i < n && i < bgcfg_scroll + vis; i++) {
+                char row[220]; int indent = 0;
+                switch (rt_[i]) {
+                    case ROW_G_BG_MODE:
+                        snprintf(row, sizeof row, "< Source: %s >",
+                                 bg_mode_names[(platform_bg_mode >= 0 && platform_bg_mode < BG_MODE_COUNT) ? platform_bg_mode : 0]);
+                        break;
+                    case ROW_G_BG_COLOR:
+                        snprintf(row, sizeof row, "< Color: %s >",
+                                 hud_chrome_colors[(platform_bg_color_idx >= 0 && platform_bg_color_idx < HUD_CHROME_COLOR_COUNT) ? platform_bg_color_idx : 0].name);
+                        break;
+                    case ROW_G_BG_MAKER:
+                        snprintf(row, sizeof row, "%c %s", bg_maker_open[rx_[i]] ? 'v' : '>', bg_maker_names[rx_[i]]);
+                        break;
+                    case ROW_G_BG_ITEM:
+                        indent = 1;
+                        snprintf(row, sizeof row, "%s: %s", platform_short[rx_[i]],
+                                 platform_bg_choice[rx_[i]][0] ? platform_bg_choice[rx_[i]] : "Default");
+                        break;
+                    default:
+                        snprintf(row, sizeof row, "Restore Background Defaults");
+                        break;
+                }
+                int sel = (i == bgcfg_sel);
+                if (sel) {
+                    SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
+                    SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 4, WIN_W - 2*hx + 16, pitch - 4 });
+                }
+                SDL_Texture *t = render_text_fit(ren, font_label, row, sel ? g_ui_text : g_ui_dim,
+                                                 WIN_W - 2*hx - 8 - indent * 22);
+                int tw2, th2; SDL_QueryTexture(t, NULL, NULL, &tw2, &th2);
+                SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ hx + indent * 22, y, tw2, th2 });
+                y += pitch;
+            }
+            { char hint[120];
+              snprintf(hint, sizeof hint, "A  Choose   Left/Right  Change   B  Back%s",
+                       show_empty_systems ? "" : "   (with games)");
+              SDL_Texture *ht = render_text_fit(ren, font_label, hint, g_ui_dim, WIN_W - 2*hx);
+              int hw2, hh2; SDL_QueryTexture(ht, NULL, NULL, &hw2, &hh2);
+              SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ hx, WIN_H - hh2 - 16, hw2, hh2 }); }
+
         } else if (state == STATE_ROMFOLDERS) {
             int hx = 36, y = 62;
             const char *hdr_txt = romfs_card >= 0 ? "CARD OPTIONS"
