@@ -26,7 +26,7 @@
 #include <sys/mman.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.7"
+#define SNAPFE_VERSION "Alpha Build 1.2.8"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -10374,20 +10374,35 @@ void ensure_platform_icons_loaded(SDL_Renderer *ren, int style) {
         snprintf(dirpath, sizeof(dirpath), "%s/assets/icons/%s/%s", home, icon_style_slugs[style], platform_dirs[p]);
         DIR *d = opendir(dirpath);
         if (!d) continue;
+        // There is meant to be one icon per system per style, but an update
+        // extracts over the top of what is already installed and never deletes,
+        // so a folder can end up holding both the old art and the new. Take the
+        // most recently written file rather than whichever readdir happens to
+        // return first -- which also means art you drop in yourself wins over
+        // what shipped, without having to find and remove the old file. (Do
+        // re-drop it if a later release ships new art for the same system: the
+        // rule is "newest file", and that release would then be newer.)
+        char best[900] = "";
+        time_t best_mtime = 0;
         struct dirent *entry;
         while ((entry = readdir(d)) != NULL) {
-            if (has_ext(entry->d_name, ".svg") || has_ext(entry->d_name, ".png") ||
-                has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
-                char path[900];
-                snprintf(path, sizeof(path), "%.643s/%.255s", dirpath, entry->d_name);
-                // Through load_scaled_texture, not IMG_LoadTexture: an SVG must
-                // be rasterized at a working size or it comes back at its
-                // intrinsic 24-48px and is then stretched across the tile.
-                platform_icon_cache[p] = load_scaled_texture(ren, path, 512);
-                if (platform_icon_cache[p]) break;
+            if (!has_ext(entry->d_name, ".svg") && !has_ext(entry->d_name, ".png") &&
+                !has_ext(entry->d_name, ".jpg") && !has_ext(entry->d_name, ".jpeg")) continue;
+            char path[900];
+            snprintf(path, sizeof(path), "%.643s/%.255s", dirpath, entry->d_name);
+            struct stat st;
+            if (stat(path, &st) != 0) continue;
+            if (!best[0] || st.st_mtime > best_mtime ||
+                (st.st_mtime == best_mtime && strcmp(path, best) < 0)) {
+                best_mtime = st.st_mtime;
+                snprintf(best, sizeof best, "%s", path);
             }
         }
         closedir(d);
+        // Through load_scaled_texture, not IMG_LoadTexture: an SVG must be
+        // rasterized at a working size or it comes back at its intrinsic
+        // 24-48px and is then stretched across the tile.
+        if (best[0]) platform_icon_cache[p] = load_scaled_texture(ren, best, 512);
     }
     platform_icon_cache_style = style;
 }

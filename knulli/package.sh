@@ -21,7 +21,7 @@ BIN=snapos_ui.aarch64
 find assets -type f -name '*:Zone.Identifier' -delete 2>/dev/null || true
 
 # Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.4
-RELEASE="${1:-1.2.7}"
+RELEASE="${1:-1.2.8}"
 VER="Alpha-${RELEASE}"
 STAGE="$(mktemp -d)"
 DEST="$STAGE/system/snapos"
@@ -111,7 +111,7 @@ OUT="dist/SnapFE-$VER.zip"
 rm -f "$OUT"
 ABS_OUT="$(pwd)/$OUT"
 python3 - "$STAGE" "$ABS_OUT" <<'PY'
-import os, sys, zipfile, stat
+import os, sys, time, zipfile, stat
 stage, out = sys.argv[1], sys.argv[2]
 root = stage
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -119,8 +119,12 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for fn in sorted(fns):
             full = os.path.join(dp, fn)
             arc = os.path.relpath(full, stage)
-            zi = zipfile.ZipInfo(arc)
             st = os.stat(full)
+            # Stamp the real build time, not zipfile's 1980 default. Snap FE
+            # resolves "which of these two icons is the current one" by mtime,
+            # and an update whose files all claim 1980 loses to the copy already
+            # on the card.
+            zi = zipfile.ZipInfo(arc, date_time=time.localtime(st.st_mtime)[:6])
             # preserve the exec bit so .sh files run on the device
             zi.external_attr = (stat.S_IMODE(st.st_mode) & 0o777) << 16
             zi.compress_type = zipfile.ZIP_DEFLATED

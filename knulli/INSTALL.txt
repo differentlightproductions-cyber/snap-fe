@@ -1,4 +1,4 @@
-Snap FE - Alpha Build 1.2.7
+Snap FE - Alpha Build 1.2.8
 for Allwinner H700 Anbernic handhelds running Knulli.
 Built and tested on the RG SP and RG35XX-SP; other H700 RG XX devices
 (RG35XX/H/Plus/Pro, RG40XX, RG28XX, CubeXX) should work but are untested.
@@ -6,7 +6,7 @@ Built and tested on the RG SP and RG35XX-SP; other H700 RG XX devices
 
 Install or update
 -----------------
-1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.7.zip. Do not download
+1. Download the RELEASE ASSET named SnapFE-Alpha-1.2.8.zip. Do not download
    GitHub's automatically generated "Source code" ZIP.
 
 2. BOOT KNULLI ON THE HANDHELD ONCE FIRST, if you have not already.
@@ -57,7 +57,7 @@ On the SHARE drive, read or send these files:
    system/snapos/install.log
 
 The most common cause with 1.1.5 was extracting the version wrapper folder
-instead of putting system/ and roms/ at the root of SHARE. The 1.2.7 ZIP is
+instead of putting system/ and roms/ at the root of SHARE. The 1.2.8 ZIP is
 flat so "Extract to SHARE" now produces the correct layout automatically.
 
 
