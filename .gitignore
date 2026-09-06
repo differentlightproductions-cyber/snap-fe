@@ -13,6 +13,16 @@ vendor/link-cores/*.zip
 
 # local dev state (created at runtime under the repo dir on desktop builds)
 settings.cfg
+friends.cfg
+friends.cfg.tmp
+player-id.txt
+widget-places.cfg
+widget-places.cfg.tmp
+widget-local-city.txt
+battery-prompt.cfg
+battery-prompt.cfg.tmp
+battery-prompt.cfg.tmp.*
+fish-helpers.cfg
 activity.dat
 sessions.log
 scrape_status.txt
@@ -43,3 +53,4 @@ knulli/devices.local
 
 # desktop dev binary (BUILD.md builds ./snapos_ui; some setups name it .desktop)
 snapos_ui.desktop
+tests/output/

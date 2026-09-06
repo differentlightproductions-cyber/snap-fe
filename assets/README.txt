@@ -1,22 +1,20 @@
 Snap FE artwork -- where each image goes and what size it should be
 =================================================================
 
-Every folder below has one sub-folder per system, using these slugs:
-
-  gba  gbc  gb  nes  snes  genesis            (art already included)
-  n64  psx  mastersystem  gamegear            (NEED ART)
-  pcengine  neogeo  atari2600  fbneo          (NEED ART)
-
-Drop a .png / .jpg / .jpeg in the matching folder. For everything except
-backgrounds/, the FIRST image found in the folder is used -- name it anything.
+Use a sub-folder with the system's Knulli short name, for example gba, gbc,
+gb, nes, snes, genesis, psx or amiga500. Keep existing folders and filenames
+when replacing bundled artwork. PNG/JPG/JPEG files are supported; transparent
+PNG is useful for icons. See USER-FOLDERS.md in the release for the full guide.
 
 
 1. assets/backgrounds/<system>/
    Full-screen backdrop on the console screen (Single Card / Carousel / Grid
    when Background = Image). Every image here becomes a pickable option in
-   Settings > Display > Background; the filename (minus extension) is its label.
-   Size:  1280 x 854  (3:2), or at least 960 x 640. JPG or PNG. Cover-fit
-          (centre-cropped), so keep the subject roughly centred.
+   Settings > Display > Backgrounds. Downloaded images can have descriptive labels.
+   Size:  1440 x 960 (3:2) is the standard master size. JPG or PNG.
+          1280 x 960 is suitable for a dedicated 4:3 version. Existing
+          1280 x 854 or 960 x 640 images still work. Cover-fit (centre-cropped),
+          so keep important art/text away from the outer edges.
 
 2. assets/icons/carousel/<system>/    (one image)
    The system "card" in Carousel view. Card is 190 x 280 portrait
@@ -41,17 +39,11 @@ backgrounds/, the FIRST image found in the folder is used -- name it anything.
    (assets/icons/bookshelf/background/ is the shared shelf photo -- already set.)
 
 
-WHAT'S MISSING RIGHT NOW
------------------------
-The 8 newly added systems have NO art in any of the folders above:
+6. assets/icons/home/simple/ and assets/icons/home/pixel-art/
+   Separate App Focused home icon packs, selectable in settings. Preserve
+   the pack's app filenames. SVG and transparent PNG are supported.
 
-  n64  psx  mastersystem  gamegear  pcengine  neogeo  atari2600  fbneo
-
-  -> per system that's: 1 background, 1 carousel card, 1 list badge,
-     1 bookshelf spine  = 4 images each, 32 total (grid icons optional).
-
-Grid icons: none exist for ANY system (all 14) -- the grid view falls back to
-a themed box + short name, so these are lowest priority.
-
-Until art is added, each of those systems shows a clean themed placeholder
-with its name, so nothing is broken -- it just isn't illustrated.
+The release includes the bundled art in these folders. Systems without custom
+art fall back to labeled placeholders. Personal ROMs, BIOS, account files and
+scraped game art are not distributed. Back up artwork you customize before
+updating: an update replaces bundled files with matching filenames.

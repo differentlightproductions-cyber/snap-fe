@@ -22,6 +22,10 @@ favorites, activity history, ROMs, saves, save states, BIOS files, or scraped
 game artwork. Extracting it over an existing installation replaces program and
 bundled asset files while leaving those personal files in place.
 
-For extra safety, copy `SHARE/system/snapos/settings.cfg` somewhere on your PC
-before updating. If an update is interrupted, extract the same release ZIP
+Before updating, back up `SHARE/system/snapos/settings.cfg`, its `config/`
+folder and any icons/backgrounds you replaced in the bundled `assets/` tree.
+Merge means keeping the folder and replacing matching files, not deleting or
+replacing the whole directory. Bundled artwork with the same filename will be
+overwritten; restore your customized copies afterward. See `USER-FOLDERS.md`
+for the folder guide. If an update is interrupted, extract the same release ZIP
 again and rerun **Snap FE (Set As Default)**.

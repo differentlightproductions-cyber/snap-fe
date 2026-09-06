@@ -21,7 +21,11 @@ BIN=snapos_ui.aarch64
 find assets -type f -name '*:Zone.Identifier' -delete 2>/dev/null || true
 
 # Version tag for the zip name + VERSION file. Override: ./knulli/package.sh 1.2.4
-RELEASE="${1:-1.2.8}"
+SOURCE_VERSION="$(sed -n 's/^#define SNAPFE_VERSION "Alpha Build \([0-9.]*\)"/\1/p' main.c)"
+RELEASE="${1:-$SOURCE_VERSION}"
+[[ -n "$RELEASE" && "$RELEASE" == "$SOURCE_VERSION" ]] || {
+  echo "Release version must match main.c ($SOURCE_VERSION)." >&2; exit 1;
+}
 VER="Alpha-${RELEASE}"
 STAGE="$(mktemp -d)"
 DEST="$STAGE/system/snapos"
@@ -104,6 +108,10 @@ chmod 0755 "$PORTS/"*.sh "$DEST/snapos_ui" "$DEST"/*.sh "$DEST"/*.py "$DEST/core
 # --- instructions ----------------------------------------------------------
 cp knulli/INSTALL.txt "$STAGE/INSTALL.txt"
 cp UPDATING.md "$STAGE/UPDATING.md"
+cp USER-FOLDERS.md COMPUTER-CONTROLS.md BOOT-QUOTE-SOURCES.md "$STAGE/"
+mkdir -p "$STAGE/tools"
+cp tools/audit_system_controls.py "$STAGE/tools/"
+cp boot_quotes.h "$STAGE/tools/boot_quotes.h"  # full citation register, no account data
 
 # --- zip (via python3 so we don't need the 'zip' binary) ------------------
 mkdir -p dist
@@ -170,9 +178,9 @@ HASH="$(sha256sum "$OUT" | awk '{print $1}')"
 printf '%s  %s\n' "$HASH" "$(basename "$OUT")" > "$CHECKSUM"
 echo ">> $CHECKSUM"
 
-# On Nick's Windows/WSL development machine, always export a clean handoff
-# folder before GitHub is opened. Other Linux build hosts simply keep dist/.
-if command -v powershell.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+# On Windows/WSL, export the handoff unless local-only packaging was requested.
+# SKIP_WINDOWS_EXPORT=1 keeps every release artifact inside this checkout.
+if [[ "${SKIP_WINDOWS_EXPORT:-0}" != 1 ]] && command -v powershell.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
   PS_EXPORT="$(wslpath -w "$(pwd)/prepare-release-windows.ps1")"
   if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS_EXPORT" -Version "$RELEASE"; then
     echo "WARNING: release built, but Windows Downloads export failed." >&2

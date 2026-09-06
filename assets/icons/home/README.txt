@@ -16,11 +16,12 @@ consistent at every tile size.
 Each pack may contain .svg / .png / .jpg / .jpeg files named exactly by slug:
 
   achievements, calculator, consoles, favorites, flashlight, library,
-  link, minigames, music, radio, retroarch, settings, surprise
+  link, minigames, music, radio, retroarch, settings, surprise, game-default
 
-resume.png remains in this parent folder as a compatibility fallback for a
-Resume tile with no scraped cover. Resume and game-favorite tiles normally use
-the game's real artwork.
+game-default is the clean vector placeholder used by the App Focused Resume
+tile when that game has no scraped cover. Keep a copy inside every icon-pack
+folder so a future pack can supply its own matching fallback. resume.png remains
+in this parent folder only for compatibility with releases before 1.2.9.
 
 If an icon is absent from the selected pack, Snap FE tries the Simple pack and
 then this legacy parent folder. A missing file therefore never produces an
