@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <math.h>
 #include <dirent.h>
@@ -26,7 +27,7 @@
 #include <sys/mman.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.2.9"
+#define SNAPFE_VERSION "Alpha Build 1.3.0"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -265,6 +266,21 @@ const char *platform_blurb[] = {
 };
 #define PLATFORM_COUNT ((int)(sizeof(platform_dirs) / sizeof(platform_dirs[0])))
 int platform_selected = 0;   // real platform index of the highlighted system
+
+static const char *platform_panel_name(int p) {
+    if (p < 0 || p >= PLATFORM_COUNT) return "";
+    const char *dir = platform_dirs[p];
+    if (!strcmp(dir, "gba") || !strcmp(dir, "gbc") || !strcmp(dir, "gb") ||
+        !strcmp(dir, "nes") || !strcmp(dir, "snes") || !strcmp(dir, "n64") ||
+        !strcmp(dir, "psx") || !strcmp(dir, "psp") || !strcmp(dir, "c64") ||
+        !strcmp(dir, "msx1") || !strcmp(dir, "msx2") || !strcmp(dir, "dos") ||
+        !strcmp(dir, "mame") || !strcmp(dir, "fds") || !strcmp(dir, "sega32x") ||
+        !strcmp(dir, "ngp") || !strcmp(dir, "ngpc") || !strcmp(dir, "wswan") ||
+        !strcmp(dir, "wswanc") || !strcmp(dir, "gameandwatch")) {
+        return platform_short[p];
+    }
+    return platform_names[p];
+}
 
 // --- Which systems the console picker shows -----------------------------------
 // OFF (default): only systems that currently have at least one game.
@@ -3694,9 +3710,13 @@ int background_file_count = 0;
 int background_picker_selected = 0;
 char platform_bg_choice[PLATFORM_COUNT][256] = { { 0 } };
 int bg_picker_platform = 0; // which platform the picker is scoped to when opened from Settings
+AppState bg_picker_return_state = STATE_SETTINGS;
 char bg_picker_status[160] = "";
 int bg_delete_confirm_index = -1;
 Uint32 bg_delete_confirm_until = 0;
+SDL_Texture *bg_picker_preview_tex = NULL;
+int bg_picker_preview_index = -1;
+char bg_picker_preview_file[256] = "";
 
 #define BG_ONLINE_MAX 12
 char bg_online_title[BG_ONLINE_MAX][128];
@@ -4315,6 +4335,7 @@ static int custom_theme_choice=0;
 #define ROW_DISP_LIB_COLS 63
 #define ROW_DISP_LIB_ROWS 64
 #define ROW_DISP_BG_PAGE 65       // opens the Backgrounds page
+#define ROW_DISP_SINGLE_CARD_TITLE_SIDE 66
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
@@ -4407,6 +4428,8 @@ int platform_grid_rows = 2;
 // cards. On/off only -- its colours come from the active theme (select_bg +
 // accent), NOT the status-backdrop chrome, so it always matches the global look.
 int carousel_titles_on = 1;
+int single_card_title_side = 0; // 0 = left, 1 = right
+const char *single_card_title_side_names[2] = { "Left", "Right" };
 
 // Platform-screen background source: 0 = per-system image (assets/backgrounds/),
 // 1 = a flat colour from hud_chrome_colors[], 2 = the active theme's background.
@@ -4481,7 +4504,7 @@ int syscfg_level = 0;         // 0 = system list, 1 = editing one system
 int syscfg_sys = 0;          // which platform index is being edited
 int syscfg_sel = 0;          // selected row within the current level
 int syscfg_from_platform = 0; // entered via C on the platform screen (skip the list)
-#define SYSCFG_EDIT_ROWS 5    // Aspect, Rotation, Core, Restore, Controls & BIOS
+#define SYSCFG_EDIT_ROWS 6    // Aspect, Rotation, Core, Background, Restore, Controls & BIOS
 
 int syscfg_aspect_for(int p)   { return sys_override[p].aspect   ? sys_override[p].aspect - 1   : game_aspect_idx; }
 int syscfg_rotation_for(int p) { return sys_override[p].rotation ? sys_override[p].rotation - 1 : game_rotation_idx; }
@@ -4575,8 +4598,10 @@ int build_display_rows(int *row_type, int *row_extra) {
         D_ADD(ROW_DISP_FAVORITES_VIEW, 0);
         // Carousel, Grid and Single Card overlay a title that can be turned
         // off. List and Bookshelf ARE their titles, so it is not offered there.
-        if (platform_view_style == 0 || platform_view_style == 1 || platform_view_style == 2)
+        if (platform_view_style == 1 || platform_view_style == 2)
             D_ADD(ROW_DISP_CAROUSEL_TITLES, 0);
+        if (platform_view_style == 0)
+            D_ADD(ROW_DISP_SINGLE_CARD_TITLE_SIDE, 0);
         if (platform_view_style == 2) {
             D_ADD(ROW_DISP_PGRID_COLS, 0);
             D_ADD(ROW_DISP_PGRID_ROWS, 0);
@@ -4643,6 +4668,10 @@ static int format_systems_view_row(int rt, char *text, size_t cap, int *indent) 
             break;
         case ROW_DISP_CAROUSEL_TITLES:
             snprintf(text, cap, "System Titles: %s", carousel_titles_on ? "ON" : "OFF");
+            break;
+        case ROW_DISP_SINGLE_CARD_TITLE_SIDE:
+            snprintf(text, cap, "Single Card Title Side: %s",
+                     single_card_title_side_names[single_card_title_side ? 1 : 0]);
             break;
         case ROW_DISP_PGRID_COLS: snprintf(text, cap, "Grid Columns: %d", platform_grid_cols); break;
         case ROW_DISP_PGRID_ROWS: snprintf(text, cap, "Grid Rows: %d", platform_grid_rows); break;
@@ -5320,6 +5349,7 @@ void load_settings() {
         else if (strcmp(key, "platform_grid_cols") == 0) platform_grid_cols = val;
         else if (strcmp(key, "platform_grid_rows") == 0) platform_grid_rows = val;
         else if (strcmp(key, "carousel_titles_on") == 0) carousel_titles_on = val;
+        else if (strcmp(key, "single_card_title_side") == 0) single_card_title_side = val ? 1 : 0;
         else if (strcmp(key, "home_widget_idx") == 0) home_widget_idx = (val >= 0 && val < HOME_WIDGET_COUNT) ? val : 1;
         else if (strcmp(key, "home_widget2_idx") == 0) home_widget2_idx = (val >= 0 && val < HOME_WIDGET_COUNT) ? val : 0;
         else if (strcmp(key, "app_widget_kind") == 0) app_widget_kind = (val >= 0 && val < APP_WIDGET_COUNT) ? val : 0;
@@ -5492,6 +5522,7 @@ void save_settings() {
     fprintf(f, "platform_grid_cols=%d\n", platform_grid_cols);
     fprintf(f, "platform_grid_rows=%d\n", platform_grid_rows);
     fprintf(f, "carousel_titles_on=%d\n", carousel_titles_on);
+    fprintf(f, "single_card_title_side=%d\n", single_card_title_side ? 1 : 0);
     fprintf(f, "home_widget_idx=%d\n", home_widget_idx);
     fprintf(f, "home_widget2_idx=%d\n", home_widget2_idx);
     fprintf(f, "app_widget_kind=%d\n", app_widget_kind);
@@ -9340,7 +9371,8 @@ void ensure_rom_folders() {
 }
 
 // Creates every per-system asset folder for every platform:
-//   assets/backgrounds/<system>/            -- full-window background art
+//   assets/backgrounds/{4x3,3x2}/<system>/  -- panel-specific background art
+//   assets/backgrounds/<system>/            -- legacy installs only
 //   assets/icons/<style>/<system>/          -- platform badge per carousel/grid/list/bookshelf
 //   assets/icons/bookshelf/background/      -- the one bookshelf-view backdrop
 //   boxart/<system>/<art_type>/             -- scraped cover art (boxart/fanart/...)
@@ -9357,6 +9389,13 @@ void ensure_asset_folders() {
     char bgbase[540];
     snprintf(bgbase, sizeof(bgbase), "%s/backgrounds", base);
     mkdir(bgbase, 0755);
+    // Create the two roots without opting every legacy system into an empty
+    // variant folder. A system opts in when its first ratio folder is added.
+    for (int ratio = 0; ratio < 2; ratio++) {
+        char path[620];
+        snprintf(path, sizeof path, "%s/%s", bgbase, ratio ? "3x2" : "4x3");
+        mkdir(path, 0755);
+    }
     for (int i = 0; i < PLATFORM_COUNT; i++) {
         char path[620];
         snprintf(path, sizeof(path), "%s/%s", bgbase, platform_dirs[i]);
@@ -10366,35 +10405,8 @@ void invalidate_carousel_bg(int platform); // defined below
 // Loads bg.png/icon.png for whichever platform is now selected, replacing
 // whatever was loaded before. Textures are NULL (not an error) if the files
 // don't exist yet -- the renderer falls back to a plain themed panel.
-// Fills filenames[] with every image file in a platform's background folder.
-// Used by both the picker screen and load_platform_assets (to validate a
-// saved choice still exists).
-int list_backgrounds_for_platform(int platform, char filenames[][256], int max_count) {
-    char dirpath[600];
-    snprintf(dirpath, sizeof(dirpath), "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[platform]);
-    DIR *d = opendir(dirpath);
-    if (!d) return 0;
-    struct dirent *entry;
-    int count = 0;
-    while ((entry = readdir(d)) != NULL && count < max_count) {
-        // Windows may materialize NTFS download metadata as a visible
-        // "photo.jpg:Zone.Identifier" sidecar on Linux/FAT filesystems.
-        // It is not artwork; purge it during every background scan so it can
-        // never appear in the picker or survive an imported wallpaper.
-        if (strstr(entry->d_name, ":Zone.Identifier")) {
-            char metadata_path[1024];
-            snprintf(metadata_path, sizeof metadata_path, "%s/%s", dirpath, entry->d_name);
-            remove(metadata_path);
-            continue;
-        }
-        if (has_ext(entry->d_name, ".png") || has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
-            snprintf(filenames[count], 256, "%s", entry->d_name);
-            count++;
-        }
-    }
-    closedir(d);
-    return count;
-}
+// The picker, renderer and file actions share the same panel-specific folder.
+#include "background_variants.h"
 
 static void background_human_name(const char *filename, char *out, size_t outsz) {
     snprintf(out, outsz, "%s", filename ? filename : "Background");
@@ -10411,8 +10423,9 @@ static void refresh_background_picker(void) {
         background_details[i][0] = '\0';
 
         char sidecar[900];
-        snprintf(sidecar, sizeof sidecar, "%s/assets/backgrounds/%s/%s.license.txt",
-                 sn_data_root(), platform_dirs[bg_picker_platform], background_files[i]);
+        char image_path[850];
+        if (!background_file_path(bg_picker_platform, background_files[i], image_path, sizeof image_path)) continue;
+        snprintf(sidecar, sizeof sidecar, "%s.license.txt", image_path);
         FILE *f = fopen(sidecar, "r");
         if (!f) continue;
         char line[1000], creator[96] = "", resolution[40] = "", category[48] = "", stats[96] = "";
@@ -10440,6 +10453,62 @@ static void refresh_background_picker(void) {
     }
 }
 
+static void bg_picker_clear_preview(void) {
+    if (bg_picker_preview_tex) {
+        SDL_DestroyTexture(bg_picker_preview_tex);
+        bg_picker_preview_tex = NULL;
+    }
+    bg_picker_preview_index = -1;
+    bg_picker_preview_file[0] = '\0';
+}
+
+static int bg_picker_preview_matches_selection(void) {
+    if (background_picker_selected <= 0 || background_picker_selected > background_file_count) return 0;
+    int bi = background_picker_selected - 1;
+    return bg_picker_preview_index == background_picker_selected &&
+           strcmp(bg_picker_preview_file, background_files[bi]) == 0;
+}
+
+static int bg_picker_preview_selected(SDL_Renderer *ren) {
+    if (background_picker_selected <= 0 || background_picker_selected > background_file_count) return 0;
+    int bi = background_picker_selected - 1;
+    char path[1200];
+    if (!background_file_path(bg_picker_platform, background_files[bi], path, sizeof path)) {
+        snprintf(bg_picker_status, sizeof bg_picker_status, "Could not open this background.");
+        bg_picker_clear_preview();
+        return 0;
+    }
+    bg_picker_clear_preview();
+    bg_picker_preview_tex = load_scaled_texture(ren, path, 1280);
+    if (!bg_picker_preview_tex) {
+        snprintf(bg_picker_status, sizeof bg_picker_status, "Could not preview this background.");
+        return 0;
+    }
+    bg_picker_preview_index = background_picker_selected;
+    snprintf(bg_picker_preview_file, sizeof bg_picker_preview_file, "%s", background_files[bi]);
+    snprintf(bg_picker_status, sizeof bg_picker_status, "Previewing %.96s. Press A again to save.",
+             background_titles[bi][0] ? background_titles[bi] : background_files[bi]);
+    return 1;
+}
+
+static void bg_picker_open_for_system(int platform, AppState return_state) {
+    if (platform < 0 || platform >= PLATFORM_COUNT) platform = platform_selected;
+    bg_picker_platform = platform;
+    bg_picker_return_state = return_state;
+    bg_picker_status[0] = '\0';
+    bg_delete_confirm_index = -1;
+    bg_delete_confirm_until = 0;
+    bg_picker_clear_preview();
+    refresh_background_picker();
+    background_picker_selected = 0;
+    for (int bi = 0; bi < background_file_count; bi++) {
+        if (strcmp(background_files[bi], platform_bg_choice[bg_picker_platform]) == 0) {
+            background_picker_selected = bi + 1;
+            break;
+        }
+    }
+}
+
 static void background_sidecar_set_title(const char *path, const char *title) {
     char tmp[920]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *in = fopen(path, "r");
@@ -10460,7 +10529,7 @@ static void rename_selected_background(void) {
     int bi = background_picker_selected - 1;
     const char *oldname = background_files[bi];
     const char *ext = strrchr(oldname, '.');
-    if (!ext || (!has_ext(oldname, ".png") && !has_ext(oldname, ".jpg") && !has_ext(oldname, ".jpeg"))) ext = ".jpg";
+    if (!ext || !background_filename_valid(oldname)) ext = ".jpg";
 
     char stem[112]; int n = 0, pending_space = 0;
     for (int i = 0; kb_buffer[i] && n < (int)sizeof(stem) - 1; i++) {
@@ -10477,7 +10546,7 @@ static void rename_selected_background(void) {
     char newname[256], dir[700], oldpath[980], newpath[980], oldside[1000], newside[1000];
     snprintf(newname, sizeof newname, "%s%s", stem, ext);
     if (!strcmp(oldname, newname)) { snprintf(bg_picker_status, sizeof bg_picker_status, "That background already has this name."); return; }
-    snprintf(dir, sizeof dir, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    if (!background_directory(bg_picker_platform, dir, sizeof dir)) return;
     snprintf(oldpath, sizeof oldpath, "%s/%s", dir, oldname);
     snprintf(newpath, sizeof newpath, "%s/%s", dir, newname);
     if (access(newpath, F_OK) == 0) { snprintf(bg_picker_status, sizeof bg_picker_status, "A background with that name already exists."); return; }
@@ -10506,7 +10575,7 @@ static void delete_selected_background(void) {
     char filename[256], title[128], dir[700], path[980], sidecar[1000], zone[1024];
     snprintf(filename, sizeof filename, "%s", background_files[bi]);
     snprintf(title, sizeof title, "%.127s", background_titles[bi][0] ? background_titles[bi] : filename);
-    snprintf(dir, sizeof dir, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    if (!background_directory(bg_picker_platform, dir, sizeof dir)) return;
     snprintf(path, sizeof path, "%s/%s", dir, filename);
     snprintf(sidecar, sizeof sidecar, "%s.license.txt", path);
     if (remove(path) != 0) {
@@ -10615,7 +10684,7 @@ static void bg_online_read_results(void) {
 static void bg_online_search(SDL_Renderer *ren) {
     char results[700], receipt[700], dest[700], previews[700], quoted_query[420], command[2400];
     bg_online_paths(results, sizeof results, receipt, sizeof receipt);
-    snprintf(dest, sizeof dest, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    if (!background_download_directory(bg_picker_platform, dest, sizeof dest)) return;
     snprintf(previews, sizeof previews, "%s/cache/background-previews", sn_data_root());
     mkdir(previews, 0755);
     shell_quote_arg(bg_online_query[0] ? bg_online_query : platform_names[bg_picker_platform], quoted_query, sizeof quoted_query);
@@ -10639,7 +10708,7 @@ static void bg_online_search(SDL_Renderer *ren) {
 static int bg_online_download(SDL_Renderer *ren, int index) {
     char results[700], receipt[700], dest[700], command[2400];
     bg_online_paths(results, sizeof results, receipt, sizeof receipt);
-    snprintf(dest, sizeof dest, "%s/assets/backgrounds/%s", sn_data_root(), platform_dirs[bg_picker_platform]);
+    if (!background_download_directory(bg_picker_platform, dest, sizeof dest)) return 0;
     remove(receipt);
     draw_progress(ren, "Downloading background", 0.25f);
     snprintf(command, sizeof command,
@@ -10668,6 +10737,7 @@ static int bg_online_download(SDL_Renderer *ren, int index) {
 }
 
 void load_platform_assets(SDL_Renderer *ren, int platform) {
+    background_sync_screen();
     if (platform_assets_loaded_for == platform) return; // already current, skip disk hits
 
     // Was: destroy platform_bg_tex and re-decode the JPEG/PNG from disk on
@@ -10691,38 +10761,24 @@ void load_platform_assets(SDL_Renderer *ren, int platform) {
 // anything out -- all three slots stay loaded simultaneously since the
 // carousel shows them all on screen at once.
 void ensure_carousel_bg_loaded(SDL_Renderer *ren, int platform) {
+    background_sync_screen();
+    if (platform < 0 || platform >= PLATFORM_COUNT) return;
     if (platform_bg_cache_attempted[platform]) return;
     platform_bg_cache_attempted[platform] = 1;
 
-    char home[256];
-    snprintf(home, sizeof(home), "%s", sn_data_root());
-    char dirpath[600];
-    snprintf(dirpath, sizeof(dirpath), "%s/assets/backgrounds/%s", home, platform_dirs[platform]);
-
-    if (platform_bg_choice[platform][0] != '\0') {
-        char path[900];
-        snprintf(path, sizeof(path), "%s/%s", dirpath, platform_bg_choice[platform]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fclose(f);
+    char filenames[MAX_BG_FILES][256], path[1200];
+    int count = list_backgrounds_for_platform(platform, filenames, MAX_BG_FILES);
+    // A saved filename is valid only if it appears in this panel's list.
+    for (int i = 0; i < count; i++) {
+        if (!strcmp(filenames[i], platform_bg_choice[platform]) &&
+            background_file_path(platform, filenames[i], path, sizeof path)) {
             platform_bg_cache[platform] = load_scaled_texture(ren, path, 1024);
+            break;
         }
     }
-    if (!platform_bg_cache[platform]) {
-        DIR *d = opendir(dirpath);
-        if (d) {
-            struct dirent *entry;
-            while ((entry = readdir(d)) != NULL) {
-                if (has_ext(entry->d_name, ".svg") || has_ext(entry->d_name, ".png") ||
-                    has_ext(entry->d_name, ".jpg") || has_ext(entry->d_name, ".jpeg")) {
-                    char path[900];
-                    snprintf(path, sizeof(path), "%s/%s", dirpath, entry->d_name);
-                    platform_bg_cache[platform] = load_scaled_texture(ren, path, 1024);
-                    if (platform_bg_cache[platform]) break;
-                }
-            }
-            closedir(d);
-        }
+    for (int i = 0; i < count && !platform_bg_cache[platform]; i++) {
+        if (background_file_path(platform, filenames[i], path, sizeof path))
+            platform_bg_cache[platform] = load_scaled_texture(ren, path, 1024);
     }
 }
 
@@ -11768,6 +11824,36 @@ static void refresh_game_art(void) {
         games[i].box_art=games[i].box_shadow=NULL;games[i].art_q_state=0;
     }
     art_ring_n=art_ring_head=0;
+}
+
+static void remove_loaded_game_at(SDL_Renderer *ren, int idx) {
+    (void)ren;
+    if (idx < 0 || idx >= game_count) return;
+
+    char removed_path[sizeof games[0].path];
+    char removed_dir[sizeof games[0].platform_dir];
+    snprintf(removed_path, sizeof removed_path, "%s", games[idx].path);
+    snprintf(removed_dir, sizeof removed_dir, "%s", games[idx].platform_dir);
+
+    if (games[idx].box_art) SDL_DestroyTexture(games[idx].box_art);
+    if (games[idx].box_shadow) SDL_DestroyTexture(games[idx].box_shadow);
+    for (int i = idx; i < game_count - 1; i++) games[i] = games[i + 1];
+    memset(&games[game_count - 1], 0, sizeof games[game_count - 1]);
+    game_count--;
+
+    int p = platform_index_for_dir(removed_dir);
+    if (p >= 0 && platform_game_count_cache[p] > 0) platform_game_count_cache[p]--;
+    art_async_reset();
+    art_ring_n = art_ring_head = 0;
+
+    if (library_index) {
+        for (int i = 0; i < library_index_count; i++) {
+            if (strcmp(library_index[i].path, removed_path) != 0) continue;
+            for (int j = i; j < library_index_count - 1; j++) library_index[j] = library_index[j + 1];
+            library_index_count--;
+            break;
+        }
+    }
 }
 
 static void rescan_active_games(SDL_Renderer *ren, TTF_Font *label) {
@@ -13836,7 +13922,7 @@ void factory_reset() {
     home_view_idx = 0;
     home_icon_pack_idx = 0;
     show_empty_systems = 0;
-    platform_grid_cols = 3; platform_grid_rows = 2; carousel_titles_on = 1;
+    platform_grid_cols = 3; platform_grid_rows = 2; carousel_titles_on = 1; single_card_title_side = 0;
     list_bar_color_idx = LIST_BAR_THEME; list_frame_color_idx = 3; list_text_color_idx = 0;
     hud_chrome_style = 0; hud_chrome_color_idx = 0;
     global_font_color_idx = 0; hud_font_color_idx = 0;
@@ -13855,7 +13941,7 @@ void restore_display_group(int which) {
         theme_idx = 0; font_choice_idx = 5; font_size_idx = 1; global_font_color_idx = 0; font_bold = 0;
         reload_fonts();
     } else if (which == ROW_DISP_RST_VIEW) {
-        platform_view_style = 1; carousel_titles_on = 1;
+        platform_view_style = 1; carousel_titles_on = 1; single_card_title_side = 0;
         platform_grid_cols = 3; platform_grid_rows = 2;
         list_bar_color_idx = LIST_BAR_THEME; list_frame_color_idx = 3; list_text_color_idx = 0;
         library_view_idx = -1;          // back to following the Systems View
@@ -13914,7 +14000,7 @@ void restore_current_settings_tab(SettingsTab tab) {
         platform_assets_loaded_for = -1; reload_fonts();
     } else if (tab == TAB_GAME) {
         fast_forward_idx = 1; fast_forward_mode = 0; auto_save_games = 0; grid_cols = 1; grid_rows = 1;
-        platform_view_style = 1; carousel_titles_on = 1; show_empty_systems = 0;
+        platform_view_style = 1; carousel_titles_on = 1; single_card_title_side = 0; show_empty_systems = 0;
         platform_grid_cols = 3; platform_grid_rows = 2;
         list_bar_color_idx = LIST_BAR_THEME; list_frame_color_idx = 3; list_text_color_idx = 0;
         display_art_idx = 0;
@@ -18537,7 +18623,8 @@ int main(int argc, char *argv[]) {
                             platform_bg_mode = (platform_bg_mode + qd + BG_MODE_COUNT) % BG_MODE_COUNT;
                             platform_assets_loaded_for = -1;
                         } else if (quickcfg_sel == 3) {
-                            carousel_titles_on = !carousel_titles_on;
+                            if (platform_view_style == 0) single_card_title_side = single_card_title_side ? 0 : 1;
+                            else carousel_titles_on = !carousel_titles_on;
                         }
                         save_settings();
                     }
@@ -18575,11 +18662,20 @@ int main(int argc, char *argv[]) {
                             if (syscfg_sel <= 2) save_system_overrides();
                         }
                         if (e.key.keysym.sym == SDLK_RETURN && syscfg_sel == 3) {
+                            bg_picker_open_for_system(p, STATE_SYSCFG);
+                            play_click();
+                            state = STATE_BG_PICKER;
+                        }
+                        if (e.key.keysym.sym == SDLK_RETURN && syscfg_sel == 4) {
                             sys_override[p].aspect = 0; sys_override[p].rotation = 0; sys_override[p].core = 0;
+                            platform_bg_choice[p][0] = '\0';
                             save_system_overrides();
+                            save_settings();
+                            if (p == platform_selected) platform_assets_loaded_for = -1;
+                            invalidate_carousel_bg(p);
                             play_click();
                         }
-                        if(e.key.keysym.sym==SDLK_RETURN&&syscfg_sel==4){syshelp_open(p);syscfg_level=2;play_click();}
+                        if(e.key.keysym.sym==SDLK_RETURN&&syscfg_sel==5){syshelp_open(p);syscfg_level=2;play_click();}
                     }
                 }
                 else if (state == STATE_HOTKEYS) {
@@ -18816,19 +18912,23 @@ int main(int argc, char *argv[]) {
                     }
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
                         bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
-                        state = STATE_SETTINGS;
+                        bg_picker_clear_preview();
+                        state = bg_picker_return_state;
                     }
                     int picker_count = background_file_count + 1; // first row is the online browser
                     if (e.key.keysym.sym == SDLK_DOWN) {
                         background_picker_selected = (background_picker_selected + 1) % picker_count;
                         bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
+                        bg_picker_clear_preview();
                     }
                     if (e.key.keysym.sym == SDLK_UP) {
                         background_picker_selected = (background_picker_selected - 1 + picker_count) % picker_count;
                         bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
+                        bg_picker_clear_preview();
                     }
                     if (e.key.keysym.sym == SDLK_s && background_picker_selected > 0) {
                         bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
+                        bg_picker_clear_preview();
                         int bi = background_picker_selected - 1;
                         snprintf(kb_buffer, sizeof kb_buffer, "%s", background_files[bi]);
                         char *dot = strrchr(kb_buffer, '.'); if (dot) *dot = '\0';
@@ -18837,6 +18937,7 @@ int main(int argc, char *argv[]) {
                         play_click(); state = STATE_KEYBOARD;
                     }
                     if (e.key.keysym.sym == SDLK_f && background_picker_selected > 0) {
+                        bg_picker_clear_preview();
                         if (bg_delete_confirm_index == background_picker_selected && bg_now <= bg_delete_confirm_until) {
                             play_click();
                             delete_selected_background();
@@ -18852,20 +18953,27 @@ int main(int argc, char *argv[]) {
                     if (e.key.keysym.sym == SDLK_RETURN) {
                         bg_delete_confirm_index = -1; bg_delete_confirm_until = 0; bg_picker_status[0] = '\0';
                         if (background_picker_selected == 0) {
+                            bg_picker_clear_preview();
                             play_click();
                             snprintf(bg_online_query, sizeof bg_online_query, "%s", platform_names[bg_picker_platform]);
                             bg_online_return_state = STATE_BG_PICKER;
                             bg_online_search(ren);
                             state = STATE_BG_ONLINE;
+                        } else if (!bg_picker_preview_matches_selection()) {
+                            bg_picker_preview_selected(ren);
+                            play_click();
                         } else {
                             int bi = background_picker_selected - 1;
                             snprintf(platform_bg_choice[bg_picker_platform], sizeof(platform_bg_choice[bg_picker_platform]),
                                      "%s", background_files[bi]);
                             settings_dirty = 1;
+                            save_settings();
+                            settings_dirty = 0;
                             if (bg_picker_platform == platform_selected) platform_assets_loaded_for = -1; // force reload if it's the platform currently on screen
                             invalidate_carousel_bg(bg_picker_platform);
+                            bg_picker_clear_preview();
                             play_click();
-                            state = STATE_SETTINGS;
+                            state = bg_picker_return_state;
                         }
                     }
                 }
@@ -19304,14 +19412,15 @@ int main(int argc, char *argv[]) {
                                 gopts_confirm_del = 1;
                                 play_click();
                             } else {
-                                const char *dp = games[selected].path;
-                                char dt[256], ddir[16];
+                                char dp[sizeof games[0].path], dt[256], ddir[16];
+                                snprintf(dp, sizeof dp, "%s", games[selected].path);
                                 snprintf(dt, sizeof dt, "%s", games[selected].title);
                                 snprintf(ddir, sizeof ddir, "%s", games[selected].platform_dir);
-                                library_index_invalidate();remove(dp);
+                                int deleted = (remove(dp) == 0);
                                 if (is_favorite(dp)) toggle_favorite(dp, dt, ddir);
                                 int keep = selected;
-                                rescan_active_games(ren, font_label);
+                                if (deleted) remove_loaded_game_at(ren, selected);
+                                else library_index_invalidate();
                                 if (keep >= game_count) keep = game_count - 1;
                                 if (keep < 0) keep = 0;
                                 selected = keep;
@@ -19604,6 +19713,8 @@ int main(int argc, char *argv[]) {
                                 save_settings(); settings_dirty = 0;
                             } else if (rt == ROW_DISP_CAROUSEL_TITLES) {
                                 carousel_titles_on = !carousel_titles_on;
+                            } else if (rt == ROW_DISP_SINGLE_CARD_TITLE_SIDE) {
+                                single_card_title_side = single_card_title_side ? 0 : 1;
                             } else if (rt == ROW_DISP_BG_MODE) {
                                 platform_bg_mode = (platform_bg_mode + dir + BG_MODE_COUNT) % BG_MODE_COUNT;
                                 platform_assets_loaded_for = -1;
@@ -19962,12 +20073,7 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_G_BG_MAKER) {
                                 int m=game_row_extra[settings_selected]; if(m>=0&&m<BG_MAKER_COUNT)bg_maker_open[m]=!bg_maker_open[m]; play_click();
                             } else if (rt == ROW_G_BG_ITEM) {
-                                bg_picker_platform = game_row_extra[settings_selected];
-                                bg_picker_status[0] = '\0';
-                                bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
-                                refresh_background_picker();
-                                background_picker_selected = 0;
-                                for(int bi=0;bi<background_file_count;bi++) if(!strcmp(background_files[bi],platform_bg_choice[bg_picker_platform])){background_picker_selected=bi+1;break;}
+                                bg_picker_open_for_system(game_row_extra[settings_selected], STATE_SETTINGS);
                                 play_click(); state = STATE_BG_PICKER;
                             } else if (rt == ROW_G_BG_RESTORE) {
                                 restore_display_group(ROW_DISP_RST_BG); play_click();
@@ -20025,18 +20131,7 @@ int main(int argc, char *argv[]) {
                             } else if (rt == ROW_DISP_BG_HEADER) {
                                 bg_dropdown_open = !bg_dropdown_open;
                             } else if (rt == ROW_DISP_BG_ITEM) {
-                                bg_picker_platform = disp_row_extra[settings_selected];
-                                bg_picker_status[0] = '\0';
-                                bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
-                                refresh_background_picker();
-                                background_picker_selected = 0;
-                                // Remember where we were: land on the currently-saved choice, not always the top.
-                                for (int bi = 0; bi < background_file_count; bi++) {
-                                    if (strcmp(background_files[bi], platform_bg_choice[bg_picker_platform]) == 0) {
-                                        background_picker_selected = bi + 1;
-                                        break;
-                                    }
-                                }
+                                bg_picker_open_for_system(disp_row_extra[settings_selected], STATE_SETTINGS);
                                 state = STATE_BG_PICKER;
                             } else {
                                 if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
@@ -20230,13 +20325,7 @@ int main(int argc, char *argv[]) {
                             int m = rx_[bgcfg_sel];
                             if (m >= 0 && m < BG_MAKER_COUNT) bg_maker_open[m] = !bg_maker_open[m];
                         } else if (rt == ROW_G_BG_ITEM) {
-                            bg_picker_platform = rx_[bgcfg_sel];
-                            bg_picker_status[0] = '\0';
-                            bg_delete_confirm_index = -1; bg_delete_confirm_until = 0;
-                            refresh_background_picker();
-                            background_picker_selected = 0;
-                            for (int bi = 0; bi < background_file_count; bi++)
-                                if (!strcmp(background_files[bi], platform_bg_choice[bg_picker_platform])) { background_picker_selected = bi + 1; break; }
+                            bg_picker_open_for_system(rx_[bgcfg_sel], STATE_SETTINGS);
                             state = STATE_BG_PICKER;
                         } else if (rt == ROW_G_BG_RESTORE) {
                             restore_display_group(ROW_DISP_RST_BG);
@@ -21472,16 +21561,21 @@ int main(int argc, char *argv[]) {
                     if (card_spacing > cw - 40) card_spacing = cw - 40;   // still overlap like a hand
                     if (card_spacing < 24) card_spacing = 24;
 
+                    int visible_passes = (WIN_W / card_spacing) + 3;
+                    if (visible_passes < 3) visible_passes = 3;
+                    if (visible_passes > half + 1) visible_passes = half + 1;
+
                     // Draw back-to-front by |offset| so the centre card is on top.
-                    for (int pass = half + 1; pass >= 0; pass--) {
+                    for (int pass = visible_passes; pass >= 0; pass--) {
                         for (int oi = 0; oi < g_nplat; oi++) {
                             int p = g_plat[oi];
                             int old_off = carousel_slot_offset_ex(oi, g_prev_ord, 0);
                             int new_off = carousel_slot_offset_ex(oi, g_sel_ord, 1);
                             float off = old_off + (new_off - old_off) * t_eased;
-                            if (fabsf(off) > half + 0.55f) continue;      // parked off-edge -> hidden
+                            if (fabsf(off) > visible_passes + 0.55f) continue;      // off-screen -> hidden
                             int abs_pass = (int)(fabsf(off) + 0.5f);
                             if (abs_pass != pass) continue;
+                            if (!platform_card_cache[p]) continue;
 
                             float scale = 1.0f - 0.10f * fabsf(off);
                             if (scale < 0.7f) scale = 0.7f;
@@ -21508,14 +21602,18 @@ int main(int argc, char *argv[]) {
                     float wheel_cy = (float)WIN_H + wheel_radius - peek;
                     float angle_step = 14.0f;
 
-                    for (int pass = g_nplat / 2; pass >= 0; pass--) {
+                    const int wheel_visible_passes = 8;
+                    int max_pass = (g_nplat / 2 < wheel_visible_passes) ? g_nplat / 2 : wheel_visible_passes;
+                    for (int pass = max_pass; pass >= 0; pass--) {
                         for (int oi = 0; oi < g_nplat; oi++) {
                             int p = g_plat[oi];
                             int old_off = carousel_slot_offset(oi, g_prev_ord);
                             int new_off = carousel_slot_offset(oi, g_sel_ord);
                             float off = old_off + (new_off - old_off) * t_eased;
+                            if (fabsf(off) > wheel_visible_passes + 0.55f) continue;
                             int abs_pass = (int)(fabsf(off) + 0.5f);
                             if (abs_pass != pass) continue;
+                            if (!platform_card_cache[p]) continue;
 
                             float angle = off * angle_step;
                             float rad = angle * (float)M_PI / 180.0f;
@@ -21995,33 +22093,46 @@ int main(int argc, char *argv[]) {
                 int panel_y = 70;
                 int panel_h = WIN_H - panel_y - 48; // reserve the controls line
                 int fade_w = panel_w + 80;
+                int panel_x = single_card_title_side ? WIN_W - panel_w : 0;
+                int fade_x = single_card_title_side ? WIN_W - fade_w : 0;
                 int strip_w = 4;
                 int max_alpha = platform_bg_tex ? 242 : 255;
                 for (int fx = 0; fx < fade_w; fx += strip_w) {
-                    float t = fx < panel_w ? 0.0f : (float)(fx - panel_w) / (float)(fade_w - panel_w);
-                    Uint8 alpha = (Uint8)(max_alpha * (1.0f - t));
+                    int fade_part = fade_w - panel_w;
+                    float alpha_f = 1.0f;
+                    if (single_card_title_side)
+                        alpha_f = fx < fade_part ? (float)fx / (float)fade_part : 1.0f;
+                    else
+                        alpha_f = fx < panel_w ? 1.0f : 1.0f - (float)(fx - panel_w) / (float)fade_part;
+                    if (alpha_f < 0.0f) alpha_f = 0.0f;
+                    if (alpha_f > 1.0f) alpha_f = 1.0f;
+                    Uint8 alpha = (Uint8)(max_alpha * alpha_f);
                     SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, alpha);
-                    SDL_Rect strip = { fx, panel_y, strip_w, panel_h };
+                    SDL_Rect strip = { fade_x + fx, panel_y, strip_w, panel_h };
                     SDL_RenderFillRect(ren, &strip);
                 }
 
                 int cy = panel_y + 16;
-                int cx = 20;
+                int cx = panel_x + 20;
                 int panel_text_w = panel_w - 40;
                 int panel_bottom = panel_y + panel_h - 10;
-                SDL_Rect panel_clip = { 0, panel_y, panel_w, panel_h };
+                int align_right = single_card_title_side ? 1 : 0;
+                SDL_Rect panel_clip = { panel_x, panel_y, panel_w, panel_h };
                 SDL_RenderSetClipRect(ren, &panel_clip);
 
-                // The big system name is this view's title; "System Titles"
-                // turns it off and leaves the maker, year and blurb.
-                if (carousel_titles_on) {
+                // Single Card always needs a clear system identity. The
+                // "System Titles" toggle still applies to the compact system
+                // browser layouts, but this panel should never collapse to
+                // only "ATARI" or "SONY".
+                {
                     char name_lines[MAX_LINES][128];
-                    int name_n = wrap_text(font_small, platform_names[platform_selected], panel_text_w, name_lines);
+                    int name_n = wrap_text(font_small, platform_panel_name(platform_selected), panel_text_w, name_lines);
                     if (name_n > 2) name_n = 2;
                     for (int ni = 0; ni < name_n; ni++) {
                         SDL_Texture *nt = render_text(ren, font_small, name_lines[ni], g_ui_text);
                         int ntw, nth; SDL_QueryTexture(nt, NULL, NULL, &ntw, &nth);
-                        SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ cx, cy, ntw, nth });
+                        int tx = align_right ? cx + panel_text_w - ntw : cx;
+                        SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ tx, cy, ntw, nth });
                         cy += nth + 2;
                     }
                     cy += 2;
@@ -22030,7 +22141,7 @@ int main(int argc, char *argv[]) {
                 SDL_Texture *mt = render_text_fit(ren, font_label, platform_maker[platform_selected], g_ui_dim, panel_text_w);
                 int mtw, mth;
                 SDL_QueryTexture(mt, NULL, NULL, &mtw, &mth);
-                SDL_Rect mdst = { cx, cy, mtw, mth };
+                SDL_Rect mdst = { align_right ? cx + panel_text_w - mtw : cx, cy, mtw, mth };
                 SDL_RenderCopy(ren, mt, NULL, &mdst);
                 cy += mth + 6;
 
@@ -22039,7 +22150,7 @@ int main(int argc, char *argv[]) {
                 SDL_Texture *yt = render_text_fit(ren, font_label, yeartype, g_ui_dim, panel_text_w);
                 int ytw, yth;
                 SDL_QueryTexture(yt, NULL, NULL, &ytw, &yth);
-                SDL_Rect ydst = { cx, cy, ytw, yth };
+                SDL_Rect ydst = { align_right ? cx + panel_text_w - ytw : cx, cy, ytw, yth };
                 SDL_RenderCopy(ren, yt, NULL, &ydst);
                 cy += yth + 8;
 
@@ -22049,7 +22160,7 @@ int main(int argc, char *argv[]) {
                 SDL_Texture *gt = render_text(ren, font_label, countstr, th->accent2);
                 int gtw, gth;
                 SDL_QueryTexture(gt, NULL, NULL, &gtw, &gth);
-                SDL_Rect gdst = { cx, cy, gtw, gth };
+                SDL_Rect gdst = { align_right ? cx + panel_text_w - gtw : cx, cy, gtw, gth };
                 SDL_RenderCopy(ren, gt, NULL, &gdst);
                 cy += gth + 8;
 
@@ -22064,7 +22175,7 @@ int main(int argc, char *argv[]) {
                     SDL_QueryTexture(bt, NULL, NULL, &btw, &bth);
                     int bsw = (int)(btw * body_scale), bsh = (int)(bth * body_scale);
                     if (cy + bsh > panel_bottom) { blurb_cut = 1; break; }
-                    SDL_Rect bdst = { cx, cy, bsw, bsh };
+                    SDL_Rect bdst = { align_right ? cx + panel_text_w - bsw : cx, cy, bsw, bsh };
                     SDL_RenderCopy(ren, bt, NULL, &bdst);
                     cy += bsh + 3;
                 }
@@ -22072,7 +22183,7 @@ int main(int argc, char *argv[]) {
                     SDL_Texture *more = render_text(ren, font_label, "...", g_ui_dim);
                     int mw, mh; SDL_QueryTexture(more, NULL, NULL, &mw, &mh);
                     SDL_RenderCopy(ren, more, NULL,
-                        &(SDL_Rect){ cx, panel_bottom - mh, mw, mh });
+                        &(SDL_Rect){ align_right ? cx + panel_text_w - mw : cx, panel_bottom - mh, mw, mh });
                 }
                 SDL_RenderSetClipRect(ren, NULL);
             }
@@ -22090,12 +22201,14 @@ int main(int argc, char *argv[]) {
             int qhw, qhh; SDL_QueryTexture(qh, NULL, NULL, &qhw, &qhh);
             SDL_RenderCopy(ren, qh, NULL, &(SDL_Rect){ WIN_W/2 - qhw/2, by + 16, qhw, qhh });
 
-            const char *qnames[4] = { "View", "Theme", "Background", "Name Pill" };
+            const char *qnames[4] = { "View", "Theme", "Background", platform_view_style == 0 ? "Title Side" : "Name Pill" };
             char qval[4][40];
             snprintf(qval[0], 40, "%s", view_style_names[platform_view_style % VIEW_STYLE_COUNT]);
             snprintf(qval[1], 40, "%s", themes[theme_idx].name);
             snprintf(qval[2], 40, "%s", bg_mode_names[(platform_bg_mode >= 0 && platform_bg_mode < BG_MODE_COUNT) ? platform_bg_mode : 0]);
-            snprintf(qval[3], 40, "%s", carousel_titles_on ? "On" : "Off");
+            snprintf(qval[3], 40, "%s", platform_view_style == 0
+                     ? single_card_title_side_names[single_card_title_side ? 1 : 0]
+                     : (carousel_titles_on ? "On" : "Off"));
 
             int ry = by + 16 + qhh + 18;
             for (int i = 0; i < 4; i++) {
@@ -22118,6 +22231,14 @@ int main(int argc, char *argv[]) {
             SDL_RenderCopy(ren, qf, NULL, &(SDL_Rect){ WIN_W/2 - qfw/2, by + bh - qfh - 12, qfw, qfh });
 
         } else if (state == STATE_BG_PICKER) {
+            if (bg_picker_preview_tex) {
+                SDL_Rect screen = { 0, 0, WIN_W, WIN_H };
+                SDL_Rect fit = cover_rect_for_texture(bg_picker_preview_tex, screen);
+                SDL_RenderCopy(ren, bg_picker_preview_tex, NULL, &fit);
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, 145);
+                SDL_RenderFillRect(ren, &screen);
+            }
             draw_dock_logo(ren, font_small);
 
             char picker_title[64];
@@ -22155,7 +22276,7 @@ int main(int argc, char *argv[]) {
                     y += rowh;
                 }
                 if (background_file_count == 0) {
-                    SDL_Texture *m = render_text(ren, font_label, "No downloaded backgrounds yet", g_ui_dim);
+                    SDL_Texture *m = render_text(ren, font_label, "No backgrounds for this screen yet", g_ui_dim);
                     int mw, mh; SDL_QueryTexture(m, NULL, NULL, &mw, &mh);
                     SDL_RenderCopy(ren, m, NULL, &(SDL_Rect){ WIN_W/2 - mw/2, y + 8, mw, mh });
                 }
@@ -22166,7 +22287,7 @@ int main(int argc, char *argv[]) {
                 int stw, sth; SDL_QueryTexture(st, NULL, NULL, &stw, &sth);
                 SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ WIN_W/2 - stw/2, WIN_H - sth - 42, stw, sth });
             }
-            SDL_Texture *hint = render_text_fit(ren, font_label, "A  Choose     X  Rename     Y  Delete     B  Back", g_ui_dim, WIN_W - 48);
+            SDL_Texture *hint = render_text_fit(ren, font_label, "A  Preview / Save     X  Rename     Y  Delete     B  Back", g_ui_dim, WIN_W - 48);
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hiw/2, WIN_H - hih - 14, hiw, hih });
 
@@ -23430,7 +23551,8 @@ int main(int argc, char *argv[]) {
                 if (first < 0) first = 0;
                 for (int p = first; p < PLATFORM_COUNT && p < first + vis; p++) {
                     int sel = (p == syscfg_sys);
-                    int overridden = sys_override[p].aspect || sys_override[p].rotation || sys_override[p].core;
+                    int overridden = sys_override[p].aspect || sys_override[p].rotation ||
+                                     sys_override[p].core || platform_bg_choice[p][0];
                     char row[96];
                     snprintf(row, sizeof(row), "%s%s", platform_names[p], overridden ? "   *" : "");
                     SDL_Texture *t = render_text_fit(ren, font_label, row, sel ? g_ui_text : g_ui_dim, WIN_W - hx - 40);
@@ -23460,8 +23582,10 @@ int main(int argc, char *argv[]) {
                     snprintf(rows[2], sizeof(rows[2]), "Core: %s%s", sys_cores[p][c].label, c == 0 ? " (default)" : "");
                 else
                     snprintf(rows[2], sizeof(rows[2]), "Core: Default");
-                snprintf(rows[3], sizeof(rows[3]), "Restore This System");
-                snprintf(rows[4], sizeof(rows[4]), "> Controls & BIOS Help");
+                snprintf(rows[3], sizeof(rows[3]), "Background: %s",
+                         platform_bg_choice[p][0] ? platform_bg_choice[p] : "Default");
+                snprintf(rows[4], sizeof(rows[4]), "Restore This System");
+                snprintf(rows[5], sizeof(rows[5]), "> Controls & BIOS Help");
                 for (int i = 0; i < SYSCFG_EDIT_ROWS; i++) {
                     int sel = (i == syscfg_sel);
                     SDL_Texture *t = render_text_fit(ren, font_label, rows[i], sel ? g_ui_text : g_ui_dim, WIN_W - hx - 40);
@@ -26065,6 +26189,7 @@ int main(int argc, char *argv[]) {
     free_games(ren);
     text_cache_clear();
     if (surprise_box_art) SDL_DestroyTexture(surprise_box_art);
+    bg_picker_clear_preview();
     platform_bg_tex = NULL; // borrows a platform_bg_cache[] slot -- freed by the loop below
     for (int p = 0; p < PLATFORM_COUNT; p++) {
         if (platform_bg_cache[p]) SDL_DestroyTexture(platform_bg_cache[p]);

@@ -7,14 +7,22 @@ when replacing bundled artwork. PNG/JPG/JPEG files are supported; transparent
 PNG is useful for icons. See USER-FOLDERS.md in the release for the full guide.
 
 
-1. assets/backgrounds/<system>/
+1. assets/backgrounds/4x3/<system>/
+   assets/backgrounds/3x2/<system>/
    Full-screen backdrop on the console screen (Single Card / Carousel / Grid
    when Background = Image). Every image here becomes a pickable option in
    Settings > Display > Backgrounds. Downloaded images can have descriptive labels.
-   Size:  1440 x 960 (3:2) is the standard master size. JPG or PNG.
-          1280 x 960 is suitable for a dedicated 4:3 version. Existing
-          1280 x 854 or 960 x 640 images still work. Cover-fit (centre-cropped),
-          so keep important art/text away from the outer edges.
+   Size:  1280 x 960 in 4x3, or 1440 x 960 in 3x2. JPG or PNG.
+          Each screen lists only its matching ratio's folder. Use the same
+          filename in both ratio folders for two versions of the same design.
+          The folder controls visibility, even while images are unfinished.
+          Cover-fit (centre-cropped), so keep important art/text away from edges.
+   Once either ratio contains a system folder, the matching ratio folder is
+   authoritative. An empty/missing matching folder shows no custom backgrounds;
+   it never borrows the other ratio's files or old duplicate images. Keep the
+   README.txt files in empty system folders so this structure survives copying.
+   Legacy assets/backgrounds/<system>/ remains supported only when neither
+   ratio has a folder for that system. You can add more images at any time.
 
 2. assets/icons/carousel/<system>/    (one image)
    The system "card" in Carousel view. Card is 190 x 280 portrait

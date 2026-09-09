@@ -21,7 +21,7 @@ ROOT = Path('/userdata/system/snapos')
 mode, expected = sys.argv[1:3]
 assert re.fullmatch(r'[0-9a-f]{64}', expected), 'Invalid checksum'
 assert ROOT.is_dir() and not ROOT.is_symlink(), 'SNAP directory missing or redirected'
-stage = ROOT / ('.candidate-1.2.9-' + expected[:12])
+stage = ROOT / ('.candidate-1.3.0-' + expected[:12])
 assert not stage.is_symlink()
 
 
@@ -144,7 +144,7 @@ elif mode == 'install':
     safe=require_awake_idle();snaps=[safe['running_pid']]
     before=json.loads((stage/'before.json').read_text())
     assert preserved()==before, 'Assets/input scripts changed during staging; inspect before replacing'
-    backup=Path(tempfile.mkdtemp(prefix='pre-1.2.9-',dir=ROOT))
+    backup=Path(tempfile.mkdtemp(prefix='pre-1.3.0-',dir=ROOT))
     for name in ('snapos_ui','VERSION','settings.cfg','activity.dat','favorites.dat','minigames.dat',
                  'widget-places.cfg','widget-local-city.txt','battery-prompt.cfg','friends.cfg','player-id.txt','fish-helpers.cfg'):
         if (ROOT/name).is_file():shutil.copy2(ROOT/name,backup/name)
@@ -156,8 +156,11 @@ elif mode == 'install':
                  'BOOT-QUOTE-SOURCES.md','boot_quotes.h','audit_system_controls.py'):
         if (docs/name).exists():shutil.copy2(docs/name,backup/name)
         shutil.copy2(stage/name,docs/name)
+    for name in ('scrape_boxart.py',):
+        if (ROOT/name).exists(): shutil.copy2(ROOT/name,backup/name)
+        shutil.copy2(stage/name,ROOT/name)
     os.chmod(binary,0o755)
-    (stage/'VERSION').write_text('Snap FE Alpha Build 1.2.9\nbuilt '+time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())+'\ndevice-test candidate; not a packaged release\n')
+    (stage/'VERSION').write_text('Snap FE Alpha Build 1.3.0\nbuilt '+time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())+'\ndevice-test candidate; not a packaged release\n')
     os.sync()
     # Recheck immediately before the swap, after backups and docs copying.
     final_safe=require_awake_idle()

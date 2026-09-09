@@ -74,18 +74,66 @@ PLATFORMS = {
     "neogeo":  ("Neo Geo", 142),
     "atari2600": ("Atari 2600", 26),
     "fbneo":   ("Arcade", 75),
+    "virtualboy": ("Nintendo Virtual Boy", 11),
+    "wswan": ("Bandai WonderSwan", 45),
+    "wswanc": ("Bandai WonderSwan Color", 46),
+    "ngp": ("SNK Neo Geo Pocket", 25),
+    "ngpc": ("SNK Neo Geo Pocket Color", 82),
+    "lynx": ("Atari Lynx", 28),
+    "atari5200": ("Atari 5200", 40),
+    "atari7800": ("Atari 7800", 41),
+    "atari800": ("Atari 800", 43),
+    "colecovision": ("ColecoVision", 48),
+    "intellivision": ("Mattel Intellivision", 115),
+    "vectrex": ("GCE Vectrex", 102),
+    "msx1": ("Microsoft MSX", 113),
+    "msx2": ("Microsoft MSX2", 116),
+    "zxspectrum": ("Sinclair ZX Spectrum", 76),
+    "amstradcpc": ("Amstrad CPC", 65),
+    "c64": ("Commodore 64", 66),
+    "sg1000": ("Sega SG-1000", 109),
+    "fds": ("Nintendo Famicom Disk System", 106),
+    "pokemini": ("Nintendo Pokemon Mini", 211),
+    "gameandwatch": ("Nintendo Game & Watch", 52),
+    "supervision": ("Watara Supervision", 207),
+    "supergrafx": ("NEC SuperGrafx", 105),
+    "segacd": ("Sega CD", 20),
+    "sega32x": ("Sega 32X", 19),
+    "pcenginecd": ("TurboGrafx CD", 114),
+    "neogeocd": ("SNK Neo Geo CD", 70),
+    "psp": ("Sony PSP", 61),
+    "dreamcast": ("Sega Dreamcast", 23),
+    "saturn": ("Sega Saturn", 22),
+    "amiga500": ("Commodore Amiga", 64),
+    "atarist": ("Atari ST", 42),
+    "mame": ("Arcade", 75),
+    "scummvm": ("ScummVM", 123),
+    "dos": ("DOS", 135),
+    "prboom": ("Doom", 0),
+    "quake": ("Quake", 0),
+    "quake2": ("Quake II", 0),
+    "cavestory": ("Cave Story", 0),
 }
 # extra on-disk folder names that map to the same short name
 DIR_ALIASES = {
     "megadrive": "genesis", "playstation": "psx", "sms": "mastersystem",
-    "tg16": "pcengine", "arcade": "fbneo",
+    "tg16": "pcengine", "arcade": "fbneo", "msx": "msx1", "megacd": "segacd",
 }
 
 ROM_EXTENSIONS = (".gba", ".gbc", ".gb", ".nes", ".fds", ".sfc", ".smc",
                   ".md", ".gen", ".bin", ".smd", ".68k", ".sgd", ".n64",
                   ".z64", ".v64", ".cue", ".chd", ".pbp", ".m3u", ".iso",
                   ".img", ".mdf", ".ecm", ".sms", ".gg", ".pce", ".sgx",
-                  ".neo", ".a26", ".zip", ".7z")
+                  ".neo", ".a26", ".a52", ".a78", ".atr", ".xex", ".cas",
+                  ".car", ".col", ".rom", ".int", ".vec", ".mx1", ".mx2",
+                  ".dsk", ".tzx", ".tap", ".z80", ".sna", ".szx", ".cdt",
+                  ".d64", ".t64", ".prg", ".crt", ".g64", ".sg", ".min",
+                  ".mgw", ".sv", ".32x", ".cdi", ".gdi", ".adf", ".hdf",
+                  ".lha", ".ipf", ".st", ".msa", ".stx", ".dim", ".scummvm",
+                  ".svm", ".dosz", ".conf", ".exe", ".bat", ".wad", ".iwad",
+                  ".pwad", ".pak", ".pk3", ".cso", ".lnx", ".o", ".vb",
+                  ".vboy", ".ws", ".wsc", ".ngp", ".ngpc", ".ngc", ".zip",
+                  ".7z")
 
 SYSTEM_FILTER = {s.strip() for s in (_arg("systems", "") or "").split(",") if s.strip()}
 
@@ -449,7 +497,8 @@ class ScreenScraper:
     def find_game(self, short, title, fname=None):
         sysid = PLATFORMS[short][1]
         params = self._base_params()
-        params["systemeid"] = sysid
+        if sysid:
+            params["systemeid"] = sysid
         params["romtype"] = "rom"
         params["romnom"] = fname or (title + ".zip")
         url = f"{self.API}/jeuInfos.php?{urlencode(params)}"

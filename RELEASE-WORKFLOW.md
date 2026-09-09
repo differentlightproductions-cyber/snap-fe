@@ -6,8 +6,8 @@ From WSL, build and package the requested semantic version:
 
 ```bash
 cd "/mnt/c/Users/NickO/Desktop/Downloads/SNAP OS Backup/snapos-backup/bugfix-work/repo-publish"
-bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot
-bash ./knulli/package.sh 1.2.4
+bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot --cc /usr/bin/aarch64-linux-gnu-gcc
+bash ./knulli/package.sh 1.3.0
 ```
 
 `package.sh` validates the archive, writes its checksum, and—when running in
@@ -24,5 +24,5 @@ release assets. The Markdown release notes are pasted into GitHub's description.
 To recreate or reopen a folder without repackaging, run in PowerShell:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\prepare-release-windows.ps1 -Version 1.2.4 -OpenFolder
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\prepare-release-windows.ps1 -Version 1.3.0 -OpenFolder
 ```

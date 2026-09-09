@@ -282,6 +282,10 @@ static void mgx_net_packet(MgxPacket *p,int type,int game) {
 static void mgx_net_send(const MgxPacket *p,const struct sockaddr_in *to) {
     if(mgx_net.fd>=0 && to) sendto(mgx_net.fd,p,sizeof *p,0,(const struct sockaddr*)to,sizeof *to);
 }
+static void mgx_net_send_redundant(const MgxPacket *p,const struct sockaddr_in *to) {
+    mgx_net_send(p,to);
+    mgx_net_send(p,to);
+}
 
 static int mgx_net_open(int role,int game) {
     mgx_net_close();
@@ -344,7 +348,7 @@ static void mgx_net_send_input(int game,int x,int y,int action,int restart) {
     Uint32 now=SDL_GetTicks(); if(now-mgx_net.last_tx<16)return; mgx_net.last_tx=now;
     MgxPacket p;mgx_net_packet(&p,MGX_PKT_INPUT,game);
     p.d[0]=htons((int16_t)x);p.d[1]=htons((int16_t)y);p.d[2]=htons((int16_t)action);p.d[3]=htons((int16_t)restart);
-    mgx_net_send(&p,&mgx_net.peer);
+    mgx_net_send_redundant(&p,&mgx_net.peer);
 }
 
 static int mgx_pkt_i(const MgxPacket *p,int i){return (int)(int16_t)ntohs((uint16_t)p->d[i]);}
@@ -383,7 +387,7 @@ static float mgx_pong_packet_age(const MgxPacket *p,int sent_word,int echo_word,
     return mgx_pong_sync.clock_valid?mgx_clampf((float)((double)(int32_t)(now-sent)+mgx_pong_sync.clock_offset),0,180):0;
 }
 static void mgx_pong_visual_decay(float ms){
-    float keep=expf(-ms/45.0f);
+    float keep=expf(-ms/90.0f);
     mgx_pong_sync.ball_dx*=keep;mgx_pong_sync.ball_dy*=keep;mgx_pong_sync.paddle_dy*=keep;
 }
 static void mgx_pong_ball_advance(float ms){
@@ -501,7 +505,7 @@ static void mgx_pong_step(int mv){
         if(mgx_pong_launch && SDL_TICKS_PASSED(now,mgx_pong_launch)){pg.started=1;pg.last=now;mgx_pong_launch=0;}
         if(mgx_net.connected){int was_over=pg.over;mgx_pong_host_advance(mv,got!=MGX_PKT_INPUT&&now-mgx_pong_sync.remote_at<180?mgx_pong_remote_mv:0,ms);
             if(!was_over&&pg.over){mgx_pong_round=mgx_pong_round%30000+1;pg.started=0;mgx_pong_ready=mgx_pong_remote_ready=0;}}
-        if(mgx_net.connected&&now-mgx_net.last_tx>=16){mgx_net.last_tx=now;mgx_net_packet(&p,MGX_PKT_STATE,MG_PONG);mgx_pong_write_state(&p,now,mv);mgx_net_send(&p,&mgx_net.peer);}
+        if(mgx_net.connected&&now-mgx_net.last_tx>=16){mgx_net.last_tx=now;mgx_net_packet(&p,MGX_PKT_STATE,MG_PONG);mgx_pong_write_state(&p,now,mv);mgx_net_send_redundant(&p,&mgx_net.peer);}
     }else{
         mgx_pong_client_advance(mv,ms,now);
         if(got==MGX_PKT_STATE)mgx_pong_take_state_at(&p,now);
@@ -509,7 +513,7 @@ static void mgx_pong_step(int mv){
             mgx_net.last_tx=now;mgx_net_packet(&p,MGX_PKT_INPUT,MG_PONG);
             mgx_pkt_set(&p,0,(int)(pg.cpu*10));mgx_pkt_set(&p,1,mv);mgx_pkt_set(&p,2,mgx_pong_ready);mgx_pkt_set(&p,3,mgx_pong_round);
             mgx_pkt_set_u32(&p,4,now);mgx_pkt_set_u32(&p,6,mgx_pong_sync.peer_sent);mgx_pkt_set_u32(&p,8,mgx_pong_sync.peer_received);mgx_pkt_set(&p,10,pg.started);
-            mgx_net_send(&p,&mgx_net.peer);
+            mgx_net_send_redundant(&p,&mgx_net.peer);
         }
     }
 }
@@ -561,7 +565,7 @@ static void mgx_c4_step(void){
     if(mgx_c4_mode==1){
         if(got==MGX_PKT_INPUT && mgx_pkt_i(&p,2)==mgx_c4_ply()+1)mgx_c4_drop(mgx_pkt_i(&p,0),2);
         if(mgx_net.connected && SDL_GetTicks()-mgx_net.last_tx>=30){mgx_net.last_tx=SDL_GetTicks();mgx_net_packet(&p,MGX_PKT_STATE,MG_TTT);
-            for(int i=0;i<42;i++)mgx_pkt_set(&p,i,tt.cell[i]);mgx_pkt_set(&p,42,tt.turn);mgx_pkt_set(&p,43,tt.winner);mgx_net_send(&p,&mgx_net.peer);}
+            for(int i=0;i<42;i++)mgx_pkt_set(&p,i,tt.cell[i]);mgx_pkt_set(&p,42,tt.turn);mgx_pkt_set(&p,43,tt.winner);mgx_net_send_redundant(&p,&mgx_net.peer);}
     }else{
         if(got==MGX_PKT_STATE){int old=mgx_c4_ply();for(int i=0;i<42;i++)tt.cell[i]=mgx_clampi(mgx_pkt_i(&p,i),0,2);
             tt.turn=mgx_clampi(mgx_pkt_i(&p,42),1,2);tt.winner=mgx_clampi(mgx_pkt_i(&p,43),0,3);tt.over=tt.winner!=0;
@@ -1497,7 +1501,7 @@ static void mgx_tank_step(int dx,int dy) {
         }
         if(mgx_tank.over&&!mgx_tank.hp[1]&&!mgx_tank.scored){mg_set_best(MG_TANK,mg_best[MG_TANK]+1);mgx_tank.scored=1;}
     }
-    if(mgx_tank.mode && now-mgx_net.last_tx>=45){mgx_net.last_tx=now;mgx_net_packet(&p,MGX_PKT_STATE,MG_TANK);mgx_tank_state(&p,1);mgx_net_send(&p,&mgx_net.peer);}
+    if(mgx_tank.mode && now-mgx_net.last_tx>=45){mgx_net.last_tx=now;mgx_net_packet(&p,MGX_PKT_STATE,MG_TANK);mgx_tank_state(&p,1);mgx_net_send_redundant(&p,&mgx_net.peer);}
 }
 static void mgx_tank_render(SDL_Renderer *ren) {
     Theme *th=mg_theme();mg_chrome(ren,"TANK DUEL");

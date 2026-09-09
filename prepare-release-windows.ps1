@@ -102,7 +102,7 @@ $claudeHandoff = @"
 ## Verified build and deployment commands (run from WSL)
 
     cd "/mnt/c/Users/NickO/Desktop/Downloads/SNAP OS Backup/snapos-backup/bugfix-work/repo-publish"
-    bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot
+    bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot --cc /usr/bin/aarch64-linux-gnu-gcc
     bash ./knulli/deploy.sh root@192.168.4.29
     bash ./knulli/package.sh $Version
 
