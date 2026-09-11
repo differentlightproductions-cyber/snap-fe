@@ -52,6 +52,7 @@ EXTRA=""
 [ -f background_browser.py ] && EXTRA="$EXTRA background_browser.py"
 [ -f ra_achievements.py ] && EXTRA="$EXTRA ra_achievements.py"
 [ -f weather_service.py ] && EXTRA="$EXTRA weather_service.py"
+[ -f snapfe_update.py ] && EXTRA="$EXTRA snapfe_update.py"
 [ -f brightness-hotkey.sh ] || { echo "missing brightness-hotkey.sh" >&2; exit 1; }
 EXTRA="$EXTRA brightness-hotkey.sh"
 [ -f volume-gate.sh ] || { echo "missing volume-gate.sh" >&2; exit 1; }

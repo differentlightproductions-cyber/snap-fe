@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
     [string]$Version,
 
     [switch]$OpenFolder
@@ -31,16 +31,22 @@ $target = Join-Path $downloads "SNAP-FE-$Version-READY-TO-PUBLISH"
 
 Copy-Item -LiteralPath $zipPath -Destination (Join-Path $target $zipName) -Force
 Copy-Item -LiteralPath $sumPath -Destination (Join-Path $target $sumName) -Force
+# latest.json feeds Snap FE's in-app Check for Updates (1.3.2 and later).
+$jsonPath = Join-Path $repoRoot 'dist\latest.json'
+$hasJson = Test-Path -LiteralPath $jsonPath -PathType Leaf
+if ($hasJson) { Copy-Item -LiteralPath $jsonPath -Destination (Join-Path $target 'latest.json') -Force }
+$jsonLine = if ($hasJson) { "  3. latest.json   (Snap FE's Check for Updates reads this)" } else { '' }
 Copy-Item -LiteralPath $notesPath -Destination (Join-Path $target $notesName) -Force
 
 $publishInstructions = @"
 SNAP FE $Version - READY TO PUBLISH
 ==================================
 
-Upload ONLY these two files to the GitHub release:
+Upload ONLY these files to the GitHub release:
 
   1. $zipName
   2. $sumName
+$jsonLine
 
 GitHub release fields:
 
@@ -57,7 +63,7 @@ instruction file or the Claude handoff file.
 
 Final check before Publish release:
 
-  - ZIP and checksum both appear in the attachment list.
+  - ZIP, checksum and latest.json all appear in the attachment list.
   - The title and tag show $Version.
   - The description includes the Updating section.
   - Latest is selected.
@@ -142,7 +148,7 @@ SNAP FE $Version
 START HERE:
 
 1. Read PUBLISH-INSTRUCTIONS.txt to publish this release yourself.
-2. Upload only the ZIP and SHA256SUMS files.
+2. Upload only the ZIP, SHA256SUMS and latest.json files.
 3. $notesName is text to paste into GitHub, not an attachment.
 4. CLAUDE-HANDOFF-DO-NOT-UPLOAD.md is private context for your next coding
    assistant and must not be attached to a public release.

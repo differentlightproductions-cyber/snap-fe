@@ -19,6 +19,9 @@ MODIFIER_STATE=/tmp/snapfe-brightness-modifier
 TRIGGER_CFG=/etc/triggerhappy/triggers.d/multimedia_keys.conf
 TRIGGER_BACKUP=/userdata/system/snapos/triggerhappy-multimedia_keys.stock
 TRIGGER_OVERLAY=/userdata/system/snapos/triggerhappy-multimedia_keys.snapfe
+# Settings > Check for Updates keeps what an update replaced here (tests move it).
+UPDATE_ROOT=${SNAPFE_UPDATE_ROOT:-/userdata}
+UPDATE_DIR=$UPDATE_ROOT/system/snapos/update
 
 # Link Play needs newer gpSP/Gambatte serial transports than the stock cores on
 # some Knulli images. Keep the shipped copies on /userdata (persistent), back
@@ -103,7 +106,12 @@ init_audio() {
 
   /etc/init.d/S27audioconfig start >/dev/null 2>&1   # knulli-audio profile/sink/volume
   knulli-audio set auto            >/dev/null 2>&1   # h700: routes to the internal codec
-  knulli-audio setSystemVolume 90  >/dev/null 2>&1
+  # Start at the player's saved Snap FE volume, not a fixed level: the boot
+  # chime plays moments later. 90 only on a fresh install with nothing saved.
+  vol=$(sed -n 's/^sys_volume_pct=\([0-9][0-9]*\)$/\1/p' /userdata/system/snapos/settings.cfg 2>/dev/null | tail -n 1)
+  case "$vol" in ''|*[!0-9]*) vol=90 ;; esac
+  [ "$vol" -gt 100 ] && vol=100
+  knulli-audio setSystemVolume "$vol" >/dev/null 2>&1
   amixer -c 0 sset 'SPK' unmute on           >/dev/null 2>&1
   amixer -c 0 sset 'LINEOUT' unmute on       >/dev/null 2>&1   # 3.5mm jack path (H700 shares lineout)
   amixer -c 0 sset 'digital volume' 63       >/dev/null 2>&1
@@ -169,6 +177,43 @@ prewarm_game_launcher() {
   ) &
 }
 
+# Put back what the last update replaced and remove what it added. Plain shell
+# on purpose: it has to work even when the new version's files are what broke.
+restore_previous_update() {
+  prev="$UPDATE_DIR/previous"
+  [ -f "$prev/backup.json" ] || return 1
+  if [ -f "$prev/added.txt" ]; then
+    while IFS= read -r rel; do
+      case "$rel" in ''|/*|../*|*/../*|*/..) continue ;; esac
+      rm -f "$UPDATE_ROOT/$rel"
+    done < "$prev/added.txt"
+  fi
+  if [ -d "$prev/files" ]; then
+    ( cd "$prev/files" && find . -type f ) | while IFS= read -r rel; do
+      rel=${rel#./}
+      mkdir -p "$(dirname "$UPDATE_ROOT/$rel")"
+      mv -f "$prev/files/$rel" "$UPDATE_ROOT/$rel"
+    done
+  fi
+  rm -rf "$prev"
+}
+
+# A freshly updated Snap FE clears $UPDATE_DIR/pending once its menu has been up
+# for a few seconds. Started twice without doing that, it is not working: put
+# the previous version back, and leave a note Snap FE shows on its next start.
+update_guard() {
+  [ -f "$UPDATE_DIR/pending" ] || return 0
+  tries=$(cat "$UPDATE_DIR/tries" 2>/dev/null)
+  case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+  if [ "$tries" -ge 2 ]; then
+    failed=$(head -n 1 "$UPDATE_DIR/pending" 2>/dev/null)
+    restore_previous_update && printf '%s\n' "$failed" > "$UPDATE_DIR/auto-rollback"
+    rm -f "$UPDATE_DIR/pending" "$UPDATE_DIR/tries"
+    return 0
+  fi
+  echo $((tries + 1)) > "$UPDATE_DIR/tries"
+}
+
 run_snapos() {
   cd /userdata/system/snapos || return 1
   if [ -x "$SNAPOS" ]; then "$SNAPOS"; else "$LOADER" "$SNAPOS"; fi
@@ -228,6 +273,7 @@ case "$1" in
       prewarm_game_launcher # low-priority work overlaps SNAP's branded intro
       while true; do
         kill_es
+        update_guard        # a new version that never starts properly is rolled back
         run_snapos
         sleep 1             # Snap FE exited/crashed -> relaunch it, never ES
       done

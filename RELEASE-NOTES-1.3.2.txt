@@ -1,0 +1,39 @@
+Snap FE Alpha 1.3.2
+
+For Knulli on Allwinner H700 handhelds (tested on RG34XX-SP and RG35XX-SP).
+A frontend add-on; it does not replace or reflash Knulli.
+
+NEW
+- Check for Updates (Settings > Device): Snap FE finds the newest release on
+  GitHub, shows what's new, and downloads, checks and installs it for you.
+  Your settings, games, saves and art are never touched, and if a new version
+  doesn't start properly the previous one comes back automatically. Roll Back
+  Previous Update (Settings > Device > System) does the same by hand.
+- Snappy Game Launch: after the first game on a system, the next ones start in
+  a moment instead of several seconds. Snap FE replays the setup Knulli made
+  last time whenever nothing it depends on has changed, and uses Knulli's
+  normal launch whenever something has. Settings > Device > Performance turns
+  it off.
+
+FIXED
+- Snappy launches keep everything Knulli does for a game: its power-mode,
+  display, LED and battery hooks, RetroArch's priority, and the system border
+  on 4:3 screens, even after a reboot.
+- Changing the volume or brightness no longer makes the next game launch slowly.
+- The boot chime plays at your saved volume instead of nearly full volume.
+
+INSTALL OR UPDATE
+From 1.3.2 on: Settings > Device > Check for Updates.
+
+To install or update from a computer:
+1. Download SnapFE-Alpha-1.3.2.zip from this release's Assets (not the Source
+   code archive). SHA256SUMS-1.3.2.txt verifies it.
+2. New Knulli card: boot it once first so it creates SHARE, then power off.
+3. Put the card in your PC and extract the ZIP directly onto SHARE. Choose
+   Merge / Replace. Do not delete SHARE/system/snapos first.
+4. Boot, open PORTS, and run "Snap FE (Set As Default)" once.
+
+The package has no ROMs, BIOS, saves, settings, favorites, account keys or
+scraped art, so an update keeps yours. Wildkins saves in SHARE/saves/wildkins
+are kept. Bundled artwork with the same filename is replaced, so back up any
+you customized. Full steps: INSTALL.txt and UPDATING.md in the ZIP.

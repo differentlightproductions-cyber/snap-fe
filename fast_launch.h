@@ -1,5 +1,6 @@
 #ifndef SNAPFE_FAST_LAUNCH_H
 #define SNAPFE_FAST_LAUNCH_H
+#include <sys/resource.h>
 /* Fast Game Launch.
  *
  * Knulli starts every game through its Python launcher (configgen), which
@@ -33,6 +34,16 @@ static char fl_es_settings[512] = "/userdata/system/configs/emulationstation/es_
 static int fl_require_retroarch = 1;   /* tests record an ordinary process */
 static char fl_evmapy_dir[512] = "/var/run/evmapy";   /* evmapy reads every key map in here */
 static char fl_scratch_dir[512] = "/tmp/snapfe-fast";  /* this launch's settings files, for the log */
+/* Knulli's launcher runs every executable in these with "gameStart" before a
+   game and "gameStop" after it: its power-mode, framebuffer-flush, power-LED
+   and battery-saver hooks, and any the player adds. A fast launch runs them
+   the same way. Knulli's own folder first; Batocera's where a build has one. */
+static char fl_system_scripts[512] = "/usr/share/knulli/configgen/scripts";
+static char fl_system_scripts2[512] = "/usr/share/batocera/configgen/scripts";
+static char fl_user_scripts[512] = "/userdata/system/scripts";
+/* RetroArch's --verbose log for a fast launch (tmpfs, fresh each launch); a
+   launch through Knulli writes /tmp/snapfe-game-normal.log the same way. */
+static char fl_game_log[512] = "/tmp/snapfe-game-fast.log";
 /* The in-game RetroArch preferences SNAP carries in knulli.conf (save slot,
    volume, ...): their values don't call for a new recording. */
 #ifdef SNAPOS_TARGET_KNULLI
@@ -50,6 +61,7 @@ static int (*fl_user_setting)(const char *key) = NULL;   /* tests supply their o
 
 typedef struct {
     char exe[512], cwd[512];
+    int nice, has_nice;                 /* Knulli starts RetroArch at nice -4 */
     int argc, envc;
     char *argv[FL_MAX_ARGS + 1];
     char *envp[FL_MAX_ENV + 1];
@@ -59,6 +71,7 @@ typedef struct {
     char core[64], rom[640];
     char inputs[20], inputs2[20];       /* settings files before Knulli's launcher ran, and as it left them */
     char sig[1536];                     /* controllers and input devices, kept for the log */
+    char sys[64], core_name[128], run_rom[640];   /* this launch, for Knulli's game scripts */
     FlProc game;                        /* RetroArch */
     int helperc;
     FlProc helper[FL_MAX_HELPERS];      /* started first, stopped when the game ends */
@@ -174,6 +187,19 @@ static int fl_kv(const char *line, char *key, size_t kcap, char *val, size_t vca
     val[vl] = 0;
     return 1;
 }
+/* Device state Knulli keeps in knulli.conf that changes all the time (every
+   volume or brightness press) and that it doesn't build a game session from. */
+static int fl_is_state_key(const char *key, size_t len) {
+    static const char *keys[] = { "audio.volume", "display.brightness", NULL };
+    for (int i = 0; keys[i]; i++)
+        if (strlen(keys[i]) == len && !strncmp(key, keys[i], len)) return 1;
+    return 0;
+}
+static int fl_is_state_line(const char *line) {
+    while (*line == ' ' || *line == '\t') line++;
+    const char *eq = strchr(line, '=');
+    return eq && fl_is_state_key(line, (size_t)(eq - line));
+}
 static int fl_is_user_line(const char *line) {
     char k[160], v[1024];
     return fl_user_setting && !strncmp(line, "global.retroarch.", 17) &&
@@ -200,7 +226,7 @@ static uint64_t fl_hash_knulli(uint64_t h) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
         char *eq = strchr(p, '=');
-        if (!*p || *p == '#' || !eq) continue;
+        if (!*p || *p == '#' || !eq || fl_is_state_key(p, (size_t)(eq - p))) continue;
         if (n == cap) {
             int grown_cap = cap ? cap * 2 : 256;
             FlConfLine *grown = realloc(lines, (size_t)grown_cap * sizeof *grown);
@@ -402,6 +428,17 @@ static int fl_read_proc(pid_t pid, FlProc *p, char *buf, size_t bufcap, char *wh
     snprintf(path, sizeof path, "/proc/%d/cwd", (int)pid);
     n = readlink(path, p->cwd, sizeof p->cwd - 1);
     p->cwd[n > 0 ? n : 0] = 0;
+    /* Its priority: field 19 of /proc/<pid>/stat, the 17th after the name. */
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    if (fl_read_file(path, buf, bufcap) > 0) {
+        char *close = strrchr(buf, ')');
+        long nice_value;
+        if (close && sscanf(close + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*u %*d %*d %*d %ld",
+                            &nice_value) == 1) {
+            p->nice = (int)nice_value;
+            p->has_nice = 1;
+        }
+    }
     return 1;
 }
 
@@ -481,17 +518,18 @@ static int fl_rom_index(const FastLaunch *fl) {
 static void fl_collect_files(FastLaunch *fl) {
     fl_arg_paths(&fl->game, fl_rom_index(fl), fl_add_file_cb, fl);
     for (int h = 0; h < fl->helperc; h++) fl_arg_paths(&fl->helper[h], -1, fl_add_file_cb, fl);
-    /* RetroArch's config names the core-options file it reads next. */
+    /* Files the configs themselves name: RetroArch's core-options file, and the
+       runtime files Knulli writes per launch -- the system's bezel overlay and
+       its image in /tmp, which a reboot clears. Never the player's own files. */
     for (int i = 0; i < fl->filec; i++) {
         FILE *f = fopen(fl->file[i], "r");
         if (!f) continue;
-        char line[1024];
+        char line[2048], k[160], v[1024];
         while (fgets(line, sizeof line, f)) {
-            char *k = line;
-            while (*k == ' ' || *k == '\t') k++;
-            if (strncmp(k, "core_options_path", 17)) continue;
-            char *q1 = strchr(k, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
-            if (q1 && q2 && q2 > q1 + 1) { *q2 = 0; fl_add_file(fl, q1 + 1); }
+            if (!fl_kv(line, k, sizeof k, v, sizeof v) || v[0] != '/') continue;
+            if (!strcmp(k, "core_options_path") || !strncmp(v, "/tmp/", 5) ||
+                !strncmp(v, "/var/run/", 9) || !strncmp(v, "/run/", 5))
+                fl_add_file(fl, v);
         }
         fclose(f);
     }
@@ -499,6 +537,7 @@ static void fl_collect_files(FastLaunch *fl) {
 
 static void fl_write_proc(FILE *f, const char *kind, const FlProc *p) {
     fprintf(f, "proc=%s\nexe=%s\ncwd=%s\n", kind, p->exe, p->cwd);
+    if (p->has_nice) fprintf(f, "nice=%d\n", p->nice);
     for (int i = 0; i < p->argc; i++) fprintf(f, "arg=%s\n", p->argv[i]);
     for (int i = 0; i < p->envc; i++) fprintf(f, "env=%s\n", p->envp[i]);
 }
@@ -509,7 +548,7 @@ static int fl_write_entry(const char *key, const FastLaunch *fl) {
     fl_mkdirs(path);
     FILE *f = fopen(tmp, "w");
     if (!f) return 0;
-    fprintf(f, "SNAPFAST 6\ncore=%s\nrom=%s\ninputs=%s\ninputs2=%s\nsig=%s\n",
+    fprintf(f, "SNAPFAST 7\ncore=%s\nrom=%s\ninputs=%s\ninputs2=%s\nsig=%s\n",
             fl->core, fl->rom, fl->inputs, fl->inputs2, fl->sig);
     fl_write_proc(f, "main", &fl->game);
     for (int h = 0; h < fl->helperc; h++) fl_write_proc(f, "helper", &fl->helper[h]);
@@ -526,7 +565,7 @@ static int fl_read_entry(const char *key, FastLaunch *fl) {
     if (!f) return 0;
     char line[FL_LINE_MAX + 16];
     FlProc *cur = NULL;
-    int ok = fgets(line, sizeof line, f) && !strcmp(line, "SNAPFAST 6\n");
+    int ok = fgets(line, sizeof line, f) && !strcmp(line, "SNAPFAST 7\n");
     while (ok && fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         if (!n || line[n - 1] != '\n') { ok = 0; break; }
@@ -548,6 +587,7 @@ static int fl_read_entry(const char *key, FastLaunch *fl) {
         else if (!cur) ok = 0;
         else if (!strncmp(line, "exe=", 4)) snprintf(cur->exe, sizeof cur->exe, "%s", line + 4);
         else if (!strncmp(line, "cwd=", 4)) snprintf(cur->cwd, sizeof cur->cwd, "%s", line + 4);
+        else if (!strncmp(line, "nice=", 5)) { cur->nice = atoi(line + 5); cur->has_nice = 1; }
         else if (!strncmp(line, "arg=", 4)) ok = fl_push(cur->argv, &cur->argc, FL_MAX_ARGS, line + 4);
         else if (!strncmp(line, "env=", 4)) ok = fl_push(cur->envp, &cur->envc, FL_MAX_ENV, line + 4);
     }
@@ -764,6 +804,22 @@ static int fl_has_line(char **lines, int n, const char *l) {
     for (int i = 0; i < n; i++) if (!strcmp(lines[i], l)) return 1;
     return 0;
 }
+/* An in-game preference line counts by its name only: "has" means the other
+   file sets the same preference, whatever the value. */
+static int fl_has_pref(char **lines, int n, const char *l) {
+    char k[160], v[1024], k2[160];
+    if (!fl_kv(l + 17, k, sizeof k, v, sizeof v)) return 0;
+    for (int i = 0; i < n; i++)
+        if (fl_is_user_line(lines[i]) && fl_kv(lines[i] + 17, k2, sizeof k2, v, sizeof v) && !strcmp(k, k2)) return 1;
+    return 0;
+}
+/* Whether a line counts as a difference between two copies of a settings
+   file (knulli.conf is file 0: device state never counts, preferences by name). */
+static int fl_line_differs(int file, const char *l, char **other, int n) {
+    if (file == 0 && fl_is_state_line(l)) return 0;
+    if (file == 0 && fl_is_user_line(l)) return !fl_has_pref(other, n, l);
+    return !fl_has_line(other, n, l);
+}
 /* Which settings lines differ from the ones the recording was made with. */
 static void fl_log_input_changes(const char *key) {
     const uint64_t basis = 1469598103934665603ULL;
@@ -783,12 +839,12 @@ static void fl_log_input_changes(const char *key) {
             fl_read_file(now_path, b, (size_t)sn.st_size + 1) >= 0) {
             int na = fl_lines(a, la, 4000), nb = fl_lines(b, lb, 4000), shown = 0, total = 0;
             for (int k = 0; k < nb; k++)
-                if (!(i == 0 && fl_is_user_line(lb[k])) && !fl_has_line(la, na, lb[k]) && total++ >= 0 && shown++ < 8) {
+                if (fl_line_differs(i, lb[k], la, na) && total++ >= 0 && shown++ < 8) {
                     fl_mask(lb[k], masked, sizeof masked);
                     fl_log("%s now has: %s", fl_input_name(i), masked);
                 }
             for (int k = 0; k < na; k++)
-                if (!(i == 0 && fl_is_user_line(la[k])) && !fl_has_line(lb, nb, la[k]) && total++ >= 0 && shown++ < 8) {
+                if (fl_line_differs(i, la[k], lb, nb) && total++ >= 0 && shown++ < 8) {
                     fl_mask(la[k], masked, sizeof masked);
                     fl_log("%s no longer has: %s", fl_input_name(i), masked);
                 }
@@ -945,11 +1001,17 @@ static int fastlaunch_prepare(const char *sys, const char *core, const char *rom
         fastlaunch_free(fl);
         return 0;
     }
+    snprintf(fl->sys, sizeof fl->sys, "%s", sys ? sys : "");
+    snprintf(fl->run_rom, sizeof fl->run_rom, "%s", rom);
+    const char *so = fl_core_so(&fl->game), *base = strrchr(so, '/');
+    snprintf(fl->core_name, sizeof fl->core_name, "%s", base ? base + 1 : so);
+    char *suffix_at = strstr(fl->core_name, "_libretro.so");   /* ".../mgba_libretro.so" -> "mgba" */
+    if (suffix_at) *suffix_at = 0;
     fl_log("fast launch for %s (%d helpers)", key, fl->helperc);
     return 1;
 }
 
-static pid_t fl_exec(const FlProc *p) {
+static pid_t fl_exec(const FlProc *p, const char *err_log) {
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -959,11 +1021,105 @@ static pid_t fl_exec(const FlProc *p) {
             (void)dup2(null_out, STDOUT_FILENO);
             if (null_out != STDOUT_FILENO) close(null_out);
         }
+        int err_out = err_log ? open(err_log, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
+        if (err_out >= 0) {
+            (void)dup2(err_out, STDERR_FILENO);
+            if (err_out != STDERR_FILENO) close(err_out);
+        }
         if (p->cwd[0]) (void)!chdir(p->cwd);
+        if (p->has_nice) (void)setpriority(PRIO_PROCESS, 0, p->nice);   /* as Knulli started it */
         execve(p->exe, p->argv, p->envp);
         _exit(127);
     }
     return pid;
+}
+
+static int fl_name_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+/* Knulli's game scripts, as its launcher calls them: every executable in the
+   folder (and below), with "<event> <system> libretro <core> <rom>", one at a
+   time. A script that hangs is stopped after 15 s rather than holding SNAP. */
+static void fl_run_scripts(const char *folder, const char *event, const char *sys, const char *core,
+                           const char *rom, char *const *envp, int depth) {
+    if (depth > 4) return;
+    DIR *d = opendir(folder);
+    if (!d) return;
+    char *names[128];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < 128) {
+        if (e->d_name[0] == '.') continue;
+        names[n] = strdup(e->d_name);
+        if (names[n]) n++;
+    }
+    closedir(d);
+    if (n > 1) qsort(names, (size_t)n, sizeof *names, fl_name_cmp);
+    for (int i = 0; i < n; i++) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", folder, names[i]);
+        free(names[i]);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { fl_run_scripts(path, event, sys, core, rom, envp, depth + 1); continue; }
+        if (!S_ISREG(st.st_mode) || access(path, X_OK) != 0) continue;
+        Uint32 started = SDL_GetTicks();
+        pid_t pid = fork();
+        if (pid == 0) {
+            int null_out = open("/dev/null", O_WRONLY);
+            if (null_out >= 0) {
+                (void)dup2(null_out, STDOUT_FILENO);
+                if (null_out != STDOUT_FILENO) close(null_out);
+            }
+            char *argv[] = { path, (char *)event, (char *)sys, (char *)"libretro", (char *)core, (char *)rom, NULL };
+            if (envp && envp[0]) execve(path, argv, envp);
+            else execv(path, argv);
+            _exit(127);
+        }
+        if (pid < 0) continue;
+        int done = 0;
+        for (int t = 0; t < 1500 && !done; t++) {
+            pid_t r = waitpid(pid, NULL, WNOHANG);
+            if (r == pid || (r < 0 && errno != EINTR)) done = 1;
+            else usleep(10000);
+        }
+        if (!done) {
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            fl_log("%s %s: stopped after 15 s", event, path);
+        } else {
+            fl_log("%s %s (%u ms)", event, path, SDL_GetTicks() - started);
+        }
+    }
+}
+
+/* What gameStop needs once the game has ended. */
+static int fl_stop_armed = 0;
+static char fl_stop_sys[64], fl_stop_core[128], fl_stop_rom[640];
+static char *fl_stop_envp[FL_MAX_ENV + 1];
+static int fl_stop_envc = 0;
+
+static void fl_run_game_stop(void) {
+    if (!fl_stop_armed) return;
+    fl_stop_armed = 0;
+    fl_run_scripts(fl_user_scripts, "gameStop", fl_stop_sys, fl_stop_core, fl_stop_rom, fl_stop_envp, 0);
+    fl_run_scripts(fl_system_scripts, "gameStop", fl_stop_sys, fl_stop_core, fl_stop_rom, fl_stop_envp, 0);
+    fl_run_scripts(fl_system_scripts2, "gameStop", fl_stop_sys, fl_stop_core, fl_stop_rom, fl_stop_envp, 0);
+    for (int i = 0; i < fl_stop_envc; i++) free(fl_stop_envp[i]);
+    fl_stop_envc = 0;
+    fl_stop_envp[0] = NULL;
+}
+/* System scripts then the user's, as Knulli does before a game. */
+static void fl_run_game_start(const FastLaunch *fl) {
+    fl_run_game_stop();   /* a previous session's, should it never have run */
+    fl_run_scripts(fl_system_scripts, "gameStart", fl->sys, fl->core_name, fl->run_rom, fl->game.envp, 0);
+    fl_run_scripts(fl_system_scripts2, "gameStart", fl->sys, fl->core_name, fl->run_rom, fl->game.envp, 0);
+    fl_run_scripts(fl_user_scripts, "gameStart", fl->sys, fl->core_name, fl->run_rom, fl->game.envp, 0);
+    snprintf(fl_stop_sys, sizeof fl_stop_sys, "%s", fl->sys);
+    snprintf(fl_stop_core, sizeof fl_stop_core, "%s", fl->core_name);
+    snprintf(fl_stop_rom, sizeof fl_stop_rom, "%s", fl->run_rom);
+    for (int i = 0; i < fl->game.envc; i++) fl_push(fl_stop_envp, &fl_stop_envc, FL_MAX_ENV, fl->game.envp[i]);
+    fl_stop_armed = 1;
 }
 
 /* Helpers started for the running fast launch, and the runtime files Knulli
@@ -1008,19 +1164,23 @@ static void fl_runtime_cb(void *ctx, const char *p) {
     for (int k = 0; k < fl->filec; k++) if (!strcmp(fl->file[k], p)) fl_runtime_add(p);
 }
 
-/* Helpers first, as Knulli does, then RetroArch. */
+/* Knulli's gameStart scripts, then its helpers, then RetroArch. */
 static pid_t fastlaunch_spawn(FastLaunch *fl) {
     fastlaunch_stop_helpers();
+    fl_run_game_start(fl);
     size_t dl = strlen(fl_evmapy_dir);
     for (int h = 0; h < fl->helperc; h++) {
-        pid_t pid = fl_exec(&fl->helper[h]);
+        pid_t pid = fl_exec(&fl->helper[h], NULL);
         if (pid > 0) fl_helper_pids[fl_helper_count++] = pid;
         fl_arg_paths(&fl->helper[h], -1, fl_runtime_cb, fl);
     }
     for (int k = 0; fl->helperc && k < fl->filec; k++)   /* evmapy's key maps go with it */
         if (!strncmp(fl->file[k], fl_evmapy_dir, dl) && fl->file[k][dl] == '/') fl_runtime_add(fl->file[k]);
-    pid_t pid = fl_exec(&fl->game);
-    if (pid < 0) fastlaunch_stop_helpers();
+    pid_t pid = fl_exec(&fl->game, fl_game_log);
+    if (pid < 0) {
+        fastlaunch_stop_helpers();
+        fl_run_game_stop();
+    }
     return pid;
 }
 
@@ -1047,6 +1207,7 @@ static void fastlaunch_exited(int status_known, int status) {
     if (!emu_fast) return;
     emu_fast = 0;
     fastlaunch_stop_helpers();
+    fl_run_game_stop();   /* Knulli's gameStop scripts, user's first */
     Uint32 ran = SDL_GetTicks() - emu_fast_started;
     int clean = status_known && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (ran < 5000 && !clean) {

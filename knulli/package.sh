@@ -57,6 +57,7 @@ cp scrape_boxart.py "$DEST/"
 cp background_browser.py "$DEST/"
 cp ra_achievements.py "$DEST/"
 cp weather_service.py "$DEST/"
+cp snapfe_update.py "$DEST/"                          # Settings > Check for Updates
 cp brightness-hotkey.sh "$DEST/"
 cp volume-gate.sh "$DEST/"
 cp knulli/custom.sh "$DEST/snapos-custom.sh"          # staged; 'Set As Default' installs it
@@ -170,6 +171,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
         'system/snapos/volume-gate.sh',
         'system/snapos/background_browser.py',
         'system/snapos/ra_achievements.py',
+        'system/snapos/snapfe_update.py',
         'roms/ports/Snap FE.sh',
         'roms/ports/Snap FE (Set As Default).sh',
         'roms/ports/Snap FE (Restore EmulationStation).sh',
@@ -195,6 +197,33 @@ CHECKSUM="dist/SHA256SUMS-${RELEASE}.txt"
 HASH="$(sha256sum "$OUT" | awk '{print $1}')"
 printf '%s  %s\n' "$HASH" "$(basename "$OUT")" > "$CHECKSUM"
 echo ">> $CHECKSUM"
+
+# latest.json: what Snap FE's Check for Updates reads. Uploaded beside the ZIP,
+# GitHub serves the newest release's copy at .../releases/latest/download/.
+LATEST="dist/latest.json"
+python3 - "$OUT" "$RELEASE" "$HASH" "$NOTES" "$LATEST" <<'PY'
+import datetime, json, os, sys
+zip_path, version, digest, notes_path, out = sys.argv[1:]
+name = os.path.basename(zip_path)
+with open(notes_path, encoding='utf-8') as f:
+    notes = f.read().strip() + '\n'
+info = {
+    'format': 1,
+    'version': version,
+    'name': f'Snap FE Alpha {version}',
+    'tag': f'V{version}',
+    'zip': name,
+    'url': f'https://github.com/differentlightproductions-cyber/snap-fe/releases/download/V{version}/{name}',
+    'sha256': digest,
+    'size': os.path.getsize(zip_path),
+    'published': datetime.date.today().isoformat(),
+    'notes': notes,
+}
+with open(out, 'w', encoding='utf-8') as f:
+    json.dump(info, f, indent=2)
+    f.write('\n')
+PY
+echo ">> $LATEST"
 
 # On Windows/WSL, export the handoff unless local-only packaging was requested.
 # SKIP_WINDOWS_EXPORT=1 keeps every release artifact inside this checkout.

@@ -1,8 +1,8 @@
 param(
     [ValidateSet('audit','draft','upload','publish','verify','replace')]
     [string]$Mode='audit',
-    [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.3.1',
+    [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
+    [string]$Version = '1.3.2',
     [string]$Commit
 )
 $ErrorActionPreference = 'Stop'
@@ -12,6 +12,9 @@ $api = "https://api.github.com/repos/$slug"
 $tag = "V$Version"
 $zipName = "SnapFE-Alpha-$Version.zip"
 $sumName = "SHA256SUMS-$Version.txt"
+# latest.json is what Snap FE's Check for Updates reads; releases from 1.3.2 carry it.
+$assets = @($zipName, $sumName)
+if (Test-Path -LiteralPath (Join-Path $repo 'dist/latest.json') -PathType Leaf) { $assets += 'latest.json' }
 $notesName = "RELEASE-NOTES-$Version.txt"
 if (-not (Test-Path -LiteralPath (Join-Path $repo $notesName) -PathType Leaf)) { $notesName = "RELEASE-NOTES-$Version.md" }
 $env:GCM_INTERACTIVE = 'never'
@@ -58,7 +61,7 @@ if($Mode -eq 'draft') {
 }
 if($Mode -eq 'upload') {
     if(-not $release.draft){throw 'Upload requires the prepared draft'}
-    foreach($name in @($zipName,$sumName)){
+    foreach($name in $assets){
         $path=Join-Path $repo "dist/$name"
         if(@($release.assets | Where-Object name -eq $name).Count){throw "Asset already exists: $name; verify before retrying"}
         $upload=$release.upload_url -replace '\{.*$',''
@@ -71,8 +74,8 @@ if($Mode -eq 'upload') {
 if($Mode -eq 'replace') {
     # Quietly swap the two public assets of a published release for rebuilt ones.
     if($release.draft){throw 'Replace is for a published release; use upload for a draft'}
-    foreach($name in @($zipName,$sumName)){if(-not (Test-Path -LiteralPath (Join-Path $repo "dist/$name"))){throw "Missing dist/$name"}}
-    foreach($name in @($zipName,$sumName)){
+    foreach($name in $assets){if(-not (Test-Path -LiteralPath (Join-Path $repo "dist/$name"))){throw "Missing dist/$name"}}
+    foreach($name in $assets){
         foreach($old in @($release.assets | Where-Object name -eq $name)){ Request DELETE "$api/releases/assets/$($old.id)" $null | Out-Null }
         $path=Join-Path $repo "dist/$name"
         $upload=$release.upload_url -replace '\{.*$',''
@@ -83,8 +86,8 @@ if($Mode -eq 'replace') {
     $release=Request GET "$api/releases/$($release.id)" $null
 }
 if($Mode -eq 'publish') {
-    $expected=@($zipName,$sumName)
-    if($release.assets.Count -ne 2){throw 'Expected exactly two public assets'}
+    $expected=$assets
+    if($release.assets.Count -ne $expected.Count){throw "Expected exactly $($expected.Count) public assets"}
     foreach($name in $expected){$asset=@($release.assets | Where-Object name -eq $name);if($asset.Count -ne 1){throw "Missing asset: $name"};$path=Join-Path $repo "dist/$name";if($asset[0].size -ne (Get-Item $path).Length){throw 'Asset size mismatch'};if($asset[0].digest -ne ('sha256:'+(Get-FileHash $path -Algorithm SHA256).Hash.ToLower())){throw 'Asset digest mismatch'}}
     if($release.body -ne [IO.File]::ReadAllText((Join-Path $repo $notesName))){throw 'Release notes differ'}
     $release=Request PATCH "$api/releases/$($release.id)" @{draft=$false;prerelease=$false;make_latest='true'}

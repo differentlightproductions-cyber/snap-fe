@@ -13,7 +13,7 @@ def fetch_json(url, timeout=10, attempts=2):
     last_error = None
     for attempt in range(attempts):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "SnapFE/1.3.1 weather"})
+            req = urllib.request.Request(url, headers={"User-Agent": "SnapFE/1.3.2 weather"})
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except Exception as exc:

@@ -13,7 +13,7 @@ else:
     m = re.search(r'#define SNAPFE_VERSION "Alpha Build ([0-9.]+)"',
                   (repo / 'main.c').read_text(errors='replace'))
     version = m.group(1) if m else ''
-if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+if not re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', version):   # 1.3.2, or a revision like 1.3.2.1
     raise SystemExit('usage: check_release_package.py <version> [binary]')
 
 binary = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else repo / 'snapos_ui.aarch64'
@@ -39,6 +39,7 @@ with zipfile.ZipFile(archive) as package:
         assert not name.startswith('roms/') or name.startswith('roms/ports/'), name
     # Wildkins: the launcher SNAP FE accepts, pointing at a complete, untampered version.
     assert 'WHATS-NEW.txt' in names
+    assert 'system/snapos/snapfe_update.py' in names
     launcher = package.read('roms/ports/Wildkins.sh').decode()
     assert '# Wildkins standalone launcher' in launcher
     runner = re.search(r"exec python3 '?/userdata/(roms/ports/wildkins/versions/[0-9a-f]{20})/run-game\.py", launcher)
@@ -67,9 +68,17 @@ local_backgrounds = [
 assert len(package_backgrounds) == len(local_backgrounds)
 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert checksum.read_text().split()[0] == digest
+# What Check for Updates reads: this exact ZIP, at its release address.
+latest = json.loads((repo / 'dist/latest.json').read_text())
+assert latest['version'] == version and latest['sha256'] == digest
+assert latest['size'] == archive.stat().st_size and latest['zip'] == archive.name
+assert latest['url'] == ('https://github.com/differentlightproductions-cyber/snap-fe/releases/'
+                         f'download/V{version}/{archive.name}')
+assert latest['notes'].strip()
 print(json.dumps({'zip': str(archive), 'sha256': digest, 'bytes': archive.stat().st_size,
                   'entries': len(names), 'list_icons': len(list_icons),
                   'backgrounds': len(package_backgrounds),
                   'background_jpgs': len(package_background_jpgs),
                   'wildkins': wildkins, 'wildkins_files': len(wildkins_manifest),
-                  'exact_device_binary': True, 'personal_files_excluded': True}, indent=2))
+                  'exact_device_binary': True, 'personal_files_excluded': True,
+                  'latest_json': True}, indent=2))

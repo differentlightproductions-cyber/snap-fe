@@ -27,7 +27,7 @@
 #include <sys/mman.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.3.1"
+#define SNAPFE_VERSION "Alpha Build 1.3.2"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -4695,6 +4695,9 @@ int build_sound_rows(int *row_type, int *row_extra) {
 #define ROW_DEV_GRP_CONTROLS 30
 #define ROW_DEV_GRP_SYSTEM 31
 #define ROW_DEV_FAST_LAUNCH 32    // replay Knulli's RetroArch setup when nothing changed
+#define ROW_DEV_UPDATE 33         // Check for Updates (update_ui.h, snapfe_update.py)
+#define ROW_DEV_ROLLBACK 34       // Roll Back Previous Update, when a backup exists
+static int upd_backup_available(char *version, size_t cap);   // update_ui.h
 int dev_grp_batt_open = 0;
 int dev_grp_night_open = 0;
 int dev_grp_perf_open = 0;
@@ -4768,9 +4771,13 @@ int build_device_rows(int *row_type, int *row_extra) {
     // The two ways out of Snap FE, and the profile that says what hardware it
     // is running on. All three are rare and consequential, so they are one
     // step further in rather than sitting under the cursor on the way past.
+    // Updates sit in plain sight; going back to the previous version is rare,
+    // so it waits under System, and only exists when there is one to go back to.
+    row_type[idx] = ROW_DEV_UPDATE; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_GRP_SYSTEM; row_extra[idx] = 0; idx++;
     if (dev_grp_system_open) {
         row_type[idx] = ROW_DEV_DEVICE; row_extra[idx] = 0; idx++;
+        if (upd_backup_available(NULL, 0)) { row_type[idx] = ROW_DEV_ROLLBACK; row_extra[idx] = 0; idx++; }
         row_type[idx] = ROW_DEV_EXIT_ES; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_RESET; row_extra[idx] = 0; idx++;
     }
@@ -13718,12 +13725,15 @@ static pid_t spawn_emulatorlauncher_ex(const char *sys, const char *rompath, con
         // Configgen logs every generated RetroArch key at DEBUG level.  On
         // Knulli SNAP's stdout ultimately lands on slow persistent storage;
         // hundreds of tiny writes added several seconds to every launch.
-        // Discard only normal/debug stdout here.  stderr remains attached so
-        // warnings and configgen/RetroArch launch failures are still recorded.
-        int null_out = open("/dev/null", O_WRONLY);
-        if (null_out >= 0) {
-            (void)dup2(null_out, STDOUT_FILENO);
-            if (null_out != STDOUT_FILENO) close(null_out);
+        // Both go to a tmpfs file, fresh each launch: configgen's step-by-step
+        // DEBUG log (stdout) and its warnings plus RetroArch's --verbose log
+        // (stderr). tmpfs costs nothing, and a launch problem can be read back.
+        int log_out = open("/tmp/snapfe-game-normal.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (log_out < 0) log_out = open("/dev/null", O_WRONLY);
+        if (log_out >= 0) {
+            (void)dup2(log_out, STDOUT_FILENO);
+            (void)dup2(log_out, STDERR_FILENO);
+            if (log_out != STDOUT_FILENO && log_out != STDERR_FILENO) close(log_out);
         }
         setenv("HOME", "/userdata/system", 1);
         setenv("XDG_CONFIG_HOME", "/userdata/system/configs", 1);
@@ -17716,6 +17726,17 @@ static void sys_volume_apply(int pct) {
     sys_volume_pending = pct;
     sys_volume_pending_at = SDL_GetTicks();
 }
+/* Startup only: set the saved level and wait for it, so the boot chime that
+   follows plays at the player's volume. The coalesced path above only sends
+   from the main loop, which starts after the chime has already played. */
+static void sys_volume_send_now(int pct) {
+    char cmd[160];
+    snprintf(cmd, sizeof cmd,
+             "XDG_RUNTIME_DIR=/var/run /usr/bin/knulli-audio setSystemVolume %d >/dev/null 2>&1", pct);
+    system(cmd);
+    sys_volume_pending = -1;
+    sys_volume_last_sent = pct;
+}
 static int sys_volume_read(void) {
     FILE *p = popen("XDG_RUNTIME_DIR=/var/run /usr/bin/knulli-audio getSystemVolume 2>/dev/null", "r");
     if (!p) return -1;
@@ -17729,6 +17750,7 @@ static int sys_volume_read(void) {
 #else
 static void sys_volume_send(int pct) { (void)pct; }
 static void sys_volume_apply(int pct) { sys_volume_pending = pct; sys_volume_pending_at = SDL_GetTicks(); }
+static void sys_volume_send_now(int pct) { sys_volume_pending = -1; sys_volume_last_sent = pct; }
 static int sys_volume_read(void) { return sys_volume_pct; }
 #endif
 
@@ -20583,6 +20605,7 @@ static void duck_render(SDL_Renderer *ren) {
 /* -------------------------- Mini-games picker ----------------------- */
 #include "mini_games_extra.h"
 #include "friends.h"
+#include "update_ui.h"
 #include "messages.h"
 
 static BatteryPromptGuard battery_prompt_guard;
@@ -21049,11 +21072,12 @@ int main(int argc, char *argv[]) {
         save_settings();
     }
     if (!promo_mode) apply_brightness();
-    // Volume: our saved level is the source of truth. custom.sh sets a boot
-    // default for the brief window before we start; push the user's real value
-    // over it here. Only a fresh install (no saved level) seeds from the system.
+    // Volume: our saved level is the source of truth. custom.sh brings audio up
+    // at it already; set it again here and wait, so the boot chime below can
+    // never play at a different level. Only a fresh install (no saved level)
+    // seeds from the system.
     if (!promo_mode) {
-        if (sys_volume_loaded) sys_volume_apply(sys_volume_pct);
+        if (sys_volume_loaded) sys_volume_send_now(sys_volume_pct);
         else { int v = sys_volume_read(); if (v >= 0) sys_volume_pct = v; }
     }
 
@@ -21225,6 +21249,17 @@ int main(int argc, char *argv[]) {
         battery_prompt_tick(battery_prompt_frontend_allowed(state));
         battery_prompt_frontend_tick(state);
         if (battery_prompt_guard.visible) { menu_double_due = 0; menu_tap_count = 0; }
+        // Updates: follow the updater, keep a freshly installed version once it
+        // has run a few seconds, and restart into a new or restored version.
+        upd_tick();
+        if (state != STATE_BOOT) upd_confirm_start(SDL_GetTicks());
+        if (upd.restart_requested) {
+            upd.restart_requested = 0;
+            if (settings_dirty) { save_settings(); settings_dirty = 0; }
+            splash_now(ren, "Restarting Snap FE");
+            running = 0;               // custom.sh starts the version now in place
+            continue;
+        }
         if (menu_double_due && frame_start >= menu_double_due) {
             menu_double_due = 0; menu_tap_count = 0;
             activate_menu_action(menu_double_action, &state, &win, &ren,
@@ -21407,6 +21442,13 @@ int main(int argc, char *argv[]) {
             }
 
             if (e.type == SDL_KEYDOWN) {
+                // The update screen owns every button while it is up.
+                if (upd.active && e.key.keysym.scancode != SDL_SCANCODE_INSERT &&
+                    e.key.keysym.scancode != SDL_SCANCODE_DELETE) {
+                    if (!e.key.repeat || e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN)
+                        upd_key(e.key.keysym.sym);
+                    continue;
+                }
                 if(sf_offer>=0&&e.key.keysym.scancode!=SDL_SCANCODE_INSERT&&e.key.keysym.scancode!=SDL_SCANCODE_DELETE){if(!e.key.repeat){if(e.key.keysym.sym==SDLK_RETURN)sf_offer_answer(1);else if(e.key.keysym.sym==SDLK_ESCAPE)sf_offer_answer(0);else if(e.key.keysym.sym==SDLK_LEFT)sf.message=(sf.message+4)%5;else if(e.key.keysym.sym==SDLK_RIGHT)sf.message=(sf.message+1)%5;}continue;}
                 if(sf.prompt&&e.key.keysym.scancode!=SDL_SCANCODE_INSERT&&e.key.keysym.scancode!=SDL_SCANCODE_DELETE){if(!e.key.repeat){if(e.key.keysym.sym==SDLK_RETURN)sf_answer(1);else if(e.key.keysym.sym==SDLK_ESCAPE)sf_answer(0);}continue;}
                 // --- Clamshell lid (RG34XX-SP) -------------------------------
@@ -23828,6 +23870,14 @@ int main(int argc, char *argv[]) {
                             } else {
                                 confirm_reset_pending = 1;
                             }
+                        }
+                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_UPDATE) {
+                            play_click();
+                            upd_open_check();
+                        }
+                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_ROLLBACK) {
+                            play_click();
+                            upd_open_rollback();
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_EXIT_ES) {
                             if (confirm_es_pending) {
@@ -26322,7 +26372,7 @@ int main(int argc, char *argv[]) {
                     if (rt == ROW_DEV_POWERSAVE) snprintf(text, sizeof(text), "Power Save Mode: %s%s", power_save_mode ? "ON" : "OFF", (power_save_mode && power_save_auto) ? " (auto)" : "");
                     else if (rt == ROW_DEV_FPS_MODE) snprintf(text, sizeof(text), "Frame Rate: %s", fps_mode_names[(fps_mode_idx >= 0 && fps_mode_idx < FPS_MODE_COUNT) ? fps_mode_idx : 0]);
                     else if (rt == ROW_DEV_CPU_PERF) snprintf(text, sizeof(text), "CPU Performance Mode: %s%s", cpu_perf_mode ? "ON" : "OFF", power_save_mode ? "  (Power Save wins)" : (cpu_perf_mode ? "  (stays on in games)" : ""));
-                    else if (rt == ROW_DEV_FAST_LAUNCH) snprintf(text, sizeof(text), "Fast Game Launch: %s%s", fast_launch_enabled ? "ON" : "OFF", fast_launch_enabled ? "  (repeat launches skip setup)" : "");
+                    else if (rt == ROW_DEV_FAST_LAUNCH) snprintf(text, sizeof(text), "Snappy Game Launch: %s%s", fast_launch_enabled ? "ON" : "OFF", fast_launch_enabled ? "  (repeat launches skip setup)" : "");
                     else if (rt == ROW_DEV_PERF_OVERLAY) snprintf(text, sizeof(text), "Performance Overlay: %s%s", show_perf_overlay ? "ON" : "OFF", show_perf_overlay ? "  (stays up in games)" : "");
                     else if (rt == ROW_DEV_PERF_OPACITY) { snprintf(text, sizeof(text), "Overlay Opacity: %d%%", perf_overlay_opacity); indent = 1; }
                     else if (rt == ROW_DEV_PERF_TEXT) { snprintf(text, sizeof(text), "Overlay Text Color: %s", perf_overlay_text_idx == 0 ? "Match UI" : font_color_names[(perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT) ? perf_overlay_text_idx : 1]); indent = 1; }
@@ -26349,6 +26399,13 @@ int main(int argc, char *argv[]) {
                     else if (rt == ROW_DEV_EXIT_ES) snprintf(text, sizeof(text), "Switch Back to EmulationStation: %s", confirm_es_pending ? "Press A again -- reboots now" : "Press A");
                     else if (rt == ROW_DEV_RESET) snprintf(text, sizeof(text), "Factory Reset: %s", confirm_reset_pending ? "Press A again to confirm" : "Press A");
                     else if (rt == ROW_DEV_RESTORE) snprintf(text, sizeof(text), "Restore to Default (Device)");
+                    else if (rt == ROW_DEV_UPDATE) snprintf(text, sizeof(text), "Check for Updates  (%s)", SNAPFE_VERSION);
+                    else if (rt == ROW_DEV_ROLLBACK) {
+                        char was[32] = "";
+                        upd_backup_available(was, sizeof was);
+                        snprintf(text, sizeof(text), "Roll Back Previous Update%s%s", was[0] ? "  (to " : "", was[0] ? was : "");
+                        if (was[0]) strncat(text, ")", sizeof(text) - strlen(text) - 1);
+                    }
                 } else if (current_tab == TAB_ACCOUNT) {
                     switch (rt) {
                         case ROW_SCRAPE_HEADER: snprintf(text, sizeof(text), "Scraper: %s  \xE2\x80\xBA", scrape_source_names[scrape_source ? 1 : 0]); break;
@@ -29309,6 +29366,7 @@ int main(int argc, char *argv[]) {
             mgx_overlay_message(ren,"LEAVE THIS MATCH?","A Leave match    B Keep playing");
         battery_prompt_render(ren, state);
         weather_alert_render(ren,state);
+        upd_render(ren);
 
         // Night mode: warm amber wash + a little extra dimming, over everything
         // (same helper the splash / loading screens use).

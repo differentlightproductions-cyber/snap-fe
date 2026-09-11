@@ -1,5 +1,19 @@
 # Updating Snap FE Without Losing User Data
 
+## Update from inside Snap FE (1.3.2 and later)
+
+Connect to Wi-Fi and open **Settings > Device > Check for Updates**. Snap FE
+reads the newest release from GitHub, shows its notes, and on **A** downloads
+it, checks its SHA-256, and installs only the files the release carries. Your
+settings, ROMs, saves, favorites, scraped art, themes and Wi-Fi are never
+touched. The files it replaces are kept, and Snap FE restarts into the new
+version. If that version does not start properly, the previous one is put back
+automatically; **Settings > Device > System > Roll Back Previous Update** does
+the same by hand.
+
+The steps below still work for every version, and are the way to install
+Snap FE for the first time.
+
 OTA-Hub's public example targets ESP32/PlatformIO firmware, not the ARM64 Linux
 environment used by Knulli. Until a SNAP-native updater has been fully tested,
 use this safe in-place update method.

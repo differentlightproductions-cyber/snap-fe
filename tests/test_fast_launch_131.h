@@ -28,6 +28,11 @@ static void test_fast_launch_131(void) {
     char saved_cache[512], saved_conf[512], saved_input[512], saved_settings[512], saved_evmapy[512], saved_scratch[512];
     snprintf(saved_evmapy, sizeof saved_evmapy, "%s", fl_evmapy_dir);
     snprintf(saved_scratch, sizeof saved_scratch, "%s", fl_scratch_dir);
+    char saved_sys_scripts[512], saved_user_scripts[512];
+    snprintf(saved_sys_scripts, sizeof saved_sys_scripts, "%s", fl_system_scripts);
+    snprintf(saved_user_scripts, sizeof saved_user_scripts, "%s", fl_user_scripts);
+    char saved_sys_scripts2[512];
+    snprintf(saved_sys_scripts2, sizeof saved_sys_scripts2, "%s", fl_system_scripts2);
     snprintf(saved_cache, sizeof saved_cache, "%s", fl_cache_dir);
     snprintf(saved_conf, sizeof saved_conf, "%s", fl_knulli_conf);
     snprintf(saved_input, sizeof saved_input, "%s", fl_es_input);
@@ -43,6 +48,26 @@ static void test_fast_launch_131(void) {
     snprintf(fl_es_settings, sizeof fl_es_settings, "%s/es_settings.cfg", dir);
     snprintf(fl_evmapy_dir, sizeof fl_evmapy_dir, "%s/run/evmapy", dir);
     snprintf(fl_scratch_dir, sizeof fl_scratch_dir, "%s/scratch", dir);
+    char saved_game_log[512];
+    snprintf(saved_game_log, sizeof saved_game_log, "%s", fl_game_log);
+    snprintf(fl_game_log, sizeof fl_game_log, "%s/game-fast.log", dir);
+    snprintf(fl_system_scripts, sizeof fl_system_scripts, "%s/scripts/system", dir);
+    snprintf(fl_user_scripts, sizeof fl_user_scripts, "%s/scripts/user", dir);
+    snprintf(fl_system_scripts2, sizeof fl_system_scripts2, "%s/scripts/batocera-none", dir);
+    /* Knulli's game scripts: one per folder, one a level down, and a note that
+       isn't executable and must be left alone. Each logs how it was called. */
+    char hooks[600], hook[700], hook_text[800];
+    snprintf(hooks, sizeof hooks, "%s/hooks.log", dir);
+    snprintf(hook, sizeof hook, "%s/10-loading-screen", fl_system_scripts);
+    snprintf(hook_text, sizeof hook_text, "#!/bin/sh\necho \"system $*\" >> '%s'\n", hooks);
+    fl_test_write(hook, hook_text);
+    assert(chmod(hook, 0755) == 0);
+    snprintf(hook, sizeof hook, "%s/device/20-deep", fl_user_scripts);
+    snprintf(hook_text, sizeof hook_text, "#!/bin/sh\necho \"user $*\" >> '%s'\n", hooks);
+    fl_test_write(hook, hook_text);
+    assert(chmod(hook, 0755) == 0);
+    snprintf(hook, sizeof hook, "%s/readme.txt", fl_user_scripts);
+    fl_test_write(hook, "not a script\n");
     snprintf(cfg, sizeof cfg, "%s/configs/retroarchcustom.cfg", dir);
     snprintf(opts, sizeof opts, "%s/configs/core-options.cfg", dir);
     snprintf(core_so, sizeof core_so, "%s/cores/fake_libretro.so", dir);
@@ -53,8 +78,17 @@ static void test_fast_launch_131(void) {
     fl_test_write(fl_knulli_conf, "global.retroarch.audio_mute_enable=false\ngba.ratio=4/3\n");
     fl_test_write(fl_es_input, "<inputList/>\n");
     fl_test_write(fl_es_settings, "<config/>\n");
+    /* Knulli's per-launch bezel: an overlay config and its image in the runtime
+       folder, named from RetroArch's config rather than on its command line. */
+    char overlay_cfg[600], bezel[600], overlay_text[800];
+    snprintf(overlay_cfg, sizeof overlay_cfg, "%s/run/bezel/overlay.cfg", dir);
+    snprintf(bezel, sizeof bezel, "%s/run/bezel/gba-4_3_adapted.png", dir);
+    snprintf(overlay_text, sizeof overlay_text, "overlays = 1\noverlay0_overlay = \"%s\"\n", bezel);
+    fl_test_write(overlay_cfg, overlay_text);
+    fl_test_write(bezel, "PNG");
     char cfg_text[900];
-    snprintf(cfg_text, sizeof cfg_text, "video_driver = \"gl\"\ncore_options_path = \"%s\"\n", opts);
+    snprintf(cfg_text, sizeof cfg_text, "video_driver = \"gl\"\ncore_options_path = \"%s\"\ninput_overlay = \"%s\"\n",
+             opts, overlay_cfg);
     fl_test_write(cfg, cfg_text);
     fl_test_write(opts, "mgba_skip_bios = \"ON\"\n");
     fl_test_write(keymap, "{\"actions\": []}\n");
@@ -83,6 +117,7 @@ static void test_fast_launch_131(void) {
         dup2(hold[0], 3);
         close(hold[1]);
         setenv("SNAPFE_FAST_TEST", "kept", 1);
+        if (setpriority(PRIO_PROCESS, 0, 3) != 0) _exit(126);   /* Knulli starts RetroArch at a set priority */
         execl("/bin/sh", "sh", "-c", script, "retroarch", "-L", core_so, "--config", cfg, rom1, (char *)NULL);
         _exit(127);
     }
@@ -98,15 +133,18 @@ static void test_fast_launch_131(void) {
     assert(fastlaunch_capture(ra, ra, "gba", "", rom1));
     FastLaunch fl;
     assert(fl_read_entry(key, &fl));
-    assert(fl.helperc == 1 && fl.filec == 3);
+    assert(fl.helperc == 1 && fl.filec == 5);   /* config, core options, bezel overlay + image, key map */
+    assert(fl.game.has_nice && fl.game.nice == 3);
     fastlaunch_free(&fl);
 
     /* Another system's launch rewrote the config and Knulli removed the key map;
        the replay puts both back and runs the new ROM with the recorded environment. */
     fl_test_write(cfg, "video_driver = \"other system\"\n");
     assert(unlink(keymap) == 0);
+    assert(unlink(bezel) == 0 && unlink(overlay_cfg) == 0);   /* a reboot empties /tmp */
     assert(fastlaunch_prepare("gba", "", rom2, &fl));
     assert(fl_test_same(cfg, cfg_text) && access(keymap, R_OK) == 0);
+    assert(fl_test_same(overlay_cfg, overlay_text) && access(bezel, R_OK) == 0);
     int has_rom2 = 0, has_rom1 = 0, has_env = 0;
     for (int i = 0; i < fl.game.argc; i++) { has_rom2 |= !strcmp(fl.game.argv[i], rom2); has_rom1 |= !strcmp(fl.game.argv[i], rom1); }
     for (int i = 0; i < fl.game.envc; i++) has_env |= !strcmp(fl.game.envp[i], "SNAPFE_FAST_TEST=kept");
@@ -118,9 +156,20 @@ static void test_fast_launch_131(void) {
     pid_t game = fastlaunch_spawn(&fl);
     assert(game > 0 && fl_helper_count == 1 && fl_runtime_count == 1);
     fastlaunch_free(&fl);
+    fastlaunch_started("gba", "", rom2, "Second Game", "gba");
     waitpid(game, NULL, 0);
-    fastlaunch_stop_helpers();
-    assert(fl_helper_count == 0 && access(keymap, F_OK) != 0);
+    fastlaunch_exited(1, 0);
+    assert(fl_helper_count == 0 && access(keymap, F_OK) != 0 && !fl_retry);
+
+    /* Knulli's gameStart scripts ran before the game, system then user, and its
+       gameStop scripts after it, user then system -- with the launcher's arguments. */
+    char expected_hooks[3000], seen_hooks[3000];
+    snprintf(expected_hooks, sizeof expected_hooks,
+             "system gameStart gba libretro fake %s\nuser gameStart gba libretro fake %s\n"
+             "user gameStop gba libretro fake %s\nsystem gameStop gba libretro fake %s\n",
+             rom2, rom2, rom2, rom2);
+    assert(fl_read_file(hooks, seen_hooks, sizeof seen_hooks) >= 0 && !strcmp(seen_hooks, expected_hooks));
+    assert(unlink(hooks) == 0);
 
     /* Anything that feeds Knulli's launcher changing sends it back through Knulli. */
     fl_test_write(fl_knulli_conf, "global.retroarch.audio_mute_enable=false\ngba.ratio=16/9\n");
@@ -249,6 +298,12 @@ static void test_fast_launch_131(void) {
     fastlaunch_free(&fl);
     fl_test_write(fl_knulli_conf, "gba.ratio=4/3\ngba.ratio=1/1\nglobal.retroarch.state_slot=\"7\"\nglobal.retroarch.video_smooth=\"false\"\n");
     assert(!fastlaunch_prepare("gba", "", rom2, &fl));   /* here the last ratio is a different one */
+    /* Volume and brightness presses land in knulli.conf too; they don't change
+       the game session, so they never cost a slow launch. */
+    fl_test_write(fl_knulli_conf, "gba.ratio=4/3\naudio.volume=30\ndisplay.brightness=80\n"
+                                  "global.retroarch.state_slot=\"7\"\nglobal.retroarch.video_smooth=\"false\"\n");
+    assert(fastlaunch_prepare("gba", "", rom2, &fl));
+    fastlaunch_free(&fl);
     fl_test_write(fl_knulli_conf, "gba.ratio=4/3\nglobal.retroarch.state_slot=\"7\"\nglobal.retroarch.video_smooth=\"maybe\"\n");
     assert(!fastlaunch_prepare("gba", "", rom2, &fl));
     fl_test_write(fl_knulli_conf, "gba.ratio=4/3\nglobal.retroarch.state_slot=\"7\"\n");
@@ -264,6 +319,10 @@ static void test_fast_launch_131(void) {
     snprintf(fl_es_settings, sizeof fl_es_settings, "%s", saved_settings);
     snprintf(fl_evmapy_dir, sizeof fl_evmapy_dir, "%s", saved_evmapy);
     snprintf(fl_scratch_dir, sizeof fl_scratch_dir, "%s", saved_scratch);
+    snprintf(fl_game_log, sizeof fl_game_log, "%s", saved_game_log);
+    snprintf(fl_system_scripts, sizeof fl_system_scripts, "%s", saved_sys_scripts);
+    snprintf(fl_user_scripts, sizeof fl_user_scripts, "%s", saved_user_scripts);
+    snprintf(fl_system_scripts2, sizeof fl_system_scripts2, "%s", saved_sys_scripts2);
     fast_launch_enabled = saved_enabled;
     fl_require_retroarch = 1;
     char rm[700];

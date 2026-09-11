@@ -403,6 +403,8 @@ static int test_nearby(int role) {
 #include "test_fish_playable_131.h"
 #include "test_wildkins_131.h"
 #include "test_fast_launch_131.h"
+#include "test_boot_volume_132.h"
+#include "test_update_ui_132.h"
 int main(int argc,char **argv) {
     // Only the Crazy Fish simulated players -- for measuring a rules change
     // against the previous rules, without the rest of the suite in the way.
@@ -731,6 +733,8 @@ int main(int argc,char **argv) {
     test_settings_pages_131(ren);
     test_wildkins_131();
     test_fast_launch_131();
+    test_boot_volume_132();
+    test_update_ui_132(ren);
     test_systems_dropdown(ren);
     test_sound_options(ren);
     test_surprise_art_odds();
