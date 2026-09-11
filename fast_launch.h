@@ -22,10 +22,9 @@
  * Never recorded: per-game settings or key maps, configs that name the game,
  * sessions with a helper SNAP doesn't know how to replay, anything that isn't
  * RetroArch. A fast launch that fails in its first seconds is forgotten and
- * retried through Knulli at once. Off by default while it is new: Settings >
- * Device > Performance > Fast Game Launch turns it on (and turning it off
- * clears every recording). Every decision is logged to
- * /tmp/snapfe-launch-perf.log. */
+ * retried through Knulli at once. On by default; Settings > Device >
+ * Performance > Fast Game Launch turns it off, which clears every recording.
+ * Every decision is logged to /tmp/snapfe-launch-perf.log. */
 
 static char fl_cache_dir[512] = "/userdata/system/snapos/fastlaunch";
 static char fl_knulli_conf[512] = "/userdata/system/knulli.conf";

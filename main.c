@@ -1017,7 +1017,7 @@ int auto_save_games = 0; // OFF by default -- exact save keybind not yet confirm
 int power_save_mode = 0;
 int power_save_auto = 0;         // 1 = Power Save was turned on automatically by the low-battery trigger
 int cpu_perf_mode = 0;          // 1 = pin the CPU governor to "performance" (persists into games)
-int fast_launch_enabled = 0;    // experimental, opt-in: repeat launches skip Knulli's setup when nothing changed (fast_launch.h)
+int fast_launch_enabled = 1;    // repeat launches skip Knulli's setup when nothing changed (fast_launch.h)
 int launch_cpu_boost_active = 0; // short configgen-only boost; restored once RetroArch exists
 int auto_ps_pct = 0;            // persisted: 0 = off, else auto-enable Power Save at/below this %
 int battery_icon_enabled = 1;   // draw a real fill/deplete battery beside the percentage
@@ -6298,7 +6298,8 @@ void load_settings() {
         else if (strcmp(key, "perf_overlay_opacity") == 0) perf_overlay_opacity = (val < 20) ? 20 : (val > 100) ? 100 : val;
         else if (strcmp(key, "perf_overlay_text_idx") == 0) perf_overlay_text_idx = (val >= 0 && val < FONT_COLOR_COUNT) ? val : 1;
         else if (strcmp(key, "cpu_perf_mode") == 0) cpu_perf_mode = val ? 1 : 0;
-        else if (strcmp(key, "fast_launch") == 0) fast_launch_enabled = val ? 1 : 0;
+        // "fast_launch" was the opt-in build's key; the OFF it saved is not carried over.
+        else if (strcmp(key, "fast_launch_on") == 0) fast_launch_enabled = val ? 1 : 0;
         else if (strcmp(key, "surprise_me_enabled") == 0) surprise_me_enabled = val;
         else if (strcmp(key, "font_choice_idx") == 0) font_choice_idx = val;
         else if (strcmp(key, "font_size_idx") == 0) font_size_idx = val;
@@ -6496,7 +6497,7 @@ void save_settings() {
     fprintf(f, "perf_overlay_opacity=%d\n", perf_overlay_opacity);
     fprintf(f, "perf_overlay_text_idx=%d\n", perf_overlay_text_idx);
     fprintf(f, "cpu_perf_mode=%d\n", cpu_perf_mode);
-    fprintf(f, "fast_launch=%d\n", fast_launch_enabled);
+    fprintf(f, "fast_launch_on=%d\n", fast_launch_enabled);
     fprintf(f, "surprise_me_enabled=%d\n", surprise_me_enabled);
     fprintf(f, "font_choice_idx=%d\n", font_choice_idx);
     fprintf(f, "font_size_idx=%d\n", font_size_idx);
@@ -15467,7 +15468,7 @@ void factory_reset() {
     theme_idx = 0; g_ps_saved_theme = 0; power_save_mode = 0; launch_fullscreen = 1; reduce_motion = 0; show_fps = 1;
     fast_forward_idx = 1; fast_forward_mode = 0; auto_save_games = 0; power_save_mode = 0; power_save_auto = 0;
     cpu_perf_mode = 0; show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
-    fast_launch_enabled = 0; fastlaunch_clear_all();
+    fast_launch_enabled = 1; fastlaunch_clear_all();
     auto_ps_pct = 0; battery_icon_enabled = 1;
     night_mode = 0; night_start_hour = 21; night_end_hour = 7; night_hotkey_on = 0; night_force = 0; night_brightness_pct = 35;
     device_idx = 0; g_roms_nroots = 0; dev_grp_batt_open = 0; dev_grp_night_open = 0;
@@ -26321,7 +26322,7 @@ int main(int argc, char *argv[]) {
                     if (rt == ROW_DEV_POWERSAVE) snprintf(text, sizeof(text), "Power Save Mode: %s%s", power_save_mode ? "ON" : "OFF", (power_save_mode && power_save_auto) ? " (auto)" : "");
                     else if (rt == ROW_DEV_FPS_MODE) snprintf(text, sizeof(text), "Frame Rate: %s", fps_mode_names[(fps_mode_idx >= 0 && fps_mode_idx < FPS_MODE_COUNT) ? fps_mode_idx : 0]);
                     else if (rt == ROW_DEV_CPU_PERF) snprintf(text, sizeof(text), "CPU Performance Mode: %s%s", cpu_perf_mode ? "ON" : "OFF", power_save_mode ? "  (Power Save wins)" : (cpu_perf_mode ? "  (stays on in games)" : ""));
-                    else if (rt == ROW_DEV_FAST_LAUNCH) snprintf(text, sizeof(text), "Fast Game Launch: %s  (experimental)", fast_launch_enabled ? "ON" : "OFF");
+                    else if (rt == ROW_DEV_FAST_LAUNCH) snprintf(text, sizeof(text), "Fast Game Launch: %s%s", fast_launch_enabled ? "ON" : "OFF", fast_launch_enabled ? "  (repeat launches skip setup)" : "");
                     else if (rt == ROW_DEV_PERF_OVERLAY) snprintf(text, sizeof(text), "Performance Overlay: %s%s", show_perf_overlay ? "ON" : "OFF", show_perf_overlay ? "  (stays up in games)" : "");
                     else if (rt == ROW_DEV_PERF_OPACITY) { snprintf(text, sizeof(text), "Overlay Opacity: %d%%", perf_overlay_opacity); indent = 1; }
                     else if (rt == ROW_DEV_PERF_TEXT) { snprintf(text, sizeof(text), "Overlay Text Color: %s", perf_overlay_text_idx == 0 ? "Match UI" : font_color_names[(perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT) ? perf_overlay_text_idx : 1]); indent = 1; }
