@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('audit','draft','upload','publish','verify')]
+    [ValidateSet('audit','draft','upload','publish','verify','replace')]
     [string]$Mode='audit',
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version = '1.3.1',
@@ -61,6 +61,20 @@ if($Mode -eq 'upload') {
     foreach($name in @($zipName,$sumName)){
         $path=Join-Path $repo "dist/$name"
         if(@($release.assets | Where-Object name -eq $name).Count){throw "Asset already exists: $name; verify before retrying"}
+        $upload=$release.upload_url -replace '\{.*$',''
+        $uploaded=Invoke-RestMethod -Method POST -Uri "$($upload)?name=$([uri]::EscapeDataString($name))" -Headers $headers -InFile $path -ContentType 'application/octet-stream' -TimeoutSec 300
+        if($uploaded.size -ne (Get-Item -LiteralPath $path).Length){throw 'Uploaded asset size mismatch'}
+        if($uploaded.digest -and $uploaded.digest -ne ('sha256:'+(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLower())){throw 'Uploaded asset hash mismatch'}
+    }
+    $release=Request GET "$api/releases/$($release.id)" $null
+}
+if($Mode -eq 'replace') {
+    # Quietly swap the two public assets of a published release for rebuilt ones.
+    if($release.draft){throw 'Replace is for a published release; use upload for a draft'}
+    foreach($name in @($zipName,$sumName)){if(-not (Test-Path -LiteralPath (Join-Path $repo "dist/$name"))){throw "Missing dist/$name"}}
+    foreach($name in @($zipName,$sumName)){
+        foreach($old in @($release.assets | Where-Object name -eq $name)){ Request DELETE "$api/releases/assets/$($old.id)" $null | Out-Null }
+        $path=Join-Path $repo "dist/$name"
         $upload=$release.upload_url -replace '\{.*$',''
         $uploaded=Invoke-RestMethod -Method POST -Uri "$($upload)?name=$([uri]::EscapeDataString($name))" -Headers $headers -InFile $path -ContentType 'application/octet-stream' -TimeoutSec 300
         if($uploaded.size -ne (Get-Item -LiteralPath $path).Length){throw 'Uploaded asset size mismatch'}

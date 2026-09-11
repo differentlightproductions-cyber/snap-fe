@@ -1017,6 +1017,7 @@ int auto_save_games = 0; // OFF by default -- exact save keybind not yet confirm
 int power_save_mode = 0;
 int power_save_auto = 0;         // 1 = Power Save was turned on automatically by the low-battery trigger
 int cpu_perf_mode = 0;          // 1 = pin the CPU governor to "performance" (persists into games)
+int fast_launch_enabled = 0;    // experimental, opt-in: repeat launches skip Knulli's setup when nothing changed (fast_launch.h)
 int launch_cpu_boost_active = 0; // short configgen-only boost; restored once RetroArch exists
 int auto_ps_pct = 0;            // persisted: 0 = off, else auto-enable Power Save at/below this %
 int battery_icon_enabled = 1;   // draw a real fill/deplete battery beside the percentage
@@ -4693,6 +4694,7 @@ int build_sound_rows(int *row_type, int *row_extra) {
 #define ROW_DEV_GRP_CONNECT 29
 #define ROW_DEV_GRP_CONTROLS 30
 #define ROW_DEV_GRP_SYSTEM 31
+#define ROW_DEV_FAST_LAUNCH 32    // replay Knulli's RetroArch setup when nothing changed
 int dev_grp_batt_open = 0;
 int dev_grp_night_open = 0;
 int dev_grp_perf_open = 0;
@@ -4733,6 +4735,7 @@ int build_device_rows(int *row_type, int *row_extra) {
     row_type[idx] = ROW_DEV_GRP_PERF; row_extra[idx] = 0; idx++;
     if (dev_grp_perf_open) {
         row_type[idx] = ROW_DEV_CPU_PERF; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_FAST_LAUNCH; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_FPS_MODE; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_PERF_OVERLAY; row_extra[idx] = 0; idx++;
         if (show_perf_overlay) {
@@ -5426,7 +5429,7 @@ static int settings_row_cycles(int tab, int rt) {
                rt == ROW_G_SHOW_DESC;
     case TAB_DEVICE:
         return rt == ROW_DEV_POWERSAVE || rt == ROW_DEV_AUTOPS || rt == ROW_DEV_BATTERY_ICON ||
-               rt == ROW_DEV_CPU_PERF || rt == ROW_DEV_FPS_MODE || rt == ROW_DEV_PERF_OVERLAY ||
+               rt == ROW_DEV_CPU_PERF || rt == ROW_DEV_FAST_LAUNCH || rt == ROW_DEV_FPS_MODE || rt == ROW_DEV_PERF_OVERLAY ||
                rt == ROW_DEV_PERF_OPACITY || rt == ROW_DEV_PERF_TEXT || rt == ROW_DEV_NIGHT ||
                rt == ROW_DEV_NIGHT_START || rt == ROW_DEV_NIGHT_END || rt == ROW_DEV_NIGHT_BRIGHT ||
                rt == ROW_DEV_NIGHT_HOTKEY || rt == ROW_DEV_DEVICE;
@@ -6295,6 +6298,7 @@ void load_settings() {
         else if (strcmp(key, "perf_overlay_opacity") == 0) perf_overlay_opacity = (val < 20) ? 20 : (val > 100) ? 100 : val;
         else if (strcmp(key, "perf_overlay_text_idx") == 0) perf_overlay_text_idx = (val >= 0 && val < FONT_COLOR_COUNT) ? val : 1;
         else if (strcmp(key, "cpu_perf_mode") == 0) cpu_perf_mode = val ? 1 : 0;
+        else if (strcmp(key, "fast_launch") == 0) fast_launch_enabled = val ? 1 : 0;
         else if (strcmp(key, "surprise_me_enabled") == 0) surprise_me_enabled = val;
         else if (strcmp(key, "font_choice_idx") == 0) font_choice_idx = val;
         else if (strcmp(key, "font_size_idx") == 0) font_size_idx = val;
@@ -6492,6 +6496,7 @@ void save_settings() {
     fprintf(f, "perf_overlay_opacity=%d\n", perf_overlay_opacity);
     fprintf(f, "perf_overlay_text_idx=%d\n", perf_overlay_text_idx);
     fprintf(f, "cpu_perf_mode=%d\n", cpu_perf_mode);
+    fprintf(f, "fast_launch=%d\n", fast_launch_enabled);
     fprintf(f, "surprise_me_enabled=%d\n", surprise_me_enabled);
     fprintf(f, "font_choice_idx=%d\n", font_choice_idx);
     fprintf(f, "font_size_idx=%d\n", font_size_idx);
@@ -6676,6 +6681,8 @@ void apply_brightness(void) {
 #endif
 }
 
+#include "fast_launch.h"
+
 // Keep the chosen panel level authoritative for the entire emulator session.
 // Knulli/configgen can rewrite the backlight after its loading screen, so a
 // few delayed writes are not enough. The hotkey helper updates the same tiny
@@ -6731,10 +6738,14 @@ static int proc_comm_is(pid_t pid, const char *wanted) {
     return strcmp(comm, wanted) == 0;
 }
 
+static pid_t emulator_video_found_pid = 0;   // the RetroArch/mGBA process it found
 static int emulator_video_process_ready(void) {
     // Direct RetroArch launches use emu_pid itself. Knulli's Python launcher
     // keeps RetroArch as its direct child for the whole session.
-    if (proc_comm_is(emu_pid, "retroarch") || proc_comm_is(emu_pid, "mgba")) return 1;
+    if (proc_comm_is(emu_pid, "retroarch") || proc_comm_is(emu_pid, "mgba")) {
+        emulator_video_found_pid = emu_pid;
+        return 1;
+    }
     if (emu_pid <= 0) return 0;
     char path[128];
     snprintf(path, sizeof path, "/proc/%d/task/%d/children", (int)emu_pid, (int)emu_pid);
@@ -6743,6 +6754,7 @@ static int emulator_video_process_ready(void) {
     if (f) {
         while (fscanf(f, "%d", &child) == 1) {
             if (proc_comm_is((pid_t)child, "retroarch") || proc_comm_is((pid_t)child, "mgba")) {
+                emulator_video_found_pid = (pid_t)child;
                 ready = 1;
                 break;
             }
@@ -6762,6 +6774,7 @@ static int emulator_video_process_ready(void) {
         if (!isdigit((unsigned char)e->d_name[0])) continue;
         pid_t pid = (pid_t)strtol(e->d_name, NULL, 10);
         if (proc_comm_is(pid, "retroarch") || proc_comm_is(pid, "mgba")) {
+            emulator_video_found_pid = pid;
             ready = 1;
             break;
         }
@@ -6807,6 +6820,7 @@ static void brightness_guard_tick(void) {
     if (!brightness_guard_emulator_ready && emulator_video_process_ready()) {
         brightness_guard_emulator_ready = 1;
         cpu_launch_boost_stop();
+        fastlaunch_on_ready(emulator_video_found_pid);   // record Knulli's session for next time
         brightness_guard_ready_at = now;
         brightness_guard_ready_pulses = 0;
         // One tmpfs-only timing marker per launch. Combined with the launch
@@ -6829,6 +6843,7 @@ static void brightness_guard_tick(void) {
             now - brightness_guard_ready_at >= ready_due[brightness_guard_ready_pulses]) {
             brightness_guard_ready_pulses++;
             brightness_guard_apply_pct(desired);
+            if (brightness_guard_ready_pulses == 3) fastlaunch_recheck();   // 2.5 s in
         }
         return;
     }
@@ -14358,7 +14373,7 @@ static void link_write_core_opts(int is_host, const char *peer_ip) {
 int g_launch_snap_ms = -1;
 
 static void launch_perf_mark(const char *stage, Uint32 started) {
-    if (stage && !strcmp(stage, "spawned-emulatorlauncher"))
+    if (stage && (!strcmp(stage, "spawned-emulatorlauncher") || !strcmp(stage, "spawned-retroarch-fast")))
         g_launch_snap_ms = (int)(SDL_GetTicks() - started);
 #ifdef SNAPOS_TARGET_KNULLI
     FILE *f = fopen("/tmp/snapfe-launch-perf.log", "a");
@@ -15012,8 +15027,21 @@ void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
                 if (suffix) *suffix = 0; else selected_core[0] = 0;
             }
         }
-        emu_pid = spawn_emulatorlauncher(sysbuf, path, selected_core);
-        launch_perf_mark("spawned-emulatorlauncher", launch_started);
+        // Fast Game Launch: replay the RetroArch session Knulli set up last time
+        // for this system when nothing that feeds Knulli's launcher changed.
+        FastLaunch fast;
+        if (fastlaunch_prepare(sysbuf, selected_core, path, &fast)) {
+            cpu_launch_boost_start();
+            emu_pid = fastlaunch_spawn(&fast);
+            fastlaunch_free(&fast);
+            if (emu_pid > 0) fastlaunch_started(sysbuf, selected_core, path, title, platform_dir);
+            else cpu_launch_boost_stop();
+            launch_perf_mark("spawned-retroarch-fast", launch_started);
+        } else {
+            emu_pid = spawn_emulatorlauncher(sysbuf, path, selected_core);
+            fastlaunch_arm(sysbuf, selected_core, path, emu_pid);
+            launch_perf_mark("spawned-emulatorlauncher", launch_started);
+        }
         launch_begin_brightness();
         if (emu_pid < 0) {
             launch_restore_after_failure(win, ren, video_released);
@@ -15439,6 +15467,7 @@ void factory_reset() {
     theme_idx = 0; g_ps_saved_theme = 0; power_save_mode = 0; launch_fullscreen = 1; reduce_motion = 0; show_fps = 1;
     fast_forward_idx = 1; fast_forward_mode = 0; auto_save_games = 0; power_save_mode = 0; power_save_auto = 0;
     cpu_perf_mode = 0; show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
+    fast_launch_enabled = 0; fastlaunch_clear_all();
     auto_ps_pct = 0; battery_icon_enabled = 1;
     night_mode = 0; night_start_hour = 21; night_end_hour = 7; night_hotkey_on = 0; night_force = 0; night_brightness_pct = 35;
     device_idx = 0; g_roms_nroots = 0; dev_grp_batt_open = 0; dev_grp_night_open = 0;
@@ -23569,6 +23598,10 @@ int main(int argc, char *argv[]) {
                                 set_power_save(!power_save_mode, 0);   // 30fps cap + gov + Midnight theme, applied live
                             } else if (dev_row_type[settings_selected] == ROW_DEV_CPU_PERF) {
                                 cpu_perf_mode = !cpu_perf_mode; cpu_apply_pref(); save_settings();
+                            } else if (dev_row_type[settings_selected] == ROW_DEV_FAST_LAUNCH) {
+                                fast_launch_enabled = !fast_launch_enabled;
+                                if (!fast_launch_enabled) fastlaunch_clear_all();
+                                save_settings();
                             } else if (dev_row_type[settings_selected] == ROW_DEV_FPS_MODE) {
                                 fps_mode_idx = (fps_mode_idx + dir + FPS_MODE_COUNT) % FPS_MODE_COUNT;
                             } else if (dev_row_type[settings_selected] == ROW_DEV_PERF_OVERLAY) {
@@ -23715,6 +23748,11 @@ int main(int argc, char *argv[]) {
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_CPU_PERF) {
                             cpu_perf_mode = !cpu_perf_mode; cpu_apply_pref(); save_settings(); play_click();
+                        }
+                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_FAST_LAUNCH) {
+                            fast_launch_enabled = !fast_launch_enabled;
+                            if (!fast_launch_enabled) fastlaunch_clear_all();
+                            save_settings(); play_click();
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_PERF_OVERLAY) {
                             show_perf_overlay = !show_perf_overlay; save_settings(); settings_dirty = 0; play_click();
@@ -24432,9 +24470,10 @@ int main(int argc, char *argv[]) {
                 // panel level throughout play, while the startup hotkey helper
                 // updates its desired-value file for intentional user changes.
             }
-            int status;
+            int status = 0;
             pid_t r = (emu_pid > 0) ? waitpid(emu_pid, &status, WNOHANG) : emu_pid;
             if (r != 0) {
+                fastlaunch_exited(r > 0 && r == emu_pid, status);   // a fast launch that failed at once is retried
                 game_running = 0; emu_pid = -1;
                 game_lid_paused = 0;
                 ingame_osd_hide();         // the frontend draws its own again from here
@@ -24547,6 +24586,7 @@ int main(int argc, char *argv[]) {
         }
         hotkey_poll_held();      // hold a volume key -> keep stepping, accelerating
         if(sf_solo){sf_solo=0;sf_bypass=1;launch_game(&win,&ren,&game_video_released,sf_solo_path,sf_solo_title,sf_solo_system);}
+        if(fl_retry&&!game_running){fl_retry=0;fl_bypass=1;launch_game(&win,&ren,&game_video_released,fl_retry_path,fl_retry_title,fl_retry_platform);}
         mg_music_tick(state==STATE_MINIGAME?mg_cur:-1,state==STATE_MINIGAME?(mg_cur==MG_RUNNER?mgx_run.level+1:mg_cur==MG_TIDEPOOL?mgx_fish.stage:1):0);
         widget_local_tick(state==STATE_WIDGET_PLACES||state==STATE_WEATHER||state==STATE_WEATHER_HOURLY||state==STATE_WEATHER_SETTINGS||(state==STATE_HOME&&((home_view_idx==HOME_VIEW_APPS&&(app_widget_kind==APP_WIDGET_CLOCK||app_widget_kind==APP_WIDGET_WEATHER))||(home_view_idx!=HOME_VIEW_APPS&&(widget_place_kind(home_widget_idx)||widget_place_kind(home_widget2_idx))))));
         if (!promo_mode) {poll_scrape_status(ren, font_label, platform_selected);sf_tick();sf_launch(&state);sm_tick();}
@@ -26281,6 +26321,7 @@ int main(int argc, char *argv[]) {
                     if (rt == ROW_DEV_POWERSAVE) snprintf(text, sizeof(text), "Power Save Mode: %s%s", power_save_mode ? "ON" : "OFF", (power_save_mode && power_save_auto) ? " (auto)" : "");
                     else if (rt == ROW_DEV_FPS_MODE) snprintf(text, sizeof(text), "Frame Rate: %s", fps_mode_names[(fps_mode_idx >= 0 && fps_mode_idx < FPS_MODE_COUNT) ? fps_mode_idx : 0]);
                     else if (rt == ROW_DEV_CPU_PERF) snprintf(text, sizeof(text), "CPU Performance Mode: %s%s", cpu_perf_mode ? "ON" : "OFF", power_save_mode ? "  (Power Save wins)" : (cpu_perf_mode ? "  (stays on in games)" : ""));
+                    else if (rt == ROW_DEV_FAST_LAUNCH) snprintf(text, sizeof(text), "Fast Game Launch: %s  (experimental)", fast_launch_enabled ? "ON" : "OFF");
                     else if (rt == ROW_DEV_PERF_OVERLAY) snprintf(text, sizeof(text), "Performance Overlay: %s%s", show_perf_overlay ? "ON" : "OFF", show_perf_overlay ? "  (stays up in games)" : "");
                     else if (rt == ROW_DEV_PERF_OPACITY) { snprintf(text, sizeof(text), "Overlay Opacity: %d%%", perf_overlay_opacity); indent = 1; }
                     else if (rt == ROW_DEV_PERF_TEXT) { snprintf(text, sizeof(text), "Overlay Text Color: %s", perf_overlay_text_idx == 0 ? "Match UI" : font_color_names[(perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT) ? perf_overlay_text_idx : 1]); indent = 1; }
