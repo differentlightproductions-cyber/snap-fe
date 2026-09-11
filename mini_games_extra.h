@@ -390,6 +390,18 @@ static void mgx_pong_visual_decay(float ms){
     float keep=expf(-ms/90.0f);
     mgx_pong_sync.ball_dx*=keep;mgx_pong_sync.ball_dy*=keep;mgx_pong_sync.paddle_dy*=keep;
 }
+static int mgx_pong_near_remote_contact(float age){
+    float pad_margin=pg.ph/2.0f+pg.br+8.0f;
+    if(mgx_pong_mode==2){
+        float left_x=pg.left+pg.pw+pg.br+54.0f+age*.45f;
+        return pg.bx<=left_x&&fabsf(pg.by-pg.you)<=pad_margin;
+    }
+    if(mgx_pong_mode==1){
+        float right_x=pg.right-pg.pw-pg.br-54.0f-age*.45f;
+        return pg.bx>=right_x&&fabsf(pg.by-pg.cpu)<=pad_margin;
+    }
+    return 0;
+}
 static void mgx_pong_ball_advance(float ms){
     /* Small steps preserve paddle collisions when a frame or packet is late.
        Prediction never awards points: only the host changes the score. */
@@ -464,6 +476,10 @@ static void mgx_pong_take_state_at(const MgxPacket *p,Uint32 now){
     mgx_pong_sync.ball_dx=continuous&&fabsf(oldx-pg.bx)<120?oldx-pg.bx:0;
     mgx_pong_sync.ball_dy=continuous&&fabsf(oldy-pg.by)<120?oldy-pg.by:0;
     mgx_pong_sync.paddle_dy=continuous?mgx_clampf(oldp-pg.you,-70,70):0;
+    if(mgx_pong_near_remote_contact(age)){
+        mgx_pong_sync.ball_dx=mgx_pong_sync.ball_dy=0;
+        mgx_pong_sync.paddle_dy=0;
+    }
     if(!pg.over)mgx_pong_scored=0;
     if(pg.over&&pg.winner==2&&!mgx_pong_scored){mg_set_best(MG_PONG,mg_best[MG_PONG]+1);mgx_pong_scored=1;}
 }
@@ -530,13 +546,20 @@ static void mgx_pong_render(SDL_Renderer *ren){
     }else if(mgx_pong_mode!=0&&!mgx_net.connected)mgx_overlay_message(ren,mgx_net.status,"Same Wi-Fi / local network required");
     else if(mgx_pong_mode!=0 && mgx_pong_launch){char c[32];snprintf(c,sizeof c,"%d",mgx_clampi(((int32_t)(mgx_pong_launch-SDL_GetTicks())+999)/1000,1,3));mgx_overlay_message(ren,c,"Get ready!");}
     else if(mgx_pong_mode!=0 && !pg.started)mgx_overlay_message(ren,mgx_pong_ready?"YOU ARE READY":"CONFIRM MATCH",mgx_pong_ready?"Waiting for your friend to confirm":"A Ready - both players must confirm");
-    else if(mgx_pong_mode!=0)mgx_text_center(ren,font_label,mgx_pong_mode==1?"Nearby match - you are LEFT":"Nearby match - you are RIGHT",th->accent2,WIN_W/2,82);
+    else if(mgx_pong_mode!=0){
+        SDL_Rect band={0,WIN_H-42,WIN_W,42};
+        SDL_SetRenderDrawColor(ren,th->bg.r,th->bg.g,th->bg.b,230);
+        SDL_RenderFillRect(ren,&band);
+        mgx_text_center(ren,font_label,mgx_pong_mode==1?"Your paddle: Left    Friend: Right":"Your paddle: Right    Friend: Left",th->accent2,WIN_W/2,WIN_H-31);
+        mgx_text_center(ren,font_label,"D-pad Move    B Exit",g_ui_dim,WIN_W/2,WIN_H-13);
+    }
 }
 
 /* Nearby Connect 4, using the same discovery transport as Tank and Pong. */
 static int mgx_c4_lobby=1,mgx_c4_choice=0,mgx_c4_mode=0,mgx_c4_pending=-1;
+static int mgx_c4_local_player=1,mgx_c4_remote_cur=3;
 static int mgx_c4_ply(void){int n=0;for(int i=0;i<42;i++)n+=tt.cell[i]!=0;return n;}
-static void mgx_c4_reset(void){mgx_net_close();ttt_reset();mgx_c4_lobby=1;mgx_c4_choice=mgx_c4_mode=0;mgx_c4_pending=-1;}
+static void mgx_c4_reset(void){mgx_net_close();ttt_reset();mgx_c4_lobby=1;mgx_c4_choice=mgx_c4_mode=0;mgx_c4_pending=-1;mgx_c4_local_player=1;mgx_c4_remote_cur=3;}
 static void mgx_c4_drop(int col,int who){
     if(tt.over||tt.turn!=who||c4_drop(tt.cell,col,who)<0)return;
     tt.winner=ttt_result(tt.cell);tt.over=tt.winner!=0;tt.turn=3-who;
@@ -545,7 +568,7 @@ static void mgx_c4_key(SDL_Keycode k){
     if(mgx_c4_lobby){
         if(k==SDLK_LEFT)mgx_c4_choice=(mgx_c4_choice+2)%3;
         if(k==SDLK_RIGHT)mgx_c4_choice=(mgx_c4_choice+1)%3;
-        if(k==SDLK_RETURN){mgx_c4_mode=mgx_c4_choice;ttt_reset();mgx_c4_lobby=0;
+        if(k==SDLK_RETURN){mgx_c4_mode=mgx_c4_choice;ttt_reset();mgx_c4_lobby=0;mgx_c4_local_player=mgx_c4_mode==2?2:1;mgx_c4_remote_cur=3;
             if(mgx_c4_mode&&!mgx_net_open(mgx_c4_mode==1?MGX_NET_HOST:MGX_NET_JOIN,MG_TTT))mgx_c4_lobby=1;}
         return;
     }
@@ -563,18 +586,26 @@ static void mgx_c4_step(void){
     if(mgx_c4_lobby)return;if(!mgx_c4_mode){ttt_step();return;}
     MgxPacket p;int got=mgx_net_poll(MG_TTT,&p);
     if(mgx_c4_mode==1){
-        if(got==MGX_PKT_INPUT && mgx_pkt_i(&p,2)==mgx_c4_ply()+1)mgx_c4_drop(mgx_pkt_i(&p,0),2);
+        if(got==MGX_PKT_INPUT){
+            mgx_c4_remote_cur=mgx_clampi(mgx_pkt_i(&p,0),0,C4_COLS-1);
+            if(mgx_pkt_i(&p,2)==mgx_c4_ply()+1)mgx_c4_drop(mgx_c4_remote_cur,2);
+        }
         if(mgx_net.connected && SDL_GetTicks()-mgx_net.last_tx>=30){mgx_net.last_tx=SDL_GetTicks();mgx_net_packet(&p,MGX_PKT_STATE,MG_TTT);
-            for(int i=0;i<42;i++)mgx_pkt_set(&p,i,tt.cell[i]);mgx_pkt_set(&p,42,tt.turn);mgx_pkt_set(&p,43,tt.winner);mgx_net_send_redundant(&p,&mgx_net.peer);}
+            for(int i=0;i<42;i++)mgx_pkt_set(&p,i,tt.cell[i]);mgx_pkt_set(&p,42,tt.turn);mgx_pkt_set(&p,43,tt.winner);
+            mgx_pkt_set(&p,44,tt.cur);mgx_pkt_set(&p,45,mgx_c4_remote_cur);mgx_net_send_redundant(&p,&mgx_net.peer);}
     }else{
         if(got==MGX_PKT_STATE){int old=mgx_c4_ply();for(int i=0;i<42;i++)tt.cell[i]=mgx_clampi(mgx_pkt_i(&p,i),0,2);
             tt.turn=mgx_clampi(mgx_pkt_i(&p,42),1,2);tt.winner=mgx_clampi(mgx_pkt_i(&p,43),0,3);tt.over=tt.winner!=0;
+            if(tt.turn==1)tt.cur=mgx_clampi(mgx_pkt_i(&p,44),0,C4_COLS-1);
             if(mgx_c4_ply()!=old||tt.turn!=2)mgx_c4_pending=-1;}
-        mgx_net_send_input(MG_TTT,mgx_c4_pending,0,mgx_c4_pending>=0?mgx_c4_ply()+1:0,0);
+        mgx_net_send_input(MG_TTT,tt.cur,0,mgx_c4_pending>=0?mgx_c4_ply()+1:0,0);
     }
 }
 static void mgx_c4_render(SDL_Renderer *ren){
+    int old_cursor_player=c4_cursor_player;
+    c4_cursor_player=mgx_c4_mode?mgx_c4_local_player:1;
     ttt_render(ren);
+    c4_cursor_player=old_cursor_player;
     if(mgx_c4_lobby){const char *m[]={"CPU BATTLE","LOCAL LINK HOST","LOCAL LINK JOIN"};mgx_overlay_message(ren,m[mgx_c4_choice],"Left/Right Mode    A Choose");}
     else if(mgx_c4_mode){
         SDL_SetRenderDrawColor(ren,mg_theme()->bg.r,mg_theme()->bg.g,mg_theme()->bg.b,255);SDL_RenderFillRect(ren,&(SDL_Rect){0,410,WIN_W,70});
@@ -602,7 +633,7 @@ static void mgx_flap_step(void){
 static void mgx_flap_render(SDL_Renderer *ren){
     flap_render(ren);SDL_Color gold={245,190,45,255};
     for(int i=0;i<FLAP_PIPES;i++)if(mgx_flap_gold[i]){int x=(int)(fb.px[i]+fb.pw/2),y=fb.pgc[i];mgx_circle(ren,x,y,8,gold,80);mgx_diamond(ren,x,y,6,gold);}
-    char s[40];snprintf(s,sizeof s,"Gold %d  (+2)",mgx_flap_gold_count);mgx_text(ren,font_label,s,gold,30,82);
+    char s[40];snprintf(s,sizeof s,"Gold %d   (+2 each)",mgx_flap_gold_count);mg_stat_line(ren,s);
 }
 
 /* -------------------- Pulse Runner: ten stages ----------------------- */
@@ -621,11 +652,14 @@ static const MgxRunObj mgx_rl2[]={RGP(430,80),RSP(700),RBL(870,85,42),RSP(1090),
  * to read on the handheld screen and clear without a near-perfect tap. */
 static const MgxRunObj mgx_rl3[]={RSP(330),RSP(470),RBL(650,45,40),RBL(810,45,54),RBL(980,45,66),RGP(1220,105),RSP(1530),RSP(1590),RBL(1910,110,38),RGP(2250,90),RSP(2540)};
 static const MgxRunObj mgx_rl4[]={RGP(390,90),RBL(650,70,45),RSP(820),RSP(880),RGP(1080,105),RBL(1370,45,82),RSP(1590),RBL(1770,100,48),RSP(2010),RSP(2070),RGP(2320,135),RBL(2640,50,70)};
-static const MgxRunObj mgx_rl5[]={RSP(300),RSP(420),RSP(540),RGP(750,120),RBL(1050,60,50),RBL(1190,60,75),RSP(1430),RGP(1660,90),RSP(1900),RSP(1950),RBL(2190,130,44),RGP(2510,110),RSP(2790)};
-static const MgxRunObj mgx_rl6[]={RBL(350,55,50),RSP(520),RGP(690,95),RSP(940),RSP(990),RBL(1210,45,90),RGP(1450,140),RBL(1750,80,45),RSP(1950),RGP(2140,95),RSP(2400),RSP(2460),RSP(2520),RBL(2780,60,74)};
-static const MgxRunObj mgx_rl7[]={RGP(330,110),RSP(620),RBL(790,45,58),RSP(950),RGP(1140,145),RBL(1450,50,90),RSP(1690),RSP(1750),RGP(1970,120),RBL(2260,90,46),RSP(2480),RSP(2540),RGP(2760,100),RSP(3010)};
-static const MgxRunObj mgx_rl8[]={RSP(280),RSP(390),RGP(570,100),RBL(820,50,80),RSP(1020),RSP(1070),RBL(1270,100,46),RGP(1510,145),RSP(1820),RSP(1870),RSP(1920),RBL(2190,45,96),RGP(2440,120),RBL(2730,100,44),RSP(2990)};
-static const MgxRunObj mgx_rl9[]={RSP(270),RGP(440,105),RSP(850),RGP(1080,140),RBL(1390,50,95),RSP(1610),RGP(1790,115),RSP(2040),RSP(2100),RBL(2320,120,48),RGP(2610,150),RSP(2930),RSP(2990),RBL(3210,55,82)};
+/* From stage six on, one gap per level is deliberately wider than a jump can
+ * cover, so the gravity flip has to be used to get past it. See
+ * mgx_run_jump_span(): at speed 5 a jump clears about 214px. */
+static const MgxRunObj mgx_rl5[]={RSP(300),RSP(420),RSP(540),RGP(750,120),RBL(1050,60,50),RBL(1190,60,75),RSP(1430),RGP(1660,300),RSP(2050),RSP(2100),RBL(2340,130,44),RGP(2660,110),RSP(2940)};
+static const MgxRunObj mgx_rl6[]={RBL(350,55,50),RSP(520),RGP(690,95),RSP(940),RSP(990),RBL(1210,45,90),RGP(1450,330),RBL(1930,80,45),RSP(2130),RGP(2320,95),RSP(2580),RSP(2640),RSP(2700),RBL(2960,60,74)};
+static const MgxRunObj mgx_rl7[]={RGP(330,110),RSP(620),RBL(790,45,58),RSP(950),RGP(1140,340),RBL(1650,50,90),RSP(1890),RSP(1950),RGP(2170,120),RBL(2460,90,46),RSP(2680),RSP(2740),RGP(2960,100),RSP(3210)};
+static const MgxRunObj mgx_rl8[]={RSP(280),RSP(390),RGP(570,100),RBL(820,50,80),RSP(1020),RSP(1070),RBL(1270,100,46),RGP(1510,360),RSP(2040),RSP(2090),RSP(2140),RBL(2410,45,96),RGP(2660,120),RBL(2950,100,44),RSP(3210)};
+static const MgxRunObj mgx_rl9[]={RSP(270),RGP(440,105),RSP(850),RGP(1080,380),RBL(1630,50,95),RSP(1850),RGP(2030,115),RSP(2280),RSP(2340),RBL(2560,120,48),RGP(2850,360),RSP(3390),RSP(3450),RBL(3670,55,82)};
 #undef RSP
 #undef RBL
 #undef RGP
@@ -636,7 +670,7 @@ static const MgxRunLevel mgx_run_levels[10]={
     {2850,4,MGX_ARRN(mgx_rl2),mgx_rl2,"SKY BRIDGE"},{2900,4,MGX_ARRN(mgx_rl3),mgx_rl3,"STAIR SIGNAL"},
     {3000,5,MGX_ARRN(mgx_rl4),mgx_rl4,"LONG NOTE"},{3150,5,MGX_ARRN(mgx_rl5),mgx_rl5,"TRIPLE TAP"},
     {3250,5,MGX_ARRN(mgx_rl6),mgx_rl6,"OFFSET"},{3350,6,MGX_ARRN(mgx_rl7),mgx_rl7,"NIGHT DRIVE"},
-    {3450,6,MGX_ARRN(mgx_rl8),mgx_rl8,"UPBEAT"},{3650,6,MGX_ARRN(mgx_rl9),mgx_rl9,"FINAL PULSE"}
+    {3450,6,MGX_ARRN(mgx_rl8),mgx_rl8,"UPBEAT"},{3800,6,MGX_ARRN(mgx_rl9),mgx_rl9,"FINAL PULSE"}
 };
 
 #define MGX_RUN_JUMP_VY    -12.4f
@@ -656,7 +690,26 @@ static MgxRunObj mgx_run_object(int i){
     const MgxRunLevel *l=&mgx_run_levels[mgx_run.level];MgxRunObj o=l->o[i%l->n];o.x+=(i/l->n)*l->length;return o;
 }
 static int mgx_run_screen_y(int y,int h){return mgx_run.inverted?532-y-h:y;}
-static int mgx_run_in_gap(float wx){wx=fmodf(wx,(float)mgx_run_levels[mgx_run.level].length);const MgxRunLevel*l=&mgx_run_levels[mgx_run.level];for(int i=0;i<l->n;i++)if(l->o[i].type==2&&wx>=l->o[i].x&&wx<=l->o[i].x+l->o[i].w)return 1;return 0;}
+/* How far the runner travels in one jump, in world pixels: full airtime at this
+   stage's scroll speed. Anything wider than this cannot be jumped and has to be
+   crossed on the ceiling -- which is what makes the gravity flip a mechanic
+   rather than a toy. */
+static float mgx_run_jump_span(int level){
+    float airtime=2.0f*(-MGX_RUN_JUMP_VY)/MGX_RUN_GRAVITY;
+    return airtime*mgx_run_levels[mgx_clampi(level,0,9)].speed;
+}
+static int mgx_run_chasm(const MgxRunObj *o,int level){
+    return o->type==2&&o->w>(int)mgx_run_jump_span(level);
+}
+/* The ceiling is unbroken. Floor gaps only exist for a runner standing on the
+   floor, so a chasm too wide to jump is crossed by flipping up and running
+   across the roof -- and the spikes that hang from it are the price. */
+static int mgx_run_in_gap(float wx){
+    if(mgx_run.inverted)return 0;
+    wx=fmodf(wx,(float)mgx_run_levels[mgx_run.level].length);const MgxRunLevel*l=&mgx_run_levels[mgx_run.level];
+    for(int i=0;i<l->n;i++)if(l->o[i].type==2&&wx>=l->o[i].x&&wx<=l->o[i].x+l->o[i].w)return 1;
+    return 0;
+}
 static void mgx_runner_retry(void){
     mgx_run.dead=mgx_run.won=mgx_run.started=mgx_run.inverted=0;mgx_run.on_floor=1;
     mgx_run.scroll=0;mgx_run.y=373;mgx_run.vy=mgx_run.rot=0;
@@ -717,10 +770,10 @@ static void mgx_runner_render(SDL_Renderer*ren){
         else if(o->type==1){SDL_SetRenderDrawColor(ren,th->select_bg.r,th->select_bg.g,th->select_bg.b,255);SDL_RenderFillRect(ren,&(SDL_Rect){x,mgx_run_screen_y(ground-o->h,o->h),o->w,o->h});SDL_SetRenderDrawColor(ren,th->accent1.r,th->accent1.g,th->accent1.b,255);SDL_RenderDrawRect(ren,&(SDL_Rect){x,mgx_run_screen_y(ground-o->h,o->h),o->w,o->h});}
         else{SDL_SetRenderDrawColor(ren,th->bg.r,th->bg.g,th->bg.b,255);SDL_RenderFillRect(ren,&(SDL_Rect){x,mgx_run_screen_y(ground-2,8),o->w,8});}
     }
-    if(mgx_run.level>=5){SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,150);SDL_RenderDrawLine(ren,18,135,WIN_W-18,135);mgx_text(ren,font_fixed?font_fixed:font_label,"X Flip gravity",th->accent2,30,106);}
+    if(mgx_run.level>=5){SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,150);SDL_RenderDrawLine(ren,18,135,WIN_W-18,135);mgx_text(ren,font_fixed?font_fixed:font_label,mgx_run.inverted?"X Drop back down":"X Flip gravity",th->accent2,30,106);}
     SDL_Rect cube={120,mgx_run_screen_y((int)mgx_run.y,24),24,24};SDL_SetRenderDrawColor(ren,th->accent1.r,th->accent1.g,th->accent1.b,255);SDL_RenderFillRect(ren,&cube);SDL_SetRenderDrawColor(ren,th->text.r,th->text.g,th->text.b,255);SDL_RenderDrawRect(ren,&cube);SDL_RenderDrawLine(ren,cube.x+5,cube.y+6,cube.x+19,cube.y+18);SDL_RenderDrawLine(ren,cube.x+19,cube.y+6,cube.x+5,cube.y+18);
     char hud[120];snprintf(hud,sizeof hud,"Stage %d/10  %s   %d%%   Cleared %d/10",mgx_run.level+1,l->name,mgx_run_progress(),mg_best[MG_RUNNER]);mgx_text(ren,font_label,hud,g_ui_text,30,82);
-    if(!mgx_run.started&&!mgx_run.dead&&!mgx_run.won)mgx_overlay_message(ren,"A TO START",mgx_run.level>=5?"A / Up Jump   X Flip gravity - jump from ceilings":"A / Up Jump - three sections with ledges and gaps");
+    if(!mgx_run.started&&!mgx_run.dead&&!mgx_run.won)mgx_overlay_message(ren,"A TO START",mgx_run.level>=5?"A / Up Jump   X Flip gravity - some chasms are too wide to jump":"A / Up Jump - three sections with ledges and gaps");
     else if(mgx_run.dead)mgx_overlay_message(ren,"SIGNAL LOST","A retry     B exit");
     else if(mgx_run.won)mgx_overlay_message(ren,mgx_run.level==9?"ALL TEN PULSES CLEARED":"STAGE CLEAR",mgx_run.level==9?"A restart the set":"A next stage     B exit");
 }
@@ -736,19 +789,70 @@ enum { MGX_ZONE_ROADS=0,MGX_ZONE_HIGHWAY,MGX_ZONE_WOODS,MGX_ZONE_RIVER,
 static struct {
     float x,clock; int row,distance,farthest,score,coins,dead,started,scroll_base;
     int coin_taken[MGX_ROAD_COIN_HISTORY],coin_cursor; Uint32 last,move_ready;
+    /* The section index where each zone was first met this run, or -1. The
+       banner used to reappear at every section boundary, which is a lot of text
+       for a name the player learned the first time; it now shows only in the
+       section where that zone debuted. Recorded by index rather than as a
+       "seen" flag so the answer is the same on every frame the row is on
+       screen -- a flag set during render would flash for one frame. */
+    int zone_debut[MGX_ZONE_BRIDGE+1];
+    int character;                 /* MGX_ROAD_CHAR_* */
 } mgx_road;
+
+/* Pick-your-runner. The old sprite was a frog head; these are small animal
+   silhouettes drawn from the same primitives so they cost nothing extra. */
+enum { MGX_ROAD_CHAR_KANGAROO=0,MGX_ROAD_CHAR_LEMUR,MGX_ROAD_CHAR_CHICKEN,MGX_ROAD_CHAR_FOX,MGX_ROAD_CHAR_COUNT };
+static const char *mgx_road_char_names[MGX_ROAD_CHAR_COUNT]={"Kangaroo","Lemur","Chicken","Fox"};
+static int mgx_road_char_pick;    /* highlighted on the chooser */
+static int mgx_road_choosing;     /* chooser is up */
 
 /* A small integer hash makes every strip reproducible without ever storing an
    endless level.  That keeps memory flat even after a very long run. */
 static unsigned mgx_road_hash(unsigned x) {
     x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return x;
 }
-/* Select one authored six-row zone with deterministic weighted variety.
-   The first twelve rows teach roads/woods before water, rail and mixed
+/* Sections used to be exactly six rows every time, which made the run easy to
+   count: you always knew where the next safe strip was. They now vary between
+   seven and fourteen rows and drift longer as the run goes on, so a zone lasts
+   long enough to have a shape of its own and never resolves on a rhythm.
+   Boundaries are cached because a lookup happens for every row drawn; past the
+   cache the pattern repeats, which is several thousand rows in. */
+#define MGX_ROAD_SECTIONS 512
+static int mgx_road_sec_start[MGX_ROAD_SECTIONS+1];
+static int mgx_road_sec_ready;
+
+static int mgx_road_section_len(int section) {
+    unsigned r=mgx_road_hash((unsigned)section*2654435761u+7u);
+    int longer=section/12; if(longer>4)longer=4;
+    return 7+(int)(r%5u)+longer;
+}
+static void mgx_road_sections_build(void) {
+    if(mgx_road_sec_ready)return;
+    mgx_road_sec_ready=1;
+    mgx_road_sec_start[0]=0;
+    for(int s=0;s<MGX_ROAD_SECTIONS;s++)
+        mgx_road_sec_start[s+1]=mgx_road_sec_start[s]+mgx_road_section_len(s);
+}
+/* Which section `world_row` is in, plus how far into it and how long it is. */
+static int mgx_road_section_at(int world_row,int *local,int *len) {
+    mgx_road_sections_build();
+    if(world_row<0)world_row=0;
+    int total=mgx_road_sec_start[MGX_ROAD_SECTIONS];
+    int laps=world_row/total,wrapped=world_row%total;
+    int lo=0,hi=MGX_ROAD_SECTIONS-1,s=0;
+    while(lo<=hi){int mid=(lo+hi)/2;
+        if(mgx_road_sec_start[mid]<=wrapped){s=mid;lo=mid+1;}else hi=mid-1;}
+    if(local)*local=wrapped-mgx_road_sec_start[s];
+    if(len)*len=mgx_road_sec_start[s+1]-mgx_road_sec_start[s];
+    return s+laps*MGX_ROAD_SECTIONS;
+}
+
+/* Select one authored zone with deterministic weighted variety.
+   The first two sections teach roads/woods before water, rail and mixed
    hazards enter the pool. */
 static int mgx_road_zone(int world_row) {
     if(world_row<0)return MGX_ZONE_ROADS;
-    int section=world_row/6,difficulty=world_row/24;
+    int section=mgx_road_section_at(world_row,NULL,NULL),difficulty=section/4;
     unsigned roll=mgx_road_hash((unsigned)section*911u+73u)%100u;
     if(section<2)return roll<65?MGX_ZONE_ROADS:MGX_ZONE_WOODS;
     if(difficulty<2){
@@ -782,21 +886,28 @@ static const char *mgx_road_zone_name(int zone){
    sections then follow authored patterns selected by a deterministic weighted
    generator, so the run varies without ever creating an inescapable wall. */
 static int mgx_road_kind(int world_row) {
-    if(world_row<=0||world_row%6==0)return MGX_LAND;
-    int local=world_row%6,zone=mgx_road_zone(world_row);
+    if(world_row<=0)return MGX_LAND;
+    int local=0,len=6;
+    int zone=mgx_road_zone(world_row);
+    mgx_road_section_at(world_row,&local,&len);
+    /* Every section still opens with a guaranteed safe planning row, and the
+       breather rows are expressed against the section's own length instead of
+       a fixed six, so a longer zone gets a longer run of hazard. */
+    if(local==0)return MGX_LAND;
+    int last=len-1,mid=len/2;
     switch(zone){
-      case MGX_ZONE_ROADS:return local==3?MGX_LAND:MGX_TRAFFIC;
+      case MGX_ZONE_ROADS:return local==mid?MGX_LAND:MGX_TRAFFIC;
       case MGX_ZONE_HIGHWAY:return MGX_TRAFFIC;
-      case MGX_ZONE_WOODS:return local==5?MGX_LAND:MGX_FOREST;
-      case MGX_ZONE_RIVER:return local==5?MGX_LAND:MGX_RIVER;
-      case MGX_ZONE_STATION:return (local==2||local==4)?MGX_TRACK:MGX_LAND;
-      case MGX_ZONE_CONSTRUCTION:return local==5?MGX_LAND:MGX_BUILD;
-      case MGX_ZONE_SWAMP:return local==5?MGX_FOREST:MGX_MUD;
-      case MGX_ZONE_NIGHT:return local==5?MGX_LAND:MGX_NIGHT;
-      case MGX_ZONE_TUNNEL:return local==5?MGX_LAND:MGX_TUNNEL;
-      case MGX_ZONE_CITY:return local==5?MGX_LAND:MGX_INTERSECTION;
+      case MGX_ZONE_WOODS:return local==last?MGX_LAND:MGX_FOREST;
+      case MGX_ZONE_RIVER:return local==last?MGX_LAND:MGX_RIVER;
+      case MGX_ZONE_STATION:return (local%2==0)?MGX_TRACK:MGX_LAND;
+      case MGX_ZONE_CONSTRUCTION:return local==last?MGX_LAND:MGX_BUILD;
+      case MGX_ZONE_SWAMP:return local==last?MGX_FOREST:MGX_MUD;
+      case MGX_ZONE_NIGHT:return local==last?MGX_LAND:MGX_NIGHT;
+      case MGX_ZONE_TUNNEL:return local==last?MGX_LAND:MGX_TUNNEL;
+      case MGX_ZONE_CITY:return local==last?MGX_LAND:MGX_INTERSECTION;
       case MGX_ZONE_FARM:return local&1?MGX_FOREST:MGX_MUD;
-      case MGX_ZONE_BRIDGE:return local==5?MGX_LAND:MGX_BRIDGE;
+      case MGX_ZONE_BRIDGE:return local==last?MGX_LAND:MGX_BRIDGE;
       default:return MGX_LAND;
     }
 }
@@ -840,8 +951,26 @@ static int mgx_road_has_coin(int world_row) {
     for(int i=0;i<MGX_ROAD_COIN_HISTORY;i++)if(mgx_road.coin_taken[i]==world_row)return 0;
     return 1;
 }
+/* --- Why difficulty is read off the ROW, not off the player ---------------
+   Every hazard here is positioned by `fmod(offset + clock*speed, span)`. If
+   `speed` depends on how far the player has got, then the moment they step
+   over a difficulty threshold the speed changes for EVERY row at once and all
+   of it jumps: a car teleports on top of you in a lane you had just checked, a
+   log slides out from under you, a train appears mid-crossing. That is the
+   "run ended and there was nothing in my lane" death -- nothing hit the
+   player, the board moved.
+
+   Escalation still has to come from somewhere, so it comes from the row's own
+   depth into the board. A row twenty places up is harder than row one, and --
+   this is the part that matters -- a given row's geometry is a pure function
+   of that row and the clock, so it never changes underneath anyone. */
+static int mgx_road_row_difficulty(int world_row,int per,int cap){
+    if(world_row<0)world_row=0;
+    return mgx_clampi(world_row/(per>0?per:1),0,cap);
+}
+
 static float mgx_road_speed(int world_row) {
-    int zone=mgx_road_zone(world_row),difficulty=mgx_clampi(mgx_road.farthest/20,0,9);
+    int zone=mgx_road_zone(world_row),difficulty=mgx_road_row_difficulty(world_row,20,9);
     float base=zone==MGX_ZONE_HIGHWAY?92:zone==MGX_ZONE_TUNNEL?86:zone==MGX_ZONE_NIGHT?73:58;
     return base+(mgx_road_hash((unsigned)world_row*23u)%32u)+difficulty*7.0f;
 }
@@ -858,7 +987,7 @@ static int mgx_road_car_width(int world_row,int item) {
     return shape==0?86:shape==1?72:shape==2?58:shape==3?44:34;
 }
 static int mgx_road_vehicle_count(int world_row){
-    int zone=mgx_road_zone(world_row),difficulty=mgx_clampi(mgx_road.farthest/28,0,3);
+    int zone=mgx_road_zone(world_row),difficulty=mgx_road_row_difficulty(world_row,28,3);
     return mgx_clampi((zone==MGX_ZONE_HIGHWAY?4:3)+difficulty,3,6);
 }
 #define MGX_ROAD_LOG_COUNT 5
@@ -870,29 +999,30 @@ static float mgx_road_log_x(int world_row,int item){
        platform off-screen at once. */
     float seed=(mgx_road_hash((unsigned)world_row*331u)%1000u)/1000.0f*span+
                item*(span/MGX_ROAD_LOG_COUNT);
-    float speed=25.0f+(mgx_road_hash((unsigned)world_row*19u)%22u)+mgx_clampi(mgx_road.farthest/40,0,4)*3;
+    float speed=25.0f+(mgx_road_hash((unsigned)world_row*19u)%22u)+mgx_road_row_difficulty(world_row,40,4)*3;
     float x=fmodf(seed+mgx_road.clock*speed*dir,span);
     if(x<0)x+=span;
     return x-130.0f;
 }
 static float mgx_road_train_phase(int world_row){
-    float period=fmaxf(4.8f,7.1f-mgx_clampi(mgx_road.farthest/35,0,8)*.25f);
+    float period=fmaxf(4.8f,7.1f-mgx_road_row_difficulty(world_row,35,8)*.25f);
     float seed=(mgx_road_hash((unsigned)world_row*71u)%1000u)/1000.0f*period;
     return fmodf(mgx_road.clock+seed,period);
 }
 static int mgx_road_train_warning(int world_row){
-    float period=fmaxf(4.8f,7.1f-mgx_clampi(mgx_road.farthest/35,0,8)*.25f),p=mgx_road_train_phase(world_row);
+    float period=fmaxf(4.8f,7.1f-mgx_road_row_difficulty(world_row,35,8)*.25f),p=mgx_road_train_phase(world_row);
     return p>period-1.65f&&p<=period-.58f;
 }
 static float mgx_road_train_x(int world_row,int *width){
-    float period=fmaxf(4.8f,7.1f-mgx_clampi(mgx_road.farthest/35,0,8)*.25f),p=mgx_road_train_phase(world_row);
+    float period=fmaxf(4.8f,7.1f-mgx_road_row_difficulty(world_row,35,8)*.25f),p=mgx_road_train_phase(world_row);
     *width=230;if(p<=period-.58f)return -9999;
     float t=(p-(period-.58f))/.58f;
     return (world_row&1)?-240+t*(WIN_W+480):WIN_W+10-t*(WIN_W+480);
 }
 static int mgx_road_intersection_hit(int world_row,float x){
     float phase=fmodf(mgx_road.clock+(mgx_road_hash((unsigned)world_row*47u)%300u)/100.0f,4.4f);
-    int column=90+(int)(mgx_road_hash((unsigned)(world_row/6)*83u)%(unsigned)(WIN_W-180));
+    int section=mgx_road_section_at(world_row,NULL,NULL);
+    int column=90+(int)(mgx_road_hash((unsigned)section*83u)%(unsigned)(WIN_W-180));
     return phase<.72f&&fabsf(x-column)<17;
 }
 static void mgx_road_collect(void) {
@@ -903,12 +1033,106 @@ static void mgx_road_collect(void) {
         mg_set_best(MG_ROAD,mgx_road.score);
     }
 }
+/* The runner. Each animal is a head built from the same circles the old frog
+   used, so this costs the same handful of draws -- the ears and the muzzle are
+   what tell them apart at this size. */
+/* The runners are 24x24 PNGs built by tools/make_crossing_icons.py. They are
+   drawn at 24 in the lane and 48 in the picker -- whole-number scales only, so
+   the pixels stay square. An install without the assets tree falls back to the
+   old hand-drawn shapes below, which costs detail rather than leaving a hole. */
+#define MGX_ROAD_CHAR_PX  24
+#define MGX_ROAD_CHAR_BIG 48
+static const char *mgx_road_char_slug[MGX_ROAD_CHAR_COUNT]={"kangaroo","lemur","chicken","fox"};
+static SDL_Texture *mgx_road_char_tex[MGX_ROAD_CHAR_COUNT];
+static int mgx_road_char_tried[MGX_ROAD_CHAR_COUNT];
+static unsigned mgx_road_char_epoch;
+static SDL_Texture *mgx_road_char_icon(SDL_Renderer *ren,int who){
+    if(mgx_road_char_epoch!=renderer_epoch){
+        /* The old textures went with the old renderer; only the cache is stale. */
+        memset(mgx_road_char_tex,0,sizeof mgx_road_char_tex);
+        memset(mgx_road_char_tried,0,sizeof mgx_road_char_tried);
+        mgx_road_char_epoch=renderer_epoch;
+    }
+    who=mgx_clampi(who,0,MGX_ROAD_CHAR_COUNT-1);
+    if(!mgx_road_char_tried[who]){
+        mgx_road_char_tried[who]=1;
+        char stem[700];
+        snprintf(stem,sizeof stem,"%s/assets/minigames/crossing/%s",sn_data_root(),mgx_road_char_slug[who]);
+        mgx_road_char_tex[who]=try_load_img(ren,stem,128);
+        if(mgx_road_char_tex[who])
+            SDL_SetTextureScaleMode(mgx_road_char_tex[who],SDL_ScaleModeNearest);
+    }
+    return mgx_road_char_tex[who];
+}
+static void mgx_road_draw_char_at(SDL_Renderer *ren,int who,int px,int py,int size);
+static void mgx_road_draw_char(SDL_Renderer *ren,int who,int px,int py) {
+    mgx_road_draw_char_at(ren,who,px,py,MGX_ROAD_CHAR_PX);
+}
+static void mgx_road_draw_char_at(SDL_Renderer *ren,int who,int px,int py,int size) {
+    SDL_Texture *icon=mgx_road_char_icon(ren,who);
+    if(icon){
+        SDL_RenderCopy(ren,icon,NULL,&(SDL_Rect){px-size/2,py-size/2,size,size});
+        return;
+    }
+    SDL_Color body,light,dark={10,26,20,255};
+    switch(mgx_clampi(who,0,MGX_ROAD_CHAR_COUNT-1)) {
+      case MGX_ROAD_CHAR_KANGAROO:
+        body=(SDL_Color){198,124,66,255};light=(SDL_Color){226,166,110,255};
+        mgx_circle(ren,px,py,9,body,255);
+        /* Tall upright ears. */
+        mgx_circle(ren,px-6,py-11,3,light,255);mgx_circle(ren,px-6,py-7,3,light,255);
+        mgx_circle(ren,px+6,py-11,3,light,255);mgx_circle(ren,px+6,py-7,3,light,255);
+        mgx_circle(ren,px,py+4,4,light,255);            /* muzzle */
+        break;
+      case MGX_ROAD_CHAR_LEMUR:
+        body=(SDL_Color){168,172,182,255};light=(SDL_Color){232,236,244,255};
+        mgx_circle(ren,px,py,9,body,255);
+        mgx_circle(ren,px-7,py-6,4,light,255);mgx_circle(ren,px+7,py-6,4,light,255);
+        /* The big pale eye patches are the giveaway. */
+        mgx_circle(ren,px-4,py-1,4,light,255);mgx_circle(ren,px+4,py-1,4,light,255);
+        mgx_circle(ren,px-4,py-1,2,dark,255);mgx_circle(ren,px+4,py-1,2,dark,255);
+        break;
+      case MGX_ROAD_CHAR_CHICKEN:
+        body=(SDL_Color){246,241,226,255};light=(SDL_Color){255,255,248,255};
+        mgx_circle(ren,px,py,9,body,255);
+        /* Comb above, beak in front. */
+        mgx_circle(ren,px-3,py-10,3,(SDL_Color){218,72,64,255},255);
+        mgx_circle(ren,px+1,py-11,3,(SDL_Color){218,72,64,255},255);
+        mgx_circle(ren,px+5,py-9,2,(SDL_Color){218,72,64,255},255);
+        mgx_circle(ren,px+7,py+1,3,(SDL_Color){243,176,54,255},255);
+        mgx_circle(ren,px-3,py-2,1,dark,255);
+        (void)light;
+        break;
+      default: /* MGX_ROAD_CHAR_FOX */
+        body=(SDL_Color){226,124,58,255};light=(SDL_Color){250,246,238,255};
+        mgx_circle(ren,px,py,9,body,255);
+        /* Pointed ears and a white snout. */
+        mgx_circle(ren,px-7,py-8,4,body,255);mgx_circle(ren,px+7,py-8,4,body,255);
+        mgx_circle(ren,px-7,py-9,2,dark,255);mgx_circle(ren,px+7,py-9,2,dark,255);
+        mgx_circle(ren,px,py+4,5,light,255);
+        mgx_circle(ren,px,py+6,2,dark,255);
+        break;
+    }
+    mgx_circle(ren,px-4,py-4,1,dark,255);mgx_circle(ren,px+4,py-4,1,dark,255);
+}
+
 static void mgx_road_reset(void) {
     memset(&mgx_road, 0, sizeof mgx_road);
     for(int i=0;i<MGX_ROAD_COIN_HISTORY;i++)mgx_road.coin_taken[i]=-1;
+    for(int z=0;z<=MGX_ZONE_BRIDGE;z++)mgx_road.zone_debut[z]=-1;
+    mgx_road.character=mgx_clampi(mgx_road_char_pick,0,MGX_ROAD_CHAR_COUNT-1);
     mgx_road.x=WIN_W/2;mgx_road.row=MGX_ROAD_ROWS-1;mgx_road.last=SDL_GetTicks();
 }
 static void mgx_road_key(SDL_Keycode k) {
+    // Pick your runner before the first hop. Left/Right chooses, A starts --
+    // and the choice sticks for the rest of the session, so a retry does not
+    // ask again.
+    if (mgx_road_choosing) {
+        if (k == SDLK_LEFT)  { mgx_road_char_pick = (mgx_road_char_pick + MGX_ROAD_CHAR_COUNT - 1) % MGX_ROAD_CHAR_COUNT; return; }
+        if (k == SDLK_RIGHT) { mgx_road_char_pick = (mgx_road_char_pick + 1) % MGX_ROAD_CHAR_COUNT; return; }
+        if (k == SDLK_RETURN) { mgx_road_choosing = 0; mgx_road.character = mgx_road_char_pick; return; }
+        return;
+    }
     if (mgx_road.dead) { if (k == SDLK_RETURN) mgx_road_reset(); return; }
     if (k != SDLK_UP && k != SDLK_DOWN && k != SDLK_LEFT && k != SDLK_RIGHT) return;
     Uint32 now=SDL_GetTicks();int current=mgx_road_world_at(mgx_road.row);
@@ -932,6 +1156,10 @@ static void mgx_road_key(SDL_Keycode k) {
     }
 }
 static void mgx_road_step(void) {
+    // Nothing moves while the runner is being chosen.
+    if(mgx_road_choosing){mgx_road.last=SDL_GetTicks();return;}
+    // Nothing moves while the runner is being chosen.
+    if(mgx_road_choosing){mgx_road.last=SDL_GetTicks();return;}
     Uint32 now = SDL_GetTicks(); float dt = fminf((now - mgx_road.last) / 1000.0f, .05f);
     mgx_road.last = now;
     if (!mgx_road.started || mgx_road.dead) return;
@@ -956,7 +1184,7 @@ static void mgx_road_step(void) {
         if(riding<0)mgx_road.dead=1;
         else{
             float dir=(world_row&1)?1.0f:-1.0f;
-            float speed=25.0f+(mgx_road_hash((unsigned)world_row*19u)%22u)+mgx_clampi(mgx_road.farthest/40,0,4)*3;
+            float speed=25.0f+(mgx_road_hash((unsigned)world_row*19u)%22u)+mgx_road_row_difficulty(world_row,40,4)*3;
             mgx_road.x+=dir*speed*dt;
             if(mgx_road.x<20||mgx_road.x>WIN_W-20)mgx_road.dead=1;
         }
@@ -1030,9 +1258,18 @@ static void mgx_road_render(SDL_Renderer *ren) {
                 mgx_circle(ren,tx,ty-2,9,(SDL_Color){35,116+(i&1)*18,66,255},255);
                 mgx_circle(ren,tx-6,ty,5,(SDL_Color){55,145,76,255},255);
             }
-            if(kind==MGX_LAND&&world_row%6==0&&world_row>0){
-                const char *zn=mgx_road_zone_name(zone);SDL_Texture *zt=render_text_fit(ren,font_label,zn,(SDL_Color){226,232,194,220},WIN_W/3);
-                if(zt){int zw=0,zh=0;SDL_QueryTexture(zt,NULL,NULL,&zw,&zh);fill_rounded(ren,(SDL_Rect){28,top+lane*cell+2,zw+12,zh+2},3,38,57,42,210);SDL_RenderCopy(ren,zt,NULL,&(SDL_Rect){34,top+lane*cell+3,zw,zh});}
+            // The zone banner is drawn on the opening row of a section, but only
+            // the first time that zone is met in a run: the names repeat every
+            // few sections and the player learns them immediately.
+            if(kind==MGX_LAND&&world_row>0){
+                int zlocal=0;mgx_road_section_at(world_row,&zlocal,NULL);
+                int zi=mgx_clampi(zone,0,MGX_ZONE_BRIDGE);
+                int zsec=mgx_road_section_at(world_row,NULL,NULL);
+                if(zlocal==0&&mgx_road.zone_debut[zi]<0)mgx_road.zone_debut[zi]=zsec;
+                if(zlocal==0&&mgx_road.zone_debut[zi]==zsec){
+                    const char *zn=mgx_road_zone_name(zone);SDL_Texture *zt=render_text_fit(ren,font_label,zn,(SDL_Color){226,232,194,220},WIN_W/3);
+                    if(zt){int zw=0,zh=0;SDL_QueryTexture(zt,NULL,NULL,&zw,&zh);fill_rounded(ren,(SDL_Rect){28,top+lane*cell+2,zw+12,zh+2},3,38,57,42,210);SDL_RenderCopy(ren,zt,NULL,&(SDL_Rect){34,top+lane*cell+3,zw,zh});}
+                }
             }
         }
         if(mgx_road_has_coin(world_row)){
@@ -1048,14 +1285,36 @@ static void mgx_road_render(SDL_Renderer *ren) {
         mgx_circle(ren,hx,hy,34,(SDL_Color){244,224,143,35},35);mgx_circle(ren,hx,hy,20,(SDL_Color){255,238,166,50},50);
     }
     int px=(int)mgx_road.x,py=top+mgx_road.row*cell+cell/2;
-    mgx_circle(ren,px,py,9,(SDL_Color){105,218,112,255},255);mgx_circle(ren,px-6,py-7,4,(SDL_Color){132,239,132,255},255);mgx_circle(ren,px+6,py-7,4,(SDL_Color){132,239,132,255},255);
-    mgx_circle(ren,px-6,py-8,1,(SDL_Color){10,30,20,255},255);mgx_circle(ren,px+6,py-8,1,(SDL_Color){10,30,20,255},255);
+    mgx_road_draw_char(ren,mgx_road.character,px,py);
     SDL_RenderSetClipRect(ren,NULL);
     char line[160];snprintf(line,sizeof line,"Score %d   %dm   Coins %d   %s",mgx_road.score,mgx_road.farthest,mgx_road.coins,mgx_road_zone_name(mgx_road_zone(player_world)));
-    mgx_text(ren,font_label,line,th->accent2,30,84);
+    mg_stat_line(ren,line);
     mgx_text_center(ren,font_label,"D-pad Hop    Climb forever    Coins +50    B Exit",g_ui_dim,WIN_W/2,WIN_H-30);
-    if(!mgx_road.started)mgx_overlay_message(ren,"EVERY RUN CHANGES","Roads, rivers, rails and landmarks get tougher as you climb.");
-    if(mgx_road.dead)mgx_overlay_message(ren,"RUN ENDED","A Retry    B Exit");
+    if(mgx_road_choosing){
+        /* Its own panel rather than the shared message overlay: four runners at
+           a size worth looking at need room the message box does not have, and
+           they used to be drawn straddling its bottom edge. */
+        int pw=WIN_W>680?560:520,ph=214;
+        SDL_Rect panel={WIN_W/2-pw/2,WIN_H/2-ph/2,pw,ph};
+        mgx_panel(ren,panel,th->bg,th->accent2,248);
+        mgx_text_center(ren,font_small_bold?font_small_bold:font_small,"PICK YOUR RUNNER",
+                        th->accent2,WIN_W/2,panel.y+16);
+        int tile=MGX_ROAD_CHAR_BIG,gap=26;
+        int span=MGX_ROAD_CHAR_COUNT*tile+(MGX_ROAD_CHAR_COUNT-1)*gap;
+        int x0=WIN_W/2-span/2,ty=panel.y+58;
+        for(int i=0;i<MGX_ROAD_CHAR_COUNT;i++){
+            int cx=x0+i*(tile+gap)+tile/2,cy=ty+tile/2,sel=i==mgx_road_char_pick;
+            mgx_panel(ren,(SDL_Rect){cx-tile/2-8,cy-tile/2-8,tile+16,tile+16},
+                      sel?th->select_bg:th->bg,sel?th->accent2:th->dim,sel?255:170);
+            mgx_road_draw_char_at(ren,i,cx,cy,tile);
+        }
+        mgx_text_center(ren,font_label_bold?font_label_bold:font_label,
+                        mgx_road_char_names[mgx_clampi(mgx_road_char_pick,0,MGX_ROAD_CHAR_COUNT-1)],
+                        g_ui_text,WIN_W/2,ty+tile+24);
+        mgx_text_center(ren,font_label,"Left/Right Choose     A Start",g_ui_dim,WIN_W/2,panel.y+ph-30);
+    }
+    else if(!mgx_road.started)mgx_overlay_message(ren,"EVERY RUN CHANGES","Roads, rivers, rails and landmarks get tougher as you climb.");
+    if(mgx_road.dead)mgx_overlay_message(ren,"RUN OVER","A Retry    B Exit");
 }
 
 /* -------------------- Personal artwork swap puzzle ------------------ */
@@ -1533,11 +1792,14 @@ static void mgx_tank_render(SDL_Renderer *ren) {
 #define MGX_FISH_MONSTERS 3
 #define MGX_FISH_PARTICLES 24
 enum {MGX_RES_SILVER,MGX_RES_GOLD,MGX_RES_RUBY,MGX_RES_DIAMOND,
-      MGX_RES_PEARL,MGX_RES_EMERALD,MGX_RES_RARE,MGX_RES_FOOD,MGX_RES_WASTE};
+      MGX_RES_PEARL,MGX_RES_EMERALD,MGX_RES_SHELL,MGX_RES_RARE,MGX_RES_FOOD,MGX_RES_WASTE};
 enum {MGX_PET_GUPPY,MGX_PET_TETRA,MGX_PET_ANGEL,MGX_PET_SHARK,
       MGX_PET_CLAM,MGX_PET_SEAHORSE,MGX_PET_CRAB};
 typedef struct {
-    float x,y,hunger,coin_at,bob,hurt_flash,flee_time,eat_cooldown;
+    float starve_clock;   /* seconds until a starving fish loses its next heart */
+    /* `hunger` is now seconds SINCE the last meal, counting up, scaled by the
+       food tier that fed it -- not an opaque reserve counting down. */
+    float x,y,hunger,hunger_span,coin_at,bob,hurt_flash,flee_time,eat_cooldown;
     int active,growth,dir,type,hp,max_hp;
 } MgxFishPet;
 typedef struct {
@@ -1550,6 +1812,73 @@ typedef struct {
 } MgxFishMonster;
 typedef struct {float x,y,vx,vy,life;int active,tint;} MgxFishParticle;
 typedef struct {int kills,resources,min_fish,boss;float survive;const char *name;} MgxFishGoal;
+
+/* --- Helper animals ------------------------------------------------------
+   These are the creatures hatched from eggs. They used to be a bare COUNT --
+   mgx_fish.helpers -- whose only effect was a passive tick that reached across
+   the whole tank every 2.5 seconds and instantly banked a coin or instantly hit
+   a monster, from a badge parked in the corner. That removed the game: coins
+   vanished before the player could dive for them.
+
+   Each one is now a real creature that swims, picks a target, travels to it and
+   does its job when it arrives -- so it can be beaten to a coin, and can be
+   somewhere else when you need it. You bring TWO with you per level, chosen
+   before the level starts. */
+#define MGX_HELP_SLOTS 2
+enum {MGX_HELP_DART,MGX_HELP_NIBBLES,MGX_HELP_SPIKE,
+      MGX_HELP_SHELLY,MGX_HELP_BUBBLE,MGX_HELP_GLIMMER,MGX_HELP_COUNT};
+enum {MGX_HSTATE_ROAM,MGX_HSTATE_SEEK,MGX_HSTATE_RETURN,MGX_HSTATE_WORK};
+typedef struct {
+    float x,y,bob,cool,work,flash;
+    int active,species,state,target,dir;
+} MgxFishHelper;
+static const char *mgx_help_name[MGX_HELP_COUNT]={
+    "DART","NIBBLES","SPIKE","SHELLY","BUBBLE","GLIMMER"};
+static const char *mgx_help_job[MGX_HELP_COUNT]={
+    "Swims to fallen treasure and banks it.",
+    "Drops a free pellet of food now and then.",
+    "Chases monsters and bites them.",
+    "Crawls the floor, clearing what lands there.",
+    "Herds small fish away from monsters.",
+    "Turns the coins it reaches into gold."};
+
+/* --- The rules -----------------------------------------------------------
+   Crazy Fish was tuned three times by feel and was still unwinnable, so these
+   numbers were set by playing it: tests/test_fish_playable_131.h runs a
+   simulated player through real levels and checks what happens to it.
+
+   What had been wrong was the money, not the reflexes. A baby guppy earns
+   about $0.60 a second; a $10 pellet every five to eleven seconds cost it
+   twice that, so every fish lost money until it was grown and even perfect
+   play went broke. Food is cheap now and a meal lasts, so a fish pays for
+   itself from its first coin.
+
+   Hunger, for a guppy on the basic food:
+
+     newly hatched   content 12s after a meal   starving from 30s
+     fully grown     content 20s after a meal   starving from 45s
+
+   Between those it shows one dot (hungry), two (very hungry), then a flashing
+   ring (starving). A starving fish loses a heart straight away and another
+   every MGX_STARVE_TICK seconds until it eats, so a forgotten baby guppy lasts
+   about 42 seconds from its last meal: long enough to look away, not long
+   enough to ignore. Every meal also heals a heart and grows the fish a step.
+   Species and food tier stretch both ends together. */
+#define MGX_GROWTH_MAX     7
+#define MGX_FULL_BABY     12.0f
+#define MGX_FULL_GROWN    20.0f
+#define MGX_STARVE_BABY   30.0f
+#define MGX_STARVE_GROWN  45.0f
+#define MGX_STARVE_TICK    6.0f
+/* Where "hungry" and "starving" sit between the last meal and losing health. */
+#define MGX_HUNGER_PECKISH 0.35f
+#define MGX_HUNGER_URGENT  0.75f
+/* Food tiers: pellet cost, and how much longer a fish stays fed on it. */
+#define MGX_FOOD_TIERS 3
+static const int   mgx_food_cost[MGX_FOOD_TIERS]={5,8,12};
+static const float mgx_food_hold[MGX_FOOD_TIERS]={1.0f,1.4f,1.8f};
+static const char *mgx_food_name[MGX_FOOD_TIERS]={"Flakes","Rich Pellets","Live Brine"};
+static const int   mgx_food_upgrade_cost[MGX_FOOD_TIERS]={0,140,260};
 static const char *mgx_fish_type_name[MGX_FISH_TYPES]={
     "GUPPY","NEON TETRA","ANGELFISH","REEF SHARK","PEARL CLAM","SEAHORSE","CLEANER CRAB"};
 static const int mgx_fish_cost[MGX_FISH_TYPES]={25,55,90,145,70,82,120};
@@ -1557,9 +1886,63 @@ static const int mgx_fish_cost[MGX_FISH_TYPES]={25,55,90,145,70,82,120};
 static const int mgx_fish_unlock[MGX_FISH_TYPES]={0,1,4,6,2,5,3};
 static const int mgx_fish_hatch_order[]={MGX_PET_TETRA,MGX_PET_CLAM,MGX_PET_CRAB,MGX_PET_ANGEL,MGX_PET_SEAHORSE,MGX_PET_SHARK};
 static const char *mgx_fish_ability[]={"Your starter fish earns silver coins.","Collects a fallen coin for you.","Guides baby fish away from monsters.","Helps keep your fish fed for longer.","Slows falling treasure.","Helps keep your fish fed for longer.","Attacks monsters alongside your ray."};
-static const char *mgx_fish_chapter_name[11]={
-    "TIDEPOOL","SUNLIT COVE","PEARL SHOALS","RUBY CURRENT","CLEANER REEF",
-    "SHARK PASS","STORM GARDEN","MIDNIGHT TRENCH","CROWN REEF","THE LEVIATHAN","ENDLESS REEF"};
+/* --- Chapters and levels -------------------------------------------------
+   A "stage" is one level of the campaign, counted from 1 and never reset --
+   it is what the difficulty curve, the goals and the invasion timer all read.
+   Chapters group four to six of those stages under a name, so progress reads
+   as "PEARL SHOALS 2-3" rather than as a level number that only goes up.
+   Past the last named chapter the reef goes on forever in six-level blocks,
+   which is why every accessor here takes a chapter number rather than
+   indexing this table directly. */
+typedef struct {const char *name;int levels;} MgxFishChapter;
+static const MgxFishChapter mgx_fish_chapters[]={
+    {"TIDEPOOL",4},      {"SUNLIT COVE",5},   {"PEARL SHOALS",5},
+    {"RUBY CURRENT",6},  {"CLEANER REEF",6},  {"SHARK PASS",5},
+    {"STORM GARDEN",6},  {"MIDNIGHT TRENCH",6},{"CROWN REEF",5},
+    {"THE LEVIATHAN",4}};
+#define MGX_FISH_CHAPTERS ((int)(sizeof mgx_fish_chapters/sizeof mgx_fish_chapters[0]))
+#define MGX_FISH_ENDLESS_LEVELS 6
+
+static int mgx_fish_chapter_levels(int chapter){
+    if(chapter<1)chapter=1;
+    return chapter<=MGX_FISH_CHAPTERS?mgx_fish_chapters[chapter-1].levels:MGX_FISH_ENDLESS_LEVELS;
+}
+static const char *mgx_fish_chapter_title(int chapter){
+    if(chapter<1)chapter=1;
+    return chapter<=MGX_FISH_CHAPTERS?mgx_fish_chapters[chapter-1].name:"ENDLESS REEF";
+}
+/* The stage number that chapter `chapter` opens on. */
+static int mgx_fish_chapter_first_stage(int chapter){
+    int stage=1;
+    for(int c=1;c<chapter;c++)stage+=mgx_fish_chapter_levels(c);
+    return stage;
+}
+/* Which chapter a stage falls in, and which level of it. Walked rather than
+   divided because the chapters are deliberately different lengths. */
+static int mgx_fish_chapter_of(int stage){
+    if(stage<1)stage=1;
+    int chapter=1,left=stage;
+    for(;;){
+        int n=mgx_fish_chapter_levels(chapter);
+        if(left<=n)return chapter;
+        left-=n;chapter++;
+    }
+}
+static int mgx_fish_level_of(int stage){
+    if(stage<1)stage=1;
+    return stage-mgx_fish_chapter_first_stage(mgx_fish_chapter_of(stage))+1;
+}
+/* The last level of its chapter -- clearing it is what rolls the chapter over,
+   and what pays the chapter bonus. */
+static int mgx_fish_is_chapter_end(int stage){
+    int chapter=mgx_fish_chapter_of(stage);
+    return mgx_fish_level_of(stage)==mgx_fish_chapter_levels(chapter);
+}
+/* Bonus rounds come every second level, and always at the end of a chapter, so
+   the longest a player ever goes without one is two levels. */
+static int mgx_fish_bonus_after(int stage){
+    return mgx_fish_level_of(stage)%2==0||mgx_fish_is_chapter_end(stage);
+}
 static const MgxFishGoal mgx_fish_goals[10]={
     {0,3,2,0,0,"FIRST HARVEST"}, {0,6,2,0,0,"GOLDEN CURRENT"},
     {2,8,2,0,0,"FIRST INVASION"}, {2,11,3,0,0,"PEARL WINDOW"},
@@ -1570,21 +1953,86 @@ static const MgxFishGoal mgx_fish_goals[10]={
 static struct {
     float x,y,clock,next_spawn,ray_time,ray_x,ray_y,ray_from_x,ray_from_y;
     float level_time,waste_tick;Uint32 last,last_shot;
-    int coins,chapter,chapter_kills,chapter_goal,total_kills,rare_mask,over,started,between;
+    int coins,stage,stage_kills,stage_goal,total_kills,rare_mask,over,started,between;
+    /* Shells are the campaign currency: they survive a wipe, where coins do
+       not, and they are what the rare reef fish are bought with. Bonus
+       rounds are where most of them come from. */
+    int shells,rares,bonus,bonus_pending,bonus_take;float bonus_time,bonus_drip;
     int shop_type,gun_level,level_resources,boss_spawned,boss_defeated,resource_serial;
     int egg_pieces,helpers;float helper_clock,intro;
     int collection,hatch_type,hatch_pending;float hatch_time,notice_time;
     char notice[100];
+    /* Which two helpers are in the tank, chosen on the pre-level screen. */
+    MgxFishHelper helper[MGX_HELP_SLOTS];
+    int helper_pick[MGX_HELP_SLOTS];
+    int picking,pick_cursor;
+    /* Food tier owned, and the shop overlay. */
+    int food_tier,shop_open,shop_row;
+    /* START's menu: paused holds the simulation, want_exit is how the game
+       asks the frontend to leave, since it cannot change AppState itself. */
+    int paused,pause_row,pause_confirm,want_exit;
     MgxFishPet fish[MGX_FISH_MAX];MgxFishDrop drops[MGX_FISH_DROPS];
     MgxFishMonster monster[MGX_FISH_MONSTERS];MgxFishParticle particle[MGX_FISH_PARTICLES];
 } mgx_fish;
+
+/* Hatching is what discovers helper species, in order, so the saved hatch count
+   is still the whole of the unlock state -- an existing fish-helpers.cfg keeps
+   working untouched. */
+static int mgx_help_unlocked(int species){
+    return species>=0&&species<MGX_HELP_COUNT&&species<mgx_fish.helpers;
+}
+static int mgx_help_unlocked_count(void){
+    return mgx_clampi(mgx_fish.helpers,0,MGX_HELP_COUNT);
+}
+static int mgx_fish_food_tier(void){return mgx_clampi(mgx_fish.food_tier,0,MGX_FOOD_TIERS-1);}
+static int mgx_fish_food_cost(void){return mgx_food_cost[mgx_fish_food_tier()];}
+static float mgx_fish_food_hold(void){return mgx_food_hold[mgx_fish_food_tier()];}
 static int mgx_fish_alive(void){int n=0;for(int i=0;i<MGX_FISH_MAX;i++)n+=mgx_fish.fish[i].active;return n;}
 static int mgx_fish_monsters_alive(void){int n=0;for(int i=0;i<MGX_FISH_MONSTERS;i++)n+=mgx_fish.monster[i].active;return n;}
 static int mgx_fish_rare_count(void){int n=0;for(unsigned bits=(unsigned)mgx_fish.rare_mask;bits;bits>>=1)n+=(int)(bits&1u);return n;}
 static int mgx_fish_is_treasure(int kind){return kind>=MGX_RES_SILVER&&kind<=MGX_RES_RARE;}
-static float mgx_fish_full_hunger(int type){static const float h[]={64,70,78,100,95,64,92};return h[mgx_clampi(type,0,MGX_FISH_TYPES-1)];}
+/* How long this species can go between meals, as a multiplier on the shared
+   stage table. A shark or a clam holds out longer than a guppy. */
+static float mgx_fish_hunger_scale(int type){
+    static const float s[]={1.0f,1.1f,1.25f,1.6f,1.5f,1.0f,1.45f};
+    return s[mgx_clampi(type,0,MGX_FISH_TYPES-1)];
+}
+/* 0 for a fish that has just hatched, 1 for one that is done growing. */
+static float mgx_fish_grown(const MgxFishPet *f){
+    return mgx_clampf((float)f->growth/(float)MGX_GROWTH_MAX,0.0f,1.0f);
+}
+/* Everything a fish's appetite does is scaled by its species and its food, so
+   the two multipliers are applied in one place rather than at each call. */
+static float mgx_fish_appetite_scale(const MgxFishPet *f){
+    float food=f->hunger_span>0?f->hunger_span:1.0f;
+    return mgx_fish_hunger_scale(f->type)*food;
+}
+/* Seconds a meal keeps this fish contented before it starts asking again. */
+static float mgx_fish_full_span(const MgxFishPet *f){
+    float grown=mgx_fish_grown(f);
+    return (MGX_FULL_BABY+(MGX_FULL_GROWN-MGX_FULL_BABY)*grown)*mgx_fish_appetite_scale(f);
+}
+/* Seconds this fish may go without eating before it starts losing health. */
+static float mgx_fish_hunger_span(const MgxFishPet *f){
+    float grown=mgx_fish_grown(f);
+    return (MGX_STARVE_BABY+(MGX_STARVE_GROWN-MGX_STARVE_BABY)*grown)*mgx_fish_appetite_scale(f);
+}
+/* The moment the flashing ring appears -- also where hunger is put back to
+   after a fish loses health, so it keeps losing it until somebody feeds it. */
+static float mgx_fish_urgent_at(const MgxFishPet *f){
+    float full=mgx_fish_full_span(f),die=mgx_fish_hunger_span(f);
+    return full+(die-full)*MGX_HUNGER_URGENT;
+}
+/* 0 full, 1 hungry, 2 very hungry, 3 starving. Drives the on-fish warning. */
+static int mgx_fish_hunger_stage(const MgxFishPet *f){
+    float full=mgx_fish_full_span(f),die=mgx_fish_hunger_span(f),t=f->hunger;
+    if(t<full)return 0;
+    if(t<full+(die-full)*MGX_HUNGER_PECKISH)return 1;
+    if(t<mgx_fish_urgent_at(f))return 2;
+    return 3;
+}
 static int mgx_fish_max_hp(int type){static const int hp[]={3,4,6,9,7,3,7};return hp[mgx_clampi(type,0,MGX_FISH_TYPES-1)];}
-static const MgxFishGoal *mgx_fish_goal(void){return mgx_fish.chapter<=10?&mgx_fish_goals[mgx_fish.chapter-1]:NULL;}
+static const MgxFishGoal *mgx_fish_goal(void){return mgx_fish.stage<=10?&mgx_fish_goals[mgx_fish.stage-1]:NULL;}
 static int mgx_fish_resource_kind(int type){static const int kind[]={MGX_RES_SILVER,MGX_RES_GOLD,MGX_RES_RUBY,MGX_RES_DIAMOND,MGX_RES_PEARL,MGX_RES_EMERALD,-1};return kind[mgx_clampi(type,0,MGX_FISH_TYPES-1)];}
 static int mgx_fish_resource_value(int type){static const int value[]={3,6,11,18,9,8,0};return value[mgx_clampi(type,0,MGX_FISH_TYPES-1)];}
 static float mgx_fish_resource_interval(int type){static const float secs[]={5.2f,6.8f,9.0f,12.5f,10.5f,8.0f,99};return secs[mgx_clampi(type,0,MGX_FISH_TYPES-1)];}
@@ -1600,7 +2048,7 @@ static int mgx_fish_add_type(int type){
         f->x=86+rand()%mgx_clampi(WIN_W-172,1,9999);f->y=70+rand()%mgx_clampi(WIN_H-150,1,9999);
         if(type==MGX_PET_CLAM||type==MGX_PET_CRAB)f->y=WIN_H-42;
         if(type==MGX_PET_SEAHORSE)f->x=42+(i%7)*96;
-        f->hunger=mgx_fish_full_hunger(type);f->max_hp=f->hp=mgx_fish_max_hp(type);
+        f->hunger=0;f->hunger_span=mgx_fish_food_hold();f->max_hp=f->hp=mgx_fish_max_hp(type);
         f->coin_at=mgx_fish_resource_interval(type)+(rand()%20)/10.0f;f->dir=rand()%2?1:-1;f->bob=(rand()%628)/100.0f;return 1;
     }return 0;
 }
@@ -1619,51 +2067,87 @@ static void mgx_fish_select_pet(int dir){for(int i=0;i<MGX_FISH_TYPES;i++){mgx_f
 static void mgx_fish_collect_drop(int i){
     MgxFishDrop *d=&mgx_fish.drops[i];if(!d->active)return;
     if(d->kind==MGX_RES_RARE){int fresh=!(mgx_fish.rare_mask&(1<<d->rare_id));mgx_fish.rare_mask|=1<<d->rare_id;mgx_fish.coins+=fresh?d->value:d->value/3;mgx_fish.level_resources++;}
-    else if(mgx_fish_is_treasure(d->kind)){mgx_fish.coins+=d->value;mgx_fish.level_resources++;}
+    else if(mgx_fish_is_treasure(d->kind)){
+        // A shell is worth its coins AND one shell -- the only drop that pays
+        // into the currency that survives the run.
+        if(d->kind==MGX_RES_SHELL){mgx_fish.shells++;mgx_fish.bonus_take++;}
+        mgx_fish.coins+=d->value;mgx_fish.level_resources++;
+    }
     d->active=0;
 }
 static void mgx_fish_set_goal(void){
-    const MgxFishGoal *g=mgx_fish_goal();mgx_fish.chapter_goal=g?g->kills:mgx_clampi(5+mgx_fish.chapter/2,6,12);
+    const MgxFishGoal *g=mgx_fish_goal();mgx_fish.stage_goal=g?g->kills:mgx_clampi(5+mgx_fish.stage/2,6,12);
 }
-static void mgx_fish_save_helpers(void){char path[768],tmp[780];snprintf(path,sizeof path,"%s/fish-helpers.cfg",sn_data_root());snprintf(tmp,sizeof tmp,"%s.tmp",path);FILE *f=fopen(tmp,"w");if(f){fprintf(f,"%d\n",mgx_fish.helpers);if(fclose(f)==0)rename(tmp,path);}}
+/* The campaign's permanent state, in the file that already held the hatch
+   count. Pearls go on a second line, so a fish-helpers.cfg written by an
+   older build still reads back correctly -- it just starts with no pearls. */
+static void mgx_fish_save_helpers(void){char path[768],tmp[780];snprintf(path,sizeof path,"%s/fish-helpers.cfg",sn_data_root());snprintf(tmp,sizeof tmp,"%s.tmp",path);FILE *f=fopen(tmp,"w");if(f){fprintf(f,"%d\n%d\n%d\n%d\n",mgx_fish.helpers,mgx_fish.shells,mgx_fish.rares,mgx_fish.stage);if(fclose(f)==0)rename(tmp,path);}}
 static void mgx_fish_reset(void){
     memset(&mgx_fish,0,sizeof mgx_fish);mgx_fish.x=WIN_W/2;mgx_fish.y=WIN_H/2;
-    mgx_fish.coins=70;mgx_fish.chapter=1;mgx_fish.gun_level=1;mgx_fish_set_goal();
-    char path[768];snprintf(path,sizeof path,"%s/fish-helpers.cfg",sn_data_root());FILE *saved=fopen(path,"r");if(saved){int n=0;if(fscanf(saved,"%d",&n)==1)mgx_fish.helpers=mgx_clampi(n,0,40);fclose(saved);}
-    mgx_fish.chapter=mgx_fish.helpers+1;mgx_fish_set_goal();
+    mgx_fish.coins=70;mgx_fish.stage=1;mgx_fish.gun_level=1;mgx_fish_set_goal();
+    int stage_saved=0;
+    char path[768];snprintf(path,sizeof path,"%s/fish-helpers.cfg",sn_data_root());FILE *saved=fopen(path,"r");if(saved){int n=0,p=0;if(fscanf(saved,"%d",&n)==1)mgx_fish.helpers=mgx_clampi(n,0,9999);if(fscanf(saved,"%d",&p)==1)mgx_fish.shells=mgx_clampi(p,0,99999);
+        {int r=0;if(fscanf(saved,"%d",&r)==1)mgx_fish.rares=r&((1<<MGX_RARE_COUNT)-1);}
+        {int st=0;if(fscanf(saved,"%d",&st)==1)stage_saved=mgx_clampi(st,1,9999);}
+        fclose(saved);}
+    /* Where the campaign actually is. It used to be derived from the hatch
+       count, which tied progress to a number that means something else and
+       stopped at the hatch cap. A file written before this line existed
+       falls back to that old derivation, so nobody loses their place. */
+    mgx_fish.stage=stage_saved>0?stage_saved:mgx_fish.helpers+1;mgx_fish_set_goal();
+    /* Nothing chosen yet; the pre-level picker fills these in. */
+    for(int s=0;s<MGX_HELP_SLOTS;s++)mgx_fish.helper_pick[s]=-1;
+    mgx_fish.food_tier=0;mgx_fish.shop_open=0;mgx_fish.shop_row=0;mgx_fish.picking=0;
     mgx_fish.next_spawn=90;mgx_fish.last=SDL_GetTicks();mgx_fish_add();mgx_fish_add();
 }
 static void mgx_fish_spawn_monster(void){
     for(int i=0;i<MGX_FISH_MONSTERS;i++)if(!mgx_fish.monster[i].active){
         MgxFishMonster *m=&mgx_fish.monster[i];memset(m,0,sizeof *m);m->active=1;m->target=-1;
-        m->boss=mgx_fish.chapter==10;m->type=m->boss?3:(mgx_fish.chapter+i)%3;
-        m->max_hp=m->hp=m->boss?38:4+mgx_fish.chapter+i*2;
+        /* Chapters end on a boss from the third one on -- when the campaign
+           was ten flat levels this was a single fight at stage ten, which
+           left everything past it with nothing to close on. */
+        int chapter=mgx_fish_chapter_of(mgx_fish.stage);
+        m->boss=chapter>=3&&mgx_fish_is_chapter_end(mgx_fish.stage);
+        m->type=m->boss?3:(mgx_fish.stage+i)%3;
+        m->max_hp=m->hp=m->boss?26+mgx_clampi(chapter,1,12)*6:4+mgx_clampi(mgx_fish.stage,1,26)+i*2;
         m->x=(i&1)?38:WIN_W-38;m->y=176+rand()%mgx_clampi(WIN_H-265,1,9999);
         if(m->boss){m->x=WIN_W-54;m->y=(158+WIN_H-32)/2;mgx_fish.boss_spawned=1;}return;
     }
 }
-static void mgx_fish_chapter_advance(float reward_x,float reward_y){
-    int rare=(mgx_fish.chapter-1)%8;mgx_fish_drop_add(reward_x,reward_y,90,MGX_RES_RARE,rare);
-    mgx_fish.coins+=45+mgx_fish.chapter*12;mg_set_best(MG_TIDEPOOL,mgx_fish.chapter);
-    mgx_fish.helpers++;mgx_fish_save_helpers();mgx_fish.egg_pieces=0;mgx_fish.intro=0;
-    mgx_fish.chapter++;mgx_fish.chapter_kills=0;mgx_fish.level_resources=0;mgx_fish.level_time=0;
+static void mgx_fish_stage_advance(float reward_x,float reward_y){
+    int rare=(mgx_fish.stage-1)%8;mgx_fish_drop_add(reward_x,reward_y,90,MGX_RES_RARE,rare);
+    mgx_fish.coins+=45+mgx_fish.stage*12;mg_set_best(MG_TIDEPOOL,mgx_fish.stage);
+    mgx_fish.helpers++;mgx_fish.egg_pieces=0;mgx_fish.intro=0;
+    /* Read the level we just cleared BEFORE the stage moves on. */
+    mgx_fish.bonus_pending=mgx_fish_bonus_after(mgx_fish.stage);
+    if(mgx_fish_is_chapter_end(mgx_fish.stage))
+        mgx_fish.shells+=3+mgx_fish_chapter_of(mgx_fish.stage);
+    mgx_fish.stage++;mgx_fish.stage_kills=0;mgx_fish.level_resources=0;mgx_fish.level_time=0;
     mgx_fish.boss_spawned=0;mgx_fish.boss_defeated=0;mgx_fish_set_goal();mgx_fish.between=2;
+    /* Helpers leave the tank between levels; you re-pick before the next one. */
+    for(int s=0;s<MGX_HELP_SLOTS;s++)mgx_fish.helper[s].active=0;
     /* Invasions follow active play time, including across level changes. */
     mgx_fish.next_spawn=fmaxf(mgx_fish.next_spawn,mgx_fish.clock+5);
     mgx_fish.shop_type=mgx_fish.hatch_type;
+    /* Written last, once the stage, the shells and the hatch count have all
+       moved -- saving halfway through left the campaign a level behind. */
+    mgx_fish_save_helpers();
     for(int i=0;i<MGX_FISH_MONSTERS;i++)mgx_fish.monster[i].active=0;
 }
 static int mgx_fish_objective_met(void){
     const MgxFishGoal *g=mgx_fish_goal();
-    if(!g)return mgx_fish.chapter_kills>=mgx_fish.chapter_goal;
-    return mgx_fish.chapter_kills>=g->kills&&mgx_fish.level_resources>=g->resources&&
+    if(!g)return mgx_fish.stage_kills>=mgx_fish.stage_goal;
+    return mgx_fish.stage_kills>=g->kills&&mgx_fish.level_resources>=g->resources&&
            mgx_fish_alive()>=g->min_fish&&mgx_fish.level_time>=g->survive&&(!g->boss||mgx_fish.boss_defeated);
 }
 static void mgx_fish_check_goal(float x,float y){(void)x;(void)y; /* Egg purchase owns level advancement. */}
-static int mgx_fish_egg_cost(void){return 70+mgx_fish.chapter*30;}
+static int mgx_fish_egg_cost(void){return 70+mgx_fish.stage*30;}
 static void mgx_fish_buy_egg(void){
     int cost=mgx_fish_egg_cost();
     if(!mgx_fish.started||mgx_fish.over||mgx_fish.between||mgx_fish.intro>0||mgx_fish.collection)return;
+    /* A bonus round is a breath between levels; ending it early by hatching
+       mid-round would throw away the rest of the rain. */
+    if(mgx_fish.bonus){mgx_fish_notice("Not during a bonus round - catch what falls");return;}
     if(mgx_fish.coins<cost){char msg[100];snprintf(msg,sizeof msg,"Egg piece costs $%d - need $%d more",cost,cost-mgx_fish.coins);mgx_fish_notice(msg);return;}
     mgx_fish.coins-=cost;
     if(++mgx_fish.egg_pieces==3){mgx_fish.hatch_type=mgx_fish_hatch_order[mgx_fish.helpers%6];mgx_fish.hatch_time=4;mgx_fish.hatch_pending=1;mgx_fish.between=1;}
@@ -1671,22 +2155,235 @@ static void mgx_fish_buy_egg(void){
 }
 static void mgx_fish_monster_defeated(int index){
     MgxFishMonster *m=&mgx_fish.monster[index];float x=m->x,y=m->y;int boss=m->boss;m->active=0;
-    mgx_fish.total_kills++;mgx_fish.chapter_kills++;mgx_fish.coins+=18+mgx_fish.chapter*3+(boss?80:0);
+    mgx_fish.total_kills++;mgx_fish.stage_kills++;mgx_fish.coins+=18+mgx_fish.stage*3+(boss?80:0);
     if(boss)mgx_fish.boss_defeated=1;
-    if(boss||(mgx_road_hash((unsigned)mgx_fish.total_kills*71u+(unsigned)mgx_fish.chapter)%6u)==0u)
-        mgx_fish_drop_add(x,y,boss?120:70,MGX_RES_RARE,(mgx_fish.total_kills+mgx_fish.chapter)%8);
-    else mgx_fish_drop_add(x,y,10+mgx_fish.chapter*2,MGX_RES_GOLD,0);
+    if(boss||(mgx_road_hash((unsigned)mgx_fish.total_kills*71u+(unsigned)mgx_fish.stage)%6u)==0u)
+        mgx_fish_drop_add(x,y,boss?120:70,MGX_RES_RARE,(mgx_fish.total_kills+mgx_fish.stage)%8);
+    else mgx_fish_drop_add(x,y,10+mgx_fish.stage*2,MGX_RES_GOLD,0);
     mgx_fish_check_goal(x,y);
 }
+/* A meal resets the clock and records WHICH food it was: better food holds the
+   fish for proportionally longer. The eat cooldown is kept short so a fish that
+   has just eaten skips a second pellet dropped on it, without ever refusing a
+   meal it actually needs. */
 static void mgx_fish_feed_pet(MgxFishPet *f){
     if(f->eat_cooldown>0)return;
-    f->eat_cooldown=10;
-    f->hunger=mgx_fish_full_hunger(f->type);if(f->growth<7)f->growth++;
+    f->eat_cooldown=1.2f;
+    f->hunger=0;f->starve_clock=0;f->hunger_span=mgx_fish_food_hold();
+    if(f->growth<7)f->growth++;
     if(f->hp<f->max_hp)f->hp++;
 }
+/* The shop's rows, and the pieces defined further down with the screens they
+   belong to. Declared here because the key handler needs them first. */
+enum {MGX_SHOP_EGG,MGX_SHOP_RAY,MGX_SHOP_FOOD,MGX_SHOP_RARE,MGX_SHOP_ROWS};
+static void mgx_fish_helper_spawn(void);
+static int  mgx_fish_pick_count(void);
+static void mgx_fish_pick_toggle(int species);
+static int  mgx_fish_ray_cost(void);
+static void mgx_fish_begin_level(void);
+
+/* Open the pre-level helper picker. Only worth showing once the player has
+   something to choose between -- with one helper (or none) it is a menu with no
+   decision in it, so it is skipped. */
+
+/* --- Bonus rounds ---------------------------------------------------------
+   Every second level, and always at the end of a chapter, the tank gets a
+   short round with no monsters in it: treasure and shells rain from the
+   surface and everything you catch is yours. It exists so the campaign has a
+   rhythm -- two levels of pressure, then a breath -- and so shells arrive at a
+   rate the rare-fish prices can be tuned against. */
+#define MGX_FISH_BONUS_SECS  22.0f
+#define MGX_FISH_BONUS_DRIP  0.55f
+
+static void mgx_fish_bonus_begin(void){
+    mgx_fish.bonus=1;mgx_fish.bonus_time=MGX_FISH_BONUS_SECS;
+    mgx_fish.bonus_take=0;mgx_fish.bonus_drip=0;
+    /* Nothing hostile is left in the water, and the invasion clock is pushed
+       past the round so it cannot fire the moment the round ends. */
+    for(int i=0;i<MGX_FISH_MONSTERS;i++)mgx_fish.monster[i].active=0;
+    mgx_fish.next_spawn=fmaxf(mgx_fish.next_spawn,mgx_fish.clock+MGX_FISH_BONUS_SECS+6.0f);
+    mgx_fish_notice("BONUS ROUND - catch everything!");
+}
+/* One falling thing, most of them ordinary treasure so the shells still feel
+   like the find. `serial` keeps successive drops from stacking in a column. */
+static void mgx_fish_bonus_drop(void){
+    unsigned h=mgx_road_hash((unsigned)(++mgx_fish.resource_serial)*2654435761u);
+    float x=40.0f+(float)(h%(unsigned)mgx_clampi(WIN_W-80,1,9999));
+    int roll=(int)((h>>11)%10u);
+    int kind=roll<3?MGX_RES_SHELL:roll<5?MGX_RES_GOLD:roll<7?MGX_RES_SILVER:
+             roll<8?MGX_RES_RUBY:roll<9?MGX_RES_EMERALD:MGX_RES_DIAMOND;
+    int value=kind==MGX_RES_SHELL?12:6+(int)((h>>19)%14u);
+    mgx_fish_drop_add(x,40.0f,value,kind,0);
+}
+static void mgx_fish_bonus_end(void){
+    mgx_fish.bonus=0;mgx_fish.bonus_time=0;
+    char msg[100];snprintf(msg,sizeof msg,"Bonus round over - %d shell%s banked",
+                           mgx_fish.bonus_take,mgx_fish.bonus_take==1?"":"s");
+    mgx_fish_notice(msg);
+    mgx_fish_save_helpers();
+    mgx_fish_begin_level();
+}
+
+static void mgx_fish_begin_level(void){
+    /* A queued bonus round comes first: it is part of the gap between two
+       levels, not a level of its own. */
+    if(mgx_fish.bonus_pending){mgx_fish.bonus_pending=0;mgx_fish_bonus_begin();return;}
+    if(mgx_help_unlocked_count()>=2){
+        mgx_fish.picking=1;
+        mgx_fish.pick_cursor=mgx_clampi(mgx_fish.pick_cursor,0,MGX_HELP_COUNT-1);
+        return;
+    }
+    for(int s=0;s<MGX_HELP_SLOTS;s++)
+        mgx_fish.helper_pick[s]=(s<mgx_help_unlocked_count())?s:-1;
+    mgx_fish_helper_spawn();
+    mgx_fish.picking=0;mgx_fish.intro=5;
+}
+static void mgx_fish_shop_buy(void){
+    int tier=mgx_fish_food_tier();
+    if(mgx_fish.shop_row==MGX_SHOP_EGG){mgx_fish_buy_egg();return;}
+    if(mgx_fish.shop_row==MGX_SHOP_RARE){
+        /* The rare reef is the one thing coins cannot buy: it is what the
+           shells from bonus rounds are for, and what you keep after a wipe. */
+        int rare=mgx_rare_next(mgx_fish.rares);
+        if(rare<0){mgx_fish_notice("The rare reef is complete");return;}
+        int cost=mgx_rare_fish[rare].shells;
+        if(mgx_fish.shells<cost){char m[120];snprintf(m,sizeof m,"%s costs %d shells - need %d more",
+            mgx_rare_fish[rare].name,cost,cost-mgx_fish.shells);mgx_fish_notice(m);return;}
+        mgx_fish.shells-=cost;mgx_fish.rares|=1<<rare;mgx_fish_save_helpers();
+        char m[140];snprintf(m,sizeof m,"%s joins your reef - %s",mgx_rare_fish[rare].name,mgx_rare_fish[rare].note);
+        mgx_fish_notice(m);return;
+    }
+    if(mgx_fish.shop_row==MGX_SHOP_RAY){
+        int cost=mgx_fish_ray_cost();
+        if(mgx_fish.gun_level>=5){mgx_fish_notice("Ray is fully upgraded");return;}
+        if(mgx_fish.coins<cost){char m[100];snprintf(m,sizeof m,"Ray upgrade costs $%d - need $%d more",cost,cost-mgx_fish.coins);mgx_fish_notice(m);return;}
+        mgx_fish.coins-=cost;mgx_fish.gun_level++;mgx_fish_notice("Ray upgraded - stronger, faster shots");return;
+    }
+    if(tier+1>=MGX_FOOD_TIERS){mgx_fish_notice("You already have the best food");return;}
+    int cost=mgx_food_upgrade_cost[tier+1];
+    if(mgx_fish.coins<cost){char m[110];snprintf(m,sizeof m,"%s costs $%d - need $%d more",mgx_food_name[tier+1],cost,cost-mgx_fish.coins);mgx_fish_notice(m);return;}
+    mgx_fish.coins-=cost;mgx_fish.food_tier=tier+1;
+    char m[120];snprintf(m,sizeof m,"%s - fish stay fed longer, $%d a pellet",
+                         mgx_food_name[mgx_fish.food_tier],mgx_fish_food_cost());
+    mgx_fish_notice(m);
+}
+
+/* --- Pause / the game's own settings --------------------------------------
+   START used to fall straight through to the frontend's Settings from inside
+   the tank, which is wrong twice over: it interrupted a live level with a menu
+   that has nothing to do with the game, and it meant the only way out was one
+   that never offered to save. START is now the game's own menu -- it begins the
+   game before it has started, and pauses it once it has. Leaving goes through
+   here, so a campaign is never lost by pressing a button. */
+enum {MGX_PAUSE_RESUME,MGX_PAUSE_SAVE,MGX_PAUSE_RESTART,
+      MGX_PAUSE_RESET,MGX_PAUSE_EXIT_SAVE,MGX_PAUSE_EXIT,MGX_PAUSE_ROWS};
+static const char *mgx_pause_label[MGX_PAUSE_ROWS]={
+    "Resume game","Save progress","Restart this level",
+    "Reset campaign","Save and exit","Exit without saving"};
+static const char *mgx_pause_note[MGX_PAUSE_ROWS]={
+    "Back to the tank.",
+    "Write your shells, reef and place in the reef to disk.",
+    "Start this level again. Your shells and reef are kept.",
+    "Back to chapter one. Shells and rare fish are lost.",
+    "Save first, then leave.",
+    "Leave without writing anything since your last save."};
+
+static void mgx_fish_pause_open(void){
+    mgx_fish.paused=1;mgx_fish.pause_row=MGX_PAUSE_RESUME;
+    mgx_fish.pause_confirm=0;mgx_fish.notice_time=0;
+}
+/* Everything the campaign keeps lives in one file, so "save" is one call. The
+   menu says so plainly rather than implying a save slot that does not exist. */
+static void mgx_fish_pause_save(void){
+    mgx_fish_save_helpers();
+    mgx_fish_notice("Progress saved");
+}
+/* Restart the level in front of you without touching what you have earned:
+   the tank is re-stocked, the level clock and the invasion timer go back, and
+   the shells, the reef and your place in the campaign all stay. */
+static void mgx_fish_restart_level(void){
+    int stage=mgx_fish.stage,helpers=mgx_fish.helpers,shells=mgx_fish.shells;
+    int rares=mgx_fish.rares,food=mgx_fish.food_tier,gun=mgx_fish.gun_level;
+    mgx_fish_reset();
+    mgx_fish.stage=stage;mgx_fish.helpers=helpers;mgx_fish.shells=shells;
+    mgx_fish.rares=rares;mgx_fish.food_tier=food;mgx_fish.gun_level=gun;
+    mgx_fish_set_goal();
+    mgx_fish.started=1;mgx_fish_begin_level();
+}
+/* The only destructive thing in the menu, so it asks twice. */
+static void mgx_fish_reset_campaign(void){
+    char path[768];snprintf(path,sizeof path,"%s/fish-helpers.cfg",sn_data_root());
+    remove(path);
+    mgx_fish_reset();
+    mgx_fish.started=1;mgx_fish_begin_level();
+    mgx_fish_notice("Campaign reset - back to the tidepool");
+}
+static void mgx_fish_pause_key(SDL_Keycode k){
+    if(k==SDLK_UP)  {mgx_fish.pause_row=(mgx_fish.pause_row+MGX_PAUSE_ROWS-1)%MGX_PAUSE_ROWS;mgx_fish.pause_confirm=0;return;}
+    if(k==SDLK_DOWN){mgx_fish.pause_row=(mgx_fish.pause_row+1)%MGX_PAUSE_ROWS;mgx_fish.pause_confirm=0;return;}
+    /* B and START both close it -- whichever one you reached for. */
+    if(k==SDLK_ESCAPE||k==SDLK_F1){mgx_fish.paused=0;mgx_fish.pause_confirm=0;return;}
+    if(k!=SDLK_RETURN)return;
+    switch(mgx_fish.pause_row){
+        case MGX_PAUSE_RESUME: mgx_fish.paused=0;break;
+        case MGX_PAUSE_SAVE:   mgx_fish_pause_save();break;
+        case MGX_PAUSE_RESTART:mgx_fish.paused=0;mgx_fish_restart_level();break;
+        case MGX_PAUSE_RESET:
+            if(!mgx_fish.pause_confirm){mgx_fish.pause_confirm=1;return;}
+            mgx_fish.pause_confirm=0;mgx_fish.paused=0;mgx_fish_reset_campaign();break;
+        case MGX_PAUSE_EXIT_SAVE: mgx_fish_save_helpers(); mgx_fish.paused=0;mgx_fish.want_exit=1;break;
+        default:                  mgx_fish.paused=0;mgx_fish.want_exit=1;break;
+    }
+    mgx_fish.pause_confirm=0;
+}
+
 static void mgx_fish_key(SDL_Keycode k){
-    if(mgx_fish.over){if(k==SDLK_RETURN)mgx_fish_reset();return;}
-    if(mgx_fish.between){if(mgx_fish.between==2&&k==SDLK_RETURN){mgx_fish.between=0;mgx_fish.intro=5;}return;}
+    if(mgx_fish.paused){mgx_fish_pause_key(k);return;}
+    if(mgx_fish.over){
+        if(k==SDLK_RETURN)mgx_fish_reset();
+        else if(k==SDLK_ESCAPE||k==SDLK_F1)mgx_fish_pause_open();
+        return;
+    }
+    /* Before the first level, START is what a start button should be. */
+    if(k==SDLK_F1&&!mgx_fish.started){mgx_fish.started=1;mgx_fish_begin_level();return;}
+    /* In play it pauses. An overlay that is already up closes first, so one
+       press never means two things. */
+    if(k==SDLK_F1&&!mgx_fish.picking){
+        if(mgx_fish.shop_open){mgx_fish.shop_open=0;return;}
+        if(mgx_fish.collection){mgx_fish.collection=0;return;}
+        mgx_fish_pause_open();return;
+    }
+    /* B leaves through the pause menu rather than straight out of the game,
+       so leaving always offers to save. */
+    if(k==SDLK_ESCAPE&&mgx_fish.started&&!mgx_fish.picking&&!mgx_fish.shop_open
+       &&!mgx_fish.collection&&!mgx_fish.between){mgx_fish_pause_open();return;}
+    /* The picker owns the pad while it is up. */
+    if(mgx_fish.picking){
+        const int cols=3;
+        if(k==SDLK_LEFT)  {mgx_fish.pick_cursor=(mgx_fish.pick_cursor+MGX_HELP_COUNT-1)%MGX_HELP_COUNT;return;}
+        if(k==SDLK_RIGHT) {mgx_fish.pick_cursor=(mgx_fish.pick_cursor+1)%MGX_HELP_COUNT;return;}
+        if(k==SDLK_UP)    {mgx_fish.pick_cursor=(mgx_fish.pick_cursor+MGX_HELP_COUNT-cols)%MGX_HELP_COUNT;return;}
+        if(k==SDLK_DOWN)  {mgx_fish.pick_cursor=(mgx_fish.pick_cursor+cols)%MGX_HELP_COUNT;return;}
+        if(k==SDLK_RETURN){mgx_fish_pick_toggle(mgx_fish.pick_cursor);return;}
+        if(k==SDLK_F1||k==SDLK_ESCAPE){          /* START, or B once something is chosen */
+            if(k==SDLK_ESCAPE&&!mgx_fish_pick_count()){mgx_fish_notice("Choose at least one helper");return;}
+            mgx_fish_helper_spawn();mgx_fish.picking=0;mgx_fish.intro=5;
+        }
+        return;
+    }
+    if(mgx_fish.between){if(mgx_fish.between==2&&k==SDLK_RETURN){mgx_fish.between=0;mgx_fish_begin_level();}return;}
+    /* R1 is the shop. */
+    if(k==SDLK_e){
+        if(!mgx_fish.started||mgx_fish.intro>0||mgx_fish.collection)return;
+        mgx_fish.shop_open=!mgx_fish.shop_open;mgx_fish.notice_time=0;return;
+    }
+    if(mgx_fish.shop_open){
+        if(k==SDLK_ESCAPE){mgx_fish.shop_open=0;return;}
+        if(k==SDLK_UP)    {mgx_fish.shop_row=(mgx_fish.shop_row+MGX_SHOP_ROWS-1)%MGX_SHOP_ROWS;return;}
+        if(k==SDLK_DOWN)  {mgx_fish.shop_row=(mgx_fish.shop_row+1)%MGX_SHOP_ROWS;return;}
+        if(k==SDLK_RETURN){mgx_fish_shop_buy();return;}
+        return;
+    }
     if(k==SDLK_f){mgx_fish.collection=!mgx_fish.collection;mgx_fish.notice_time=0;return;}
     if(mgx_fish.collection){
         if(k==SDLK_ESCAPE){mgx_fish.collection=0;return;}
@@ -1695,9 +2392,8 @@ static void mgx_fish_key(SDL_Keycode k){
         if(k==SDLK_RETURN){mgx_fish.collection=0;return;}
         if(k!=SDLK_s)return;
     }
-    if(!mgx_fish.started){if(k==SDLK_RETURN){mgx_fish.started=1;mgx_fish.intro=5;}return;}
+    if(!mgx_fish.started){if(k==SDLK_RETURN){mgx_fish.started=1;mgx_fish_begin_level();}return;}
     if(mgx_fish.intro>0){if(k==SDLK_RETURN)mgx_fish.intro=0;return;}
-    if(k==SDLK_e){mgx_fish_buy_egg();return;}
     if(k==SDLK_s){
         int type=mgx_fish.shop_type,cost=mgx_fish_cost[type];
         if(!mgx_fish_unlocked(type)){mgx_fish_notice("Hatch an egg to discover a new animal");return;}
@@ -1706,10 +2402,6 @@ static void mgx_fish_key(SDL_Keycode k){
         if(mgx_fish_add_type(type)){mgx_fish.coins-=cost;mgx_fish_notice("Animal added to your tank");}
         return;
     }
-    if(k==SDLK_q){int cost=65+mgx_fish.gun_level*45;
-        if(mgx_fish.gun_level>=5){mgx_fish_notice("Ray is fully upgraded");return;}
-        if(mgx_fish.coins<cost){char msg[100];snprintf(msg,sizeof msg,"Ray upgrade costs $%d - need $%d more",cost,cost-mgx_fish.coins);mgx_fish_notice(msg);return;}
-        mgx_fish.coins-=cost;mgx_fish.gun_level++;mgx_fish_notice("Ray upgraded - stronger, faster shots");return;}
     if(k!=SDLK_RETURN)return;
     int target=-1;float best=1e12f;
     for(int i=0;i<MGX_FISH_MONSTERS;i++)if(mgx_fish.monster[i].active){float d=mgx_len2(mgx_fish.x-mgx_fish.monster[i].x,mgx_fish.y-mgx_fish.monster[i].y);if(d<best){best=d;target=i;}}
@@ -1718,7 +2410,7 @@ static void mgx_fish_key(SDL_Keycode k){
         if(!mgx_fish.last_shot||now-mgx_fish.last_shot>=(Uint32)cooldown){
             MgxFishMonster *m=&mgx_fish.monster[target];float hit_x=m->x,hit_y=m->y;
             float xx=m->x-mgx_fish.x,yy=m->y-mgx_fish.y,len=sqrtf(xx*xx+yy*yy);
-            if(len<.5f){xx=m->x<WIN_W/2?1.0f:-1.0f;yy=((target+mgx_fish.chapter)&1)?.25f:-.25f;len=sqrtf(xx*xx+yy*yy);}
+            if(len<.5f){xx=m->x<WIN_W/2?1.0f:-1.0f;yy=((target+mgx_fish.stage)&1)?.25f:-.25f;len=sqrtf(xx*xx+yy*yy);}
             xx/=len;yy/=len;float impulse=55.0f+mgx_fish.gun_level*13.0f;
             m->recoil_x=xx*impulse;m->recoil_y=yy*impulse;m->x=mgx_clampf(m->x+xx*8,34,WIN_W-34);m->y=mgx_clampf(m->y+yy*8,158,WIN_H-72);
             m->hit_flash=.20f;mgx_fish.ray_from_x=mgx_fish.x;mgx_fish.ray_from_y=mgx_fish.y;
@@ -1727,10 +2419,11 @@ static void mgx_fish_key(SDL_Keycode k){
             m->hp-=mgx_fish.gun_level;if(m->hp<=0)mgx_fish_monster_defeated(target);
         }return;
     }
-    if(mgx_fish.coins<10){mgx_fish_notice("Food costs $10");return;}
+    int food_cost=mgx_fish_food_cost();
+    if(mgx_fish.coins<food_cost){char m[80];snprintf(m,sizeof m,"%s costs $%d",mgx_food_name[mgx_fish_food_tier()],food_cost);mgx_fish_notice(m);return;}
     int room=0;for(int i=0;i<MGX_FISH_DROPS;i++)room+=!mgx_fish.drops[i].active;
     if(!room){mgx_fish_notice("Clear falling items before dropping more food");return;}
-    mgx_fish.coins-=10;
+    mgx_fish.coins-=food_cost;
     /* Extra bites still cost money; recently fed fish ignore them. */
     mgx_fish_drop_add(mgx_fish.x,mgx_fish.y,0,MGX_RES_FOOD,0);
 }
@@ -1751,10 +2444,173 @@ static void mgx_fish_kill_pet(int i){
     if((mgx_fish.resource_serial++&1)==0)mgx_fish_drop_add(f->x,f->y,0,MGX_RES_WASTE,0);
     f->active=0;
 }
+/* --- Helper behaviour ----------------------------------------------------
+   One creature, one job, done by actually getting there. Every helper roams
+   until it sees work, swims to it, and only then acts -- so the player can beat
+   it to a coin, and a helper busy at the far end of the tank is genuinely busy.
+   That is the whole point: the old version reached across the tank instantly
+   from a badge in the corner and took the game away from you. */
+#define MGX_HELP_SPEED 96.0f
+#define MGX_HELP_REACH 16.0f
+
+static void mgx_fish_helper_spawn(void){
+    for(int s=0;s<MGX_HELP_SLOTS;s++){
+        MgxFishHelper *h=&mgx_fish.helper[s];
+        int sp=mgx_fish.helper_pick[s];
+        memset(h,0,sizeof *h);
+        if(sp<0||!mgx_help_unlocked(sp))continue;
+        h->active=1;h->species=sp;h->target=-1;h->state=MGX_HSTATE_ROAM;
+        h->x=(float)(WIN_W/2+(s?70:-70));
+        h->y=(float)(WIN_H/2+(s?30:-30));
+        h->dir=s?1:-1;h->bob=(float)(s*3);
+        /* Shelly lives on the floor. */
+        if(sp==MGX_HELP_SHELLY)h->y=(float)(WIN_H-40);
+    }
+}
+
+/* Nearest drop this helper cares about, or -1. */
+static int mgx_fish_helper_find_drop(const MgxFishHelper *h,int want_landed){
+    int best=-1;float bd=1e9f;
+    for(int d=0;d<MGX_FISH_DROPS;d++){
+        const MgxFishDrop *dr=&mgx_fish.drops[d];
+        if(!dr->active||!mgx_fish_is_treasure(dr->kind))continue;
+        if(want_landed&&dr->bottom_age<0)continue;   /* Shelly only cleans up */
+        float dd=mgx_len2(h->x-dr->x,h->y-dr->y);
+        if(dd<bd){bd=dd;best=d;}
+    }
+    return best;
+}
+static int mgx_fish_helper_find_monster(const MgxFishHelper *h){
+    int best=-1;float bd=1e9f;
+    for(int m=0;m<MGX_FISH_MONSTERS;m++){
+        if(!mgx_fish.monster[m].active)continue;
+        float dd=mgx_len2(h->x-mgx_fish.monster[m].x,h->y-mgx_fish.monster[m].y);
+        if(dd<bd){bd=dd;best=m;}
+    }
+    return best;
+}
+/* Move toward a point at this helper's speed. Returns 1 once it has arrived. */
+static int mgx_fish_helper_travel(MgxFishHelper *h,float tx,float ty,float dt,float speed){
+    float xx=tx-h->x,yy=ty-h->y,len=sqrtf(xx*xx+yy*yy);
+    if(len<=MGX_HELP_REACH)return 1;
+    h->x+=xx/len*speed*dt;h->y+=yy/len*speed*dt;
+    if(fabsf(xx)>2)h->dir=xx>0?1:-1;
+    return 0;
+}
+static void mgx_fish_helper_step(int slot,float dt){
+    MgxFishHelper *h=&mgx_fish.helper[slot];
+    if(!h->active)return;
+    h->bob+=dt;h->cool=fmaxf(0,h->cool-dt);h->flash=fmaxf(0,h->flash-dt);
+    float speed=MGX_HELP_SPEED;
+    switch(h->species){
+      case MGX_HELP_DART: case MGX_HELP_GLIMMER: {
+        /* Swim to the nearest treasure and bank it on arrival. Glimmer pays a
+           gold rate for whatever it reaches. */
+        if(h->target<0||h->target>=MGX_FISH_DROPS||!mgx_fish.drops[h->target].active||
+           !mgx_fish_is_treasure(mgx_fish.drops[h->target].kind))
+            h->target=mgx_fish_helper_find_drop(h,0);
+        if(h->target<0){h->state=MGX_HSTATE_ROAM;break;}
+        h->state=MGX_HSTATE_SEEK;
+        MgxFishDrop *d=&mgx_fish.drops[h->target];
+        if(mgx_fish_helper_travel(h,d->x,d->y,dt,speed*1.15f)){
+            if(h->species==MGX_HELP_GLIMMER&&d->kind<MGX_RES_GOLD){
+                d->kind=MGX_RES_GOLD;d->value=mgx_fish_resource_value(MGX_PET_TETRA);
+            }
+            mgx_fish_collect_drop(h->target);
+            h->flash=.25f;h->target=-1;
+        }
+        break;
+      }
+      case MGX_HELP_NIBBLES: {
+        /* Free food, but on its own schedule and from where it happens to be --
+           it is a supplement, not a replacement for feeding. */
+        h->state=MGX_HSTATE_ROAM;
+        if(h->cool<=0){
+            int room=0;for(int d=0;d<MGX_FISH_DROPS;d++)room+=!mgx_fish.drops[d].active;
+            if(room){mgx_fish_drop_add(h->x,h->y,0,MGX_RES_FOOD,0);h->flash=.3f;}
+            h->cool=7.0f;
+        }
+        break;
+      }
+      case MGX_HELP_SPIKE: {
+        if(h->target<0||h->target>=MGX_FISH_MONSTERS||!mgx_fish.monster[h->target].active)
+            h->target=mgx_fish_helper_find_monster(h);
+        if(h->target<0){h->state=MGX_HSTATE_ROAM;break;}
+        h->state=MGX_HSTATE_SEEK;
+        MgxFishMonster *m=&mgx_fish.monster[h->target];
+        if(mgx_fish_helper_travel(h,m->x,m->y,dt,speed*1.25f)&&h->cool<=0){
+            m->hit_flash=.2f;m->hp--;h->flash=.3f;h->cool=1.1f;
+            /* Knocked back a little, so a helper alone cannot pin a monster. */
+            m->recoil_x=(m->x-h->x)*1.4f;m->recoil_y=(m->y-h->y)*1.4f;
+            if(m->hp<=0){mgx_fish_monster_defeated(h->target);h->target=-1;}
+        }
+        break;
+      }
+      case MGX_HELP_SHELLY: {
+        /* A snail: crawls the floor and clears what has settled there before it
+           rots away. Never leaves the bottom. */
+        h->y=(float)(WIN_H-40);
+        if(h->target<0||h->target>=MGX_FISH_DROPS||!mgx_fish.drops[h->target].active)
+            h->target=mgx_fish_helper_find_drop(h,1);
+        if(h->target<0){h->state=MGX_HSTATE_ROAM;break;}
+        h->state=MGX_HSTATE_SEEK;
+        MgxFishDrop *d=&mgx_fish.drops[h->target];
+        float xx=d->x-h->x;
+        if(fabsf(xx)<=MGX_HELP_REACH){mgx_fish_collect_drop(h->target);h->flash=.25f;h->target=-1;}
+        else {h->x+=(xx>0?1:-1)*speed*.45f*dt;h->dir=xx>0?1:-1;}
+        break;
+      }
+      case MGX_HELP_BUBBLE: {
+        /* Swims between the monsters and the small fish, pushing the little ones
+           clear. Only helps what is actually in danger. */
+        h->state=MGX_HSTATE_ROAM;
+        int m=mgx_fish_helper_find_monster(h);
+        if(m<0)break;
+        h->state=MGX_HSTATE_SEEK;
+        MgxFishMonster *mo=&mgx_fish.monster[m];
+        mgx_fish_helper_travel(h,mo->x,mo->y,dt,speed);
+        for(int f=0;f<MGX_FISH_MAX;f++){
+            MgxFishPet *p=&mgx_fish.fish[f];
+            if(!p->active||p->growth>=4)continue;
+            if(mgx_len2(p->x-mo->x,p->y-mo->y)>120*120)continue;
+            float ax=p->x-mo->x,ay=p->y-mo->y,al=sqrtf(ax*ax+ay*ay);
+            if(al>1){p->x+=ax/al*34*dt;p->y+=ay/al*26*dt;p->flee_time=fmaxf(p->flee_time,.6f);}
+        }
+        break;
+      }
+      default: h->state=MGX_HSTATE_ROAM; break;
+    }
+    if(h->state==MGX_HSTATE_ROAM&&h->species!=MGX_HELP_SHELLY){
+        /* Idle drift, so a helper with nothing to do still feels alive. */
+        h->x+=h->dir*speed*.36f*dt;
+        h->y+=sinf(h->bob*1.6f)*16.0f*dt;
+        if(h->x<50||h->x>WIN_W-50)h->dir=-h->dir;
+    }
+    h->x=mgx_clampf(h->x,42,WIN_W-42);
+    h->y=mgx_clampf(h->y,58,WIN_H-38);
+}
+
 static void mgx_fish_pet_step(int i,float dt,int waste){
     MgxFishPet *f=&mgx_fish.fish[i];f->hurt_flash=fmaxf(0,f->hurt_flash-dt);f->flee_time=fmaxf(0,f->flee_time-dt);f->eat_cooldown=fmaxf(0,f->eat_cooldown-dt);
-    float drain=(f->type==MGX_PET_SHARK?.56f:f->type==MGX_PET_CLAM?.48f:.88f)*(1.0f+waste*.055f);
-    f->hunger-=dt*drain;if(f->hunger<=0){f->hp--;f->hunger=10;f->hurt_flash=.35f;if(f->hp<=0){mgx_fish_kill_pet(i);return;}}
+    /* Hunger counts UP in seconds since the last meal. Dirty water makes the
+       clock run faster, which is what waste is for. */
+    f->hunger+=dt*(1.0f+waste*.055f);
+    {
+        /* Starving holds the fish at the edge of its window, ring flashing,
+           and costs a heart now and every MGX_STARVE_TICK seconds after. It
+           used to put the clock back to "urgent" instead, which ran out again
+           in about a second and a half -- a starving guppy was dead in five. */
+        float die=mgx_fish_hunger_span(f);
+        if(f->hunger>=die){
+            f->hunger=die;
+            f->starve_clock-=dt;
+            if(f->starve_clock<=0){
+                f->starve_clock+=MGX_STARVE_TICK;
+                f->hp--;f->hurt_flash=.35f;
+                if(f->hp<=0){mgx_fish_kill_pet(i);return;}
+            }
+        }
+    }
     int food=-1;float food_d=150.0f*150.0f;
     if(f->eat_cooldown<=0)for(int d=0;d<MGX_FISH_DROPS;d++)if(mgx_fish.drops[d].active&&mgx_fish.drops[d].kind==MGX_RES_FOOD){float dd=mgx_len2(f->x-mgx_fish.drops[d].x,f->y-mgx_fish.drops[d].y);if(dd<food_d){food_d=dd;food=d;}}
     if(food>=0&&f->type!=MGX_PET_CLAM&&f->type!=MGX_PET_CRAB){float len=sqrtf(food_d),xx=mgx_fish.drops[food].x-f->x,yy=mgx_fish.drops[food].y-f->y;if(len>1){f->x+=xx/len*30*dt;f->y+=yy/len*30*dt;}if(len<15){mgx_fish.drops[food].active=0;mgx_fish_feed_pet(f);}}
@@ -1777,7 +2633,7 @@ static void mgx_fish_pet_step(int i,float dt,int waste){
         if(kind>=0)mgx_fish_drop_add(f->x,f->y,mgx_fish_resource_value(f->type)+f->growth,kind,0);
         if((mgx_fish.resource_serial%7)==0)mgx_fish_drop_add(f->x,f->y,0,MGX_RES_WASTE,0);
     }
-    if(f->type==MGX_PET_SHARK&&f->hunger<18&&f->eat_cooldown<=0){
+    if(f->type==MGX_PET_SHARK&&mgx_fish_hunger_stage(f)>=2&&f->eat_cooldown<=0){
         int prey=-1;float pd=1e9f;for(int j=0;j<MGX_FISH_MAX;j++)if(mgx_fish.fish[j].active&&j!=i&&mgx_fish.fish[j].type<=MGX_PET_TETRA){float d=mgx_len2(f->x-mgx_fish.fish[j].x,f->y-mgx_fish.fish[j].y);if(d<pd){pd=d;prey=j;}}
         if(prey>=0){float len=sqrtf(pd),xx=mgx_fish.fish[prey].x-f->x,yy=mgx_fish.fish[prey].y-f->y;if(len>1){f->x+=xx/len*31*dt;f->y+=yy/len*31*dt;}if(len<17){mgx_fish_kill_pet(prey);mgx_fish_feed_pet(f);}}
     }
@@ -1789,36 +2645,48 @@ static void mgx_fish_step(int dx,int dy){
     mgx_fish.ray_time=fmaxf(0,mgx_fish.ray_time-dt);
     for(int p=0;p<MGX_FISH_PARTICLES;p++)if(mgx_fish.particle[p].active){MgxFishParticle *q=&mgx_fish.particle[p];q->life-=dt;q->x+=q->vx*dt;q->y+=q->vy*dt;q->vx*=.91f;q->vy=q->vy*.91f+18*dt;if(q->life<=0)q->active=0;}
     if(!mgx_fish.started||mgx_fish.over)return;
-    if(mgx_fish.hatch_pending){mgx_fish.hatch_time=fmaxf(0,mgx_fish.hatch_time-dt);if(mgx_fish.hatch_time==0){mgx_fish.hatch_pending=0;mgx_fish_chapter_advance(WIN_W/2,WIN_H/2);}return;}
-    if(mgx_fish.between||mgx_fish.collection)return;
+    if(mgx_fish.hatch_pending){mgx_fish.hatch_time=fmaxf(0,mgx_fish.hatch_time-dt);if(mgx_fish.hatch_time==0){mgx_fish.hatch_pending=0;mgx_fish_stage_advance(WIN_W/2,WIN_H/2);}return;}
+    if(mgx_fish.between||mgx_fish.collection||mgx_fish.paused)return;
     if(mgx_fish.intro>0){mgx_fish.intro=fmaxf(0,mgx_fish.intro-dt);if(mgx_fish.intro==0)mgx_fish.between=0;return;}
     mgx_fish.clock+=dt;mgx_fish.level_time+=dt;int waste=mgx_fish_waste_count();
-    mgx_fish.helper_clock+=dt;
-    if(mgx_fish.helpers && mgx_fish.helper_clock>=2.5f){mgx_fish.helper_clock=0;
-        for(int d=0;d<MGX_FISH_DROPS;d++)if(mgx_fish.drops[d].active&&mgx_fish_is_treasure(mgx_fish.drops[d].kind)){mgx_fish_collect_drop(d);break;}
-        if(mgx_fish.helpers>=3)for(int m=0;m<MGX_FISH_MONSTERS;m++)if(mgx_fish.monster[m].active){mgx_fish.monster[m].hit_flash=.2f;if(--mgx_fish.monster[m].hp<=0)mgx_fish_monster_defeated(m);break;}
+    if(mgx_fish.bonus){
+        mgx_fish.bonus_time=fmaxf(0,mgx_fish.bonus_time-dt);
+        mgx_fish.bonus_drip+=dt;
+        while(mgx_fish.bonus_drip>=MGX_FISH_BONUS_DRIP&&mgx_fish.bonus_time>0){
+            mgx_fish.bonus_drip-=MGX_FISH_BONUS_DRIP;mgx_fish_bonus_drop();
+        }
+        if(mgx_fish.bonus_time<=0)mgx_fish_bonus_end();
     }
-    if(mgx_fish.helpers>=4)for(int f=0;f<MGX_FISH_MAX;f++)if(mgx_fish.fish[f].active&&mgx_fish.fish[f].growth<3)mgx_fish.fish[f].flee_time=1;
-    if(mgx_fish.helpers>=5)for(int f=0;f<MGX_FISH_MAX;f++)if(mgx_fish.fish[f].active)mgx_fish.fish[f].hunger+=dt*.35f;
+    /* Helpers are creatures in the tank now: each one swims and does its own
+       job. No tank-wide passive tick reaching across the screen. */
+    for(int s=0;s<MGX_HELP_SLOTS;s++)mgx_fish_helper_step(s,dt);
     for(int i=0;i<MGX_FISH_MAX;i++)if(mgx_fish.fish[i].active)mgx_fish_pet_step(i,dt,waste);
     float floor_y=WIN_H-32;
     for(int i=0;i<MGX_FISH_DROPS;i++)if(mgx_fish.drops[i].active){
-        MgxFishDrop *d=&mgx_fish.drops[i];d->y=fminf(floor_y,d->y+d->vy*dt*(mgx_fish.helpers>=2 && mgx_fish_is_treasure(d->kind)?.45f:1.0f));
+        MgxFishDrop *d=&mgx_fish.drops[i];d->y=fminf(floor_y,d->y+d->vy*dt);
         if(d->kind!=MGX_RES_FOOD&&mgx_len2(mgx_fish.x-d->x,mgx_fish.y-d->y)<22*22){mgx_fish_collect_drop(i);continue;}
         if(d->kind==MGX_RES_WASTE){d->life-=dt;if(d->life<=0)d->active=0;continue;}
         if(d->y>=floor_y-.01f){if(d->bottom_age<0)d->bottom_age=0;else d->bottom_age+=dt;
             if(d->bottom_age>=2.0f){if(d->kind==MGX_RES_FOOD)mgx_fish_drop_add(d->x,d->y,0,MGX_RES_WASTE,0);d->active=0;}}
     }
     mgx_fish.waste_tick+=dt;if(waste>=5&&mgx_fish.waste_tick>=8.0f){mgx_fish.waste_tick=0;for(int i=0;i<MGX_FISH_MAX;i++)if(mgx_fish.fish[i].active&&mgx_fish.fish[i].type!=MGX_PET_CRAB){MgxFishPet *f=&mgx_fish.fish[i];f->hp--;f->hurt_flash=.35f;if(f->hp<=0)mgx_fish_kill_pet(i);}}
-    int max_monsters=mgx_fish.chapter>=7?3:mgx_fish.chapter>=4?2:1;
-    if(mgx_fish.clock>=mgx_fish.next_spawn&&mgx_fish_monsters_alive()<max_monsters){mgx_fish_spawn_monster();mgx_fish.next_spawn=mgx_fish.clock+90;mgx_fish_notice("Monster incoming! A fires your ray");}
+    int max_monsters=mgx_fish.stage>=7?3:mgx_fish.stage>=4?2:1;
+    if(!mgx_fish.bonus&&mgx_fish.clock>=mgx_fish.next_spawn&&mgx_fish_monsters_alive()<max_monsters){
+        mgx_fish_spawn_monster();
+        /* Invasions come closer together as the campaign goes on: a flat 90
+           seconds meant chapter nine was no busier than chapter one. Floors at
+           45 seconds so it stays survivable. */
+        float gap=100.0f-mgx_fish.stage*6.0f;
+        mgx_fish.next_spawn=mgx_fish.clock+mgx_clampf(gap,45.0f,100.0f);
+        mgx_fish_notice("Monster incoming! A fires your ray");
+    }
     for(int mi=0;mi<MGX_FISH_MONSTERS;mi++)if(mgx_fish.monster[mi].active){
         MgxFishMonster *m=&mgx_fish.monster[mi];m->bite_cool=fmaxf(0,m->bite_cool-dt);m->retarget-=dt;m->hit_flash=fmaxf(0,m->hit_flash-dt);
         m->x=mgx_clampf(m->x+m->recoil_x*dt,32,WIN_W-32);m->y=mgx_clampf(m->y+m->recoil_y*dt,156,WIN_H-76);m->recoil_x*=powf(.035f,dt);m->recoil_y*=powf(.035f,dt);
         if(m->target<0||m->target>=MGX_FISH_MAX||!mgx_fish.fish[m->target].active||m->retarget<=0){m->target=mgx_fish_choose_target(m);m->retarget=.55f;}
         if(m->target>=0){MgxFishPet *f=&mgx_fish.fish[m->target];float xx=f->x-m->x,yy=f->y-m->y,len=sqrtf(xx*xx+yy*yy);
-            if(len>1){float speed=(23+mgx_fish.chapter*1.7f+m->type*2.5f)*(m->boss?.78f:1.0f);m->x+=xx/len*speed*dt;m->y+=yy/len*speed*dt;}
-            if(len<(m->boss?31:23)&&m->bite_cool<=0){int damage=1+(mgx_fish.chapter>=7)+(m->boss?1:0);f->hp-=damage;f->hurt_flash=.45f;f->flee_time=2.2f;m->bite_cool=m->boss?.48f:.82f;m->x-=xx/(len>1?len:1)*12;if(f->hp<=0)mgx_fish_kill_pet(m->target);m->retarget=0;}}
+            if(len>1){float speed=(23+mgx_clampf((float)mgx_fish.stage,1,26)*1.7f+m->type*2.5f)*(m->boss?.78f:1.0f);m->x+=xx/len*speed*dt;m->y+=yy/len*speed*dt;}
+            if(len<(m->boss?31:23)&&m->bite_cool<=0){int damage=1+(mgx_fish.stage>=7)+(m->boss?1:0);f->hp-=damage;f->hurt_flash=.45f;f->flee_time=2.2f;m->bite_cool=m->boss?.48f:.82f;m->x-=xx/(len>1?len:1)*12;if(f->hp<=0)mgx_fish_kill_pet(m->target);m->retarget=0;}}
     }
     mgx_fish_check_goal(WIN_W/2,WIN_H/2);if(!mgx_fish_alive())mgx_fish.over=1;
 }
@@ -1837,17 +2705,91 @@ static void mgx_fish_draw_pet(SDL_Renderer *ren,const MgxFishPet *f,int index){
         if(f->type==MGX_PET_ANGEL){mgx_fish_triangle(ren,x,y-r/2,1,r/2,(SDL_Color){255,171,190,255});mgx_fish_triangle(ren,x,y+r/2,-1,r/2,(SDL_Color){255,171,190,255});}
         if(f->type==MGX_PET_SHARK){mgx_fish_triangle(ren,x,y-r/2,dir,r/2,(SDL_Color){58,98,121,255});SDL_SetRenderDrawColor(ren,241,242,220,255);for(int t=-2;t<=2;t+=2)SDL_RenderDrawLine(ren,x+dir*(r-4)+t,y+2,x+dir*(r-1)+t,y+5);}}
     if(f->hp<f->max_hp){int w=24*f->hp/f->max_hp;SDL_SetRenderDrawColor(ren,24,28,36,220);SDL_RenderFillRect(ren,&(SDL_Rect){x-12,y-r-8,24,3});SDL_SetRenderDrawColor(ren,255,111,105,255);SDL_RenderFillRect(ren,&(SDL_Rect){x-12,y-r-8,w,3});}
-    if(f->growth>=5){SDL_SetRenderDrawColor(ren,255,229,111,220);SDL_RenderDrawLine(ren,x-3,y-r-3,x+3,y-r-3);SDL_RenderDrawPoint(ren,x,y-r-6);}(void)index;
+    if(f->growth>=5){SDL_SetRenderDrawColor(ren,255,229,111,220);SDL_RenderDrawLine(ren,x-3,y-r-3,x+3,y-r-3);SDL_RenderDrawPoint(ren,x,y-r-6);}
+    /* Hunger has to be readable on the fish itself, not inferred from a bar
+       that only appears once it is already losing health. One dot at hungry,
+       two at very hungry, a flashing ring when it is about to starve. */
+    int stage=mgx_fish_hunger_stage(f);
+    if(stage>0){
+        SDL_Color warn=stage>=3?(SDL_Color){255,96,96,255}
+                     :stage==2?(SDL_Color){255,168,72,255}
+                              :(SDL_Color){255,224,120,255};
+        if(stage>=3){
+            /* Flashing ring: unmissable, and it means feed this one NOW. */
+            if(((int)(mgx_fish.clock*6)&1)){
+                SDL_SetRenderDrawColor(ren,warn.r,warn.g,warn.b,235);
+                SDL_RenderDrawRect(ren,&(SDL_Rect){x-r-4,y-r-4,(r+4)*2,(r+4)*2});
+            }
+        }
+        for(int d=0;d<(stage>=3?3:stage);d++)
+            mgx_circle(ren,x-6+d*6,y-r-13,2,warn,235);
+    }
+    (void)index;
 }
+/* Each helper is a small distinct silhouette -- you have to be able to tell at a
+   glance which two you brought, and where they are. */
+static void mgx_fish_draw_helper_at(SDL_Renderer *ren,int species,float fx,float fy,
+                                    int dir,float bob,float flash,int scale){
+    int x=(int)fx,y=(int)fy;
+    int r=8*scale/10;if(r<5)r=5;
+    static const SDL_Color tint[MGX_HELP_COUNT]={
+        {252,214,92,255},   /* Dart    - quick yellow */
+        {126,222,150,255},  /* Nibbles - green        */
+        {236,110,86,255},   /* Spike   - red          */
+        {198,164,232,255},  /* Shelly  - violet snail */
+        {124,204,244,255},  /* Bubble  - pale blue    */
+        {247,178,236,255}   /* Glimmer - pink         */
+    };
+    SDL_Color c=tint[mgx_clampi(species,0,MGX_HELP_COUNT-1)];
+    if(flash>0&&((int)(flash*30)&1))c=(SDL_Color){255,252,236,255};
+    int lift=(int)(sinf(bob*2.1f)*2.0f);
+    y+=lift;
+    if(species==MGX_HELP_SHELLY){
+        /* Snail: shell plus a foot. */
+        mgx_circle(ren,x,y-2,r,c,255);
+        SDL_SetRenderDrawColor(ren,255,255,255,140);
+        mgx_circle(ren,x-r/3,y-r/3,r/3,(SDL_Color){255,255,255,150},150);
+        fill_rounded(ren,(SDL_Rect){x-r-2,y+r-4,r*2+4,5},2,(Uint8)(c.r*3/4),(Uint8)(c.g*3/4),(Uint8)(c.b*3/4),255);
+        SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,255);
+        SDL_RenderDrawLine(ren,x+dir*(r+1),y+r-4,x+dir*(r+4),y-2);
+        return;
+    }
+    /* Everything else is a little fish: body, tail, eye. */
+    mgx_fish_triangle(ren,x-dir*r,y,-dir,r,c);
+    fill_rounded(ren,(SDL_Rect){x-r,y-r/2,r*2,r},r/2,c.r,c.g,c.b,255);
+    mgx_circle(ren,x+dir*r/2,y-r/4,2,(SDL_Color){248,252,250,255},255);
+    mgx_circle(ren,x+dir*r/2,y-r/4,1,(SDL_Color){14,30,36,255},255);
+    if(species==MGX_HELP_SPIKE){          /* dorsal spines */
+        SDL_SetRenderDrawColor(ren,236,236,242,255);
+        for(int s=-1;s<=1;s++)SDL_RenderDrawLine(ren,x+s*4,y-r/2,x+s*4,y-r/2-4);
+    }else if(species==MGX_HELP_BUBBLE){   /* trailing bubbles */
+        for(int b=0;b<3;b++)
+            mgx_circle(ren,x-dir*(r+4+b*5),y-4-b*3,2,(SDL_Color){212,238,255,150},150);
+    }else if(species==MGX_HELP_GLIMMER){  /* sparkle */
+        SDL_SetRenderDrawColor(ren,255,247,214,220);
+        SDL_RenderDrawLine(ren,x,y-r-5,x,y-r-1);
+        SDL_RenderDrawLine(ren,x-2,y-r-3,x+2,y-r-3);
+    }else if(species==MGX_HELP_NIBBLES){  /* round belly */
+        mgx_circle(ren,x,y+2,r/2,(SDL_Color){236,255,230,190},190);
+    }
+}
+static void mgx_fish_draw_helper(SDL_Renderer *ren,const MgxFishHelper *h){
+    if(!h->active)return;
+    mgx_fish_draw_helper_at(ren,h->species,h->x,h->y,h->dir,h->bob,h->flash,10);
+}
+
 static void mgx_fish_draw_resource(SDL_Renderer *ren,const MgxFishDrop *d){
     float fade=(d->bottom_age>=0)?mgx_clampf(1.0f-d->bottom_age/2.0f,0,1):1.0f;
     int pulse=d->bottom_age>=0?(int)(2+sinf(d->bottom_age*18)*2):0;int r=mgx_clampi((int)((7+pulse)*(.55f+.45f*fade)),2,11);Uint8 a=(Uint8)(255*fade);
-    static const SDL_Color colors[]={{205,220,231,255},{250,199,48,255},{232,62,93,255},{89,231,247,255},{248,235,207,255},{57,222,137,255},{246,123,214,255}};
+    static const SDL_Color colors[]={{205,220,231,255},{250,199,48,255},{232,62,93,255},{89,231,247,255},{248,235,207,255},{57,222,137,255},{255,176,122,255},{246,123,214,255}};
     int x=(int)d->x,y=(int)d->y;if(d->kind==MGX_RES_FOOD){mgx_circle(ren,x,y,4,(SDL_Color){243,177,96,255},255);SDL_SetRenderDrawColor(ren,255,225,157,255);SDL_RenderDrawPoint(ren,x-1,y-1);return;}
     if(d->kind==MGX_RES_WASTE){fill_rounded(ren,(SDL_Rect){x-5,y-3,10,6},3,91,104,74,230);SDL_SetRenderDrawColor(ren,143,154,93,220);SDL_RenderDrawLine(ren,x-3,y-5,x+3,y-5);return;}
     SDL_Color c=colors[mgx_clampi(d->kind,0,MGX_RES_RARE)];c.a=a;SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
     if(d->bottom_age>=0){SDL_SetRenderDrawColor(ren,255,94,107,(Uint8)(80+100*fade));SDL_RenderDrawRect(ren,&(SDL_Rect){x-r-3,y-r-3,(r+3)*2,(r+3)*2});}
-    if(d->kind==MGX_RES_PEARL){mgx_circle(ren,x,y,r+3,(SDL_Color){128,92,119,a/2},a/2);mgx_circle(ren,x,y,r,c,a);}
+    // A ridged fan, so the campaign currency never reads as one more coin.
+    if(d->kind==MGX_RES_SHELL){for(int yy=-r;yy<=r/2;yy++){int hw=(int)(r*sqrtf(mgx_clampf(1.0f-(float)(yy*yy)/(float)(r*r+1),0,1)));SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,a);SDL_RenderDrawLine(ren,x-hw,y+yy,x+hw,y+yy);}
+        SDL_SetRenderDrawColor(ren,255,236,214,a);for(int f=-2;f<=2;f++)SDL_RenderDrawLine(ren,x,y+r/2,x+f*r/3,y-r+2);}
+    else if(d->kind==MGX_RES_PEARL){mgx_circle(ren,x,y,r+3,(SDL_Color){128,92,119,a/2},a/2);mgx_circle(ren,x,y,r,c,a);}
     else if(d->kind==MGX_RES_SILVER||d->kind==MGX_RES_GOLD){mgx_circle(ren,x,y,r,c,a);SDL_SetRenderDrawColor(ren,255,255,240,a);SDL_RenderDrawLine(ren,x-2,y,x+2,y);}
     else{SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,a);for(int yy=-r;yy<=r;yy++){int hw=r-abs(yy);SDL_RenderDrawLine(ren,x-hw,y+yy,x+hw,y+yy);}}
 }
@@ -1867,6 +2809,25 @@ static void mgx_fish_collection_render(SDL_Renderer *ren){
     MgxFishPet p={0};p.type=mgx_fish.shop_type;p.x=WIN_W*3/4;p.y=185;p.dir=1;p.growth=22;p.hp=p.max_hp=1;mgx_fish_draw_pet(ren,&p,0);
     mgx_fish_text_fit(ren,mgx_fish_ability[p.type],(SDL_Color){211,242,244,255},WIN_W/2+5,245,WIN_W/2-48,21);
     mgx_fish_text_fit(ren,"Permanent helpers travel with you",(SDL_Color){157,196,203,255},WIN_W/2+5,280,WIN_W/2-48,19);
+    /* The rare reef, under the animals it sits beside: what you own, what it
+       is called, and -- for the one you are saving for -- what it costs. */
+    {
+        Uint32 now=SDL_GetTicks();
+        int next=mgx_rare_next(mgx_fish.rares);
+        char head[80];snprintf(head,sizeof head,"RARE REEF  %d/%d   %d shells",
+                               mgx_rare_owned_count(mgx_fish.rares),MGX_RARE_COUNT,mgx_fish.shells);
+        mgx_fish_text_fit(ren,head,(SDL_Color){255,214,120,255},WIN_W/2+5,300,WIN_W/2-48,20);
+        for(int r=0;r<MGX_RARE_COUNT;r++){
+            int owned=mgx_rare_owned(mgx_fish.rares,r),x=WIN_W/2+14+r*26,y=326;
+            SDL_Color c=mgx_rare_color(r,now);
+            if(owned)mgx_circle(ren,x,y,8,c,255);
+            else{c.a=70;mgx_circle(ren,x,y,8,c,70);}
+        }
+        char line[140];
+        if(next<0)snprintf(line,sizeof line,"Every rare fish found");
+        else snprintf(line,sizeof line,"Next: %s, %d shells",mgx_rare_fish[next].name,mgx_rare_fish[next].shells);
+        mgx_fish_text_fit(ren,line,(SDL_Color){157,196,203,255},WIN_W/2+5,340,WIN_W/2-48,19);
+    }
     mgx_fish_text_fit(ren,"Hatch eggs to discover more animals",(SDL_Color){157,196,203,255},42,WIN_H-91,WIN_W-84,21);
     mgx_fish_text_fit(ren,"Up/Down Select   X Buy   A/B/Y Return",(SDL_Color){238,248,247,255},42,WIN_H-77,WIN_W-84,21);
 }
@@ -1887,8 +2848,188 @@ static void mgx_fish_hatch_render(SDL_Renderer *ren){
         if(mgx_fish.between==2)mgx_fish_text_fit(ren,"Saved to your collection - A Next level",(SDL_Color){255,255,245,255},95,359,WIN_W-190,22);
     }
 }
+/* --- Pick your two helpers ------------------------------------------------
+   Shown before a level starts. Everything you have hatched is here; everything
+   you have not is an egg, so the collection reads as something to fill in
+   rather than a list that is simply missing entries. */
+static int mgx_fish_pick_count(void){
+    int n=0;for(int s=0;s<MGX_HELP_SLOTS;s++)n+=mgx_fish.helper_pick[s]>=0;
+    return n;
+}
+static int mgx_fish_pick_slot_of(int species){
+    for(int s=0;s<MGX_HELP_SLOTS;s++)if(mgx_fish.helper_pick[s]==species)return s;
+    return -1;
+}
+static void mgx_fish_pick_toggle(int species){
+    if(!mgx_help_unlocked(species)){mgx_fish_notice("Hatch an egg to discover this helper");return;}
+    int at=mgx_fish_pick_slot_of(species);
+    if(at>=0){mgx_fish.helper_pick[at]=-1;return;}
+    for(int s=0;s<MGX_HELP_SLOTS;s++)if(mgx_fish.helper_pick[s]<0){mgx_fish.helper_pick[s]=species;return;}
+    /* Both slots full: replace the first, so a third press always does
+       something rather than silently refusing. */
+    mgx_fish.helper_pick[0]=species;
+}
+static void mgx_fish_pick_render(SDL_Renderer *ren){
+    Theme *th=mg_theme();
+    // Covers the play HUD as well: this screen owns the display while it is up,
+    // and the shop bar showing through under the footer read as a bug.
+    SDL_Rect panel={20,40,WIN_W-40,WIN_H-64};
+    mgx_panel(ren,panel,(SDL_Color){8,28,43,252},th->accent2,255);
+    mgx_fish_text_fit(ren,"CHOOSE TWO HELPERS",(SDL_Color){255,233,171,255},36,52,WIN_W-72,24);
+
+    const int cols=3,rows=(MGX_HELP_COUNT+cols-1)/cols;
+    int cw=(WIN_W-88)/cols,chh=96;
+    int top=84;
+    for(int i=0;i<MGX_HELP_COUNT;i++){
+        int r=i/cols,c=i%cols;
+        SDL_Rect cell={36+c*cw,top+r*chh,cw-10,chh-10};
+        int cursor=i==mgx_fish.pick_cursor,chosen=mgx_fish_pick_slot_of(i)>=0;
+        SDL_Color edge=chosen?(SDL_Color){255,214,120,255}:th->dim;
+        mgx_panel(ren,cell,chosen?(SDL_Color){30,72,88,255}:(SDL_Color){12,40,58,255},edge,255);
+        if(cursor){
+            SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,255);
+            SDL_RenderDrawRect(ren,&(SDL_Rect){cell.x-3,cell.y-3,cell.w+6,cell.h+6});
+        }
+        if(mgx_help_unlocked(i)){
+            mgx_fish_draw_helper_at(ren,i,(float)(cell.x+cell.w/2),(float)(cell.y+30),1,
+                                    mgx_fish.clock+i,0,18);
+            mgx_fish_text_fit(ren,mgx_help_name[i],
+                              chosen?(SDL_Color){255,230,145,255}:(SDL_Color){215,234,239,255},
+                              cell.x+6,cell.y+cell.h-40,cell.w-12,18);
+            if(chosen)mgx_fish_text_fit(ren,"IN TANK",(SDL_Color){255,214,120,255},
+                                        cell.x+6,cell.y+cell.h-20,cell.w-12,14);
+        }else{
+            /* Undiscovered: an egg, no name, no job -- nothing spoiled. */
+            int ex=cell.x+cell.w/2,ey=cell.y+34;
+            SDL_SetRenderDrawColor(ren,214,209,180,255);
+            for(int yy=-20;yy<=20;yy++){
+                int hw=(int)(14*sqrtf(fmaxf(0,1-(yy*yy)/(20.0f*20))));
+                SDL_RenderDrawLine(ren,ex-hw,ey+yy,ex+hw,ey+yy);
+            }
+            SDL_SetRenderDrawColor(ren,150,146,120,255);
+            SDL_RenderDrawLine(ren,ex-6,ey-8,ex+3,ey+1);
+            SDL_RenderDrawLine(ren,ex+3,ey+1,ex-3,ey+11);
+            mgx_fish_text_fit(ren,"? ? ?",(SDL_Color){150,168,176,255},
+                              cell.x+6,cell.y+cell.h-40,cell.w-12,18);
+        }
+    }
+    int cur=mgx_clampi(mgx_fish.pick_cursor,0,MGX_HELP_COUNT-1);
+    int below=top+rows*chh+6;
+    mgx_fish_text_fit(ren,mgx_help_unlocked(cur)?mgx_help_job[cur]:"Buy three egg pieces to hatch a new helper.",
+                      (SDL_Color){211,242,244,255},36,below,WIN_W-72,20);
+    char foot[120];
+    snprintf(foot,sizeof foot,"%d/%d chosen    D-Pad Move    A Choose    START Begin level",
+             mgx_fish_pick_count(),MGX_HELP_SLOTS);
+    mgx_fish_text_fit(ren,foot,(SDL_Color){238,248,247,255},36,panel.y+panel.h-30,WIN_W-72,20);
+}
+
+/* --- The shop, on R1 ------------------------------------------------------
+   Egg pieces, the ray, and food used to be three different buttons the player
+   had to remember. One menu instead, with the prices visible. */
+static int mgx_fish_ray_cost(void){return 65+mgx_fish.gun_level*45;}
+static void mgx_fish_shop_render(SDL_Renderer *ren){
+    Theme *th=mg_theme();
+    mgx_panel(ren,(SDL_Rect){52,84,WIN_W-104,258},(SDL_Color){8,28,43,250},th->accent2,255);
+    mgx_fish_text_fit(ren,"SHOP",(SDL_Color){255,233,171,255},70,96,WIN_W-200,24);
+    char coins[64];snprintf(coins,sizeof coins,"$%d   %d shells",mgx_fish.coins,mgx_fish.shells);
+    mgx_fish_text_fit(ren,coins,(SDL_Color){255,214,120,255},WIN_W-232,96,164,24);
+    int tier=mgx_fish_food_tier();
+    for(int r=0;r<MGX_SHOP_ROWS;r++){
+        char line[140];
+        if(r==MGX_SHOP_EGG)
+            snprintf(line,sizeof line,"Egg piece  $%d      (%d/3 collected)",mgx_fish_egg_cost(),mgx_fish.egg_pieces);
+        else if(r==MGX_SHOP_RAY)
+            snprintf(line,sizeof line,"Ray upgrade  %s      (level %d/5)",
+                     mgx_fish.gun_level>=5?"MAX":"$", mgx_fish.gun_level);
+        else if(r==MGX_SHOP_FOOD&&tier+1<MGX_FOOD_TIERS)
+            snprintf(line,sizeof line,"Better food  $%d      (%s -> %s)",
+                     mgx_food_upgrade_cost[tier+1],mgx_food_name[tier],mgx_food_name[tier+1]);
+        else if(r==MGX_SHOP_FOOD)
+            snprintf(line,sizeof line,"Food  BEST      (%s, $%d a pellet)",mgx_food_name[tier],mgx_fish_food_cost());
+        else{
+            int rare=mgx_rare_next(mgx_fish.rares);
+            if(rare<0)snprintf(line,sizeof line,"Rare reef  COMPLETE      (%d/%d)",MGX_RARE_COUNT,MGX_RARE_COUNT);
+            else snprintf(line,sizeof line,"%s  %d shells      (%d/%d, you have %d)",
+                          mgx_rare_fish[rare].name,mgx_rare_fish[rare].shells,
+                          mgx_rare_owned_count(mgx_fish.rares),MGX_RARE_COUNT,mgx_fish.shells);
+        }
+        if(r==MGX_SHOP_RAY&&mgx_fish.gun_level<5)
+            snprintf(line,sizeof line,"Ray upgrade  $%d      (level %d/5)",mgx_fish_ray_cost(),mgx_fish.gun_level);
+        int y=136+r*42,sel=r==mgx_fish.shop_row;
+        if(sel)mgx_panel(ren,(SDL_Rect){66,y-6,WIN_W-132,38},(SDL_Color){30,72,88,255},th->accent2,255);
+        mgx_fish_text_fit(ren,line,sel?(SDL_Color){255,230,145,255}:(SDL_Color){215,234,239,255},
+                          76,y,WIN_W-152,22);
+    }
+    mgx_fish_text_fit(ren,"Up/Down Choose    A Buy    R1 or B Close",
+                      (SDL_Color){238,248,247,255},70,310,WIN_W-140,20);
+}
+
+/* The rare fish you own, swimming in the back of the tank. They are scenery,
+   not residents: nothing eats them, they cannot starve, and monsters ignore
+   them, so owning one never changes the odds of a level. Their paths come
+   straight out of the clock rather than from stored state, which is what keeps
+   them free to draw and identical every time you look. */
+static void mgx_fish_draw_rares(SDL_Renderer *ren){
+    Uint32 now=SDL_GetTicks();
+    int span=mgx_clampi(WIN_W+80,1,9999);
+    for(int i=0;i<MGX_RARE_COUNT;i++){
+        if(!mgx_rare_owned(mgx_fish.rares,i))continue;
+        float speed=17.0f+i*4.0f;
+        float travel=fmodf(mgx_fish.clock*speed+i*137.0f,(float)(span*2));
+        int back=travel>=(float)span;                    /* out and back again */
+        float x=back?(float)span-(travel-(float)span):travel;
+        x-=40.0f;
+        int dir=back?-1:1;
+        int y=(int)(96+i*46+sinf(mgx_fish.clock*.8f+i*1.7f)*11.0f);
+        if(y>WIN_H-90)y=WIN_H-90;
+        SDL_Color c=mgx_rare_color(i,now);
+        /* Behind the play field: dimmed so a rare fish never hides a coin. */
+        c.a=185;
+        SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+        int xi=(int)x,s=9+(i&1);
+        fill_rounded(ren,(SDL_Rect){xi-s,y-s/2,s*2,s},s/2,c.r,c.g,c.b,c.a);
+        mgx_fish_triangle(ren,xi+dir*s,y,-dir,s,(SDL_Color){(Uint8)(c.r*3/5),(Uint8)(c.g*3/5),(Uint8)(c.b*3/5),c.a});
+        mgx_circle(ren,xi-dir*s/2,y-2,2,(SDL_Color){12,20,30,c.a},c.a);
+    }
+}
+
+/* START's menu, drawn over a dimmed tank so it is obvious the game is held
+   rather than still running behind it. */
+static void mgx_fish_pause_render(SDL_Renderer *ren){
+    Theme *th=mg_theme();
+    SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren,4,14,26,178);SDL_RenderFillRect(ren,&(SDL_Rect){0,0,WIN_W,WIN_H});
+    mgx_panel(ren,(SDL_Rect){64,52,WIN_W-128,WIN_H-104},(SDL_Color){8,28,43,250},th->accent2,255);
+    mgx_fish_text_fit(ren,"PAUSED",(SDL_Color){255,233,171,255},82,64,140,24);
+    char where[120];
+    int chapter_no=mgx_fish_chapter_of(mgx_fish.stage);
+    snprintf(where,sizeof where,"%s %d  Lv %d/%d   %d shells",
+             mgx_fish_chapter_title(chapter_no),chapter_no,
+             mgx_fish_level_of(mgx_fish.stage),mgx_fish_chapter_levels(chapter_no),
+             mgx_fish.shells);
+    mgx_fish_text_fit(ren,where,(SDL_Color){157,196,203,255},WIN_W-306,66,290,20);
+    for(int r=0;r<MGX_PAUSE_ROWS;r++){
+        int y=100+r*38,sel=r==mgx_fish.pause_row;
+        const char *label=mgx_pause_label[r];
+        if(r==MGX_PAUSE_RESET&&mgx_fish.pause_confirm)label="Reset campaign - press A again";
+        if(sel)mgx_panel(ren,(SDL_Rect){78,y-6,WIN_W-156,34},(SDL_Color){30,72,88,255},th->accent2,255);
+        SDL_Color ink=sel?(SDL_Color){255,230,145,255}:(SDL_Color){215,234,239,255};
+        if(r==MGX_PAUSE_RESET)ink=sel?(SDL_Color){255,186,164,255}:(SDL_Color){206,164,158,255};
+        mgx_fish_text_fit(ren,label,ink,88,y,WIN_W-176,22);
+    }
+    mgx_fish_text_fit(ren,mgx_pause_note[mgx_fish.pause_row],(SDL_Color){157,196,203,255},
+                      82,WIN_H-104,WIN_W-164,19);
+    mgx_fish_text_fit(ren,"Up/Down Choose    A Select    START or B Resume",
+                      (SDL_Color){238,248,247,255},82,WIN_H-76,WIN_W-164,20);
+}
+
 static void mgx_fish_render(SDL_Renderer *ren){
-    Theme *th=mg_theme();int ci=mgx_clampi((mgx_fish.chapter-1)/4,0,10);const char *chapter=mgx_fish_chapter_name[ci];
+    Theme *th=mg_theme();
+    int chapter_no=mgx_fish_chapter_of(mgx_fish.stage),level_no=mgx_fish_level_of(mgx_fish.stage);
+    const char *chapter=mgx_fish_chapter_title(chapter_no);
+    // The water darkens as the chapters go deeper, but only so far -- past
+    // the named chapters it would otherwise go black.
+    int ci=mgx_clampi(chapter_no-1,0,MGX_FISH_CHAPTERS-1);
     SDL_Rect tank={8,24,WIN_W-16,WIN_H-32};mgx_panel(ren,tank,(SDL_Color){7,39,66,255},th->accent2,255);
     for(int band=0;band<7;band++){SDL_Color water={(Uint8)(8+ci*6),(Uint8)(46+band*5+ci*3),(Uint8)(70+band*6+ci*8),255};SDL_SetRenderDrawColor(ren,water.r,water.g,water.b,255);SDL_RenderFillRect(ren,&(SDL_Rect){11,28+band*(tank.h-6)/7,tank.w-6,(tank.h-6)/7+1});}
     SDL_SetRenderDrawColor(ren,77,171,188,35);for(int q=0;q<7;q++)for(int k=0;k<3;k++)SDL_RenderDrawLine(ren,55+q*91+k*5,30,21+q*91+k*11,WIN_H-24);
@@ -1896,7 +3037,10 @@ static void mgx_fish_render(SDL_Renderer *ren){
     for(int i=0;i<8;i++){int bx=45+i*79,by=WIN_H-40-(i%3)*8;mgx_circle(ren,bx,by,8+(i&1)*3,(SDL_Color){58,95,85,255},255);}
     for(int i=0;i<7;i++){int px=39+i*96;SDL_SetRenderDrawColor(ren,39,130+(i&1)*24,84,255);for(int s=0;s<3;s++)SDL_RenderDrawLine(ren,px,WIN_H-39,px-10+s*10,WIN_H-77-(i*7+s*11)%34);}
     for(int i=0;i<16;i++)mgx_circle(ren,42+(i*47)%mgx_clampi(WIN_W-80,1,9999),50+(i*71+(int)(mgx_fish.clock*13))%(WIN_H-100),2+(i%3==0),(SDL_Color){135,224,229,255},80);
+    mgx_fish_draw_rares(ren);
     for(int i=0;i<MGX_FISH_MAX;i++)if(mgx_fish.fish[i].active)mgx_fish_draw_pet(ren,&mgx_fish.fish[i],i);
+    /* Helpers swim in the tank with everyone else now, not parked in a corner. */
+    for(int s=0;s<MGX_HELP_SLOTS;s++)mgx_fish_draw_helper(ren,&mgx_fish.helper[s]);
     for(int i=0;i<MGX_FISH_DROPS;i++)if(mgx_fish.drops[i].active)mgx_fish_draw_resource(ren,&mgx_fish.drops[i]);
     for(int i=0;i<MGX_FISH_MONSTERS;i++)if(mgx_fish.monster[i].active){
         MgxFishMonster *m=&mgx_fish.monster[i];int x=(int)m->x,y=(int)m->y,sz=m->boss?28:19;SDL_Color mc=m->hit_flash>0?(SDL_Color){255,235,245,255}:(i&1?(SDL_Color){184,75,157,255}:(SDL_Color){112,75,188,255});
@@ -1908,22 +3052,33 @@ static void mgx_fish_render(SDL_Renderer *ren){
     int monsters=mgx_fish_monsters_alive();if(monsters&&mgx_fish.ray_time>0){SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);SDL_SetRenderDrawColor(ren,99,242,255,105);for(int n=-3;n<=3;n++)SDL_RenderDrawLine(ren,(int)mgx_fish.ray_from_x,(int)mgx_fish.ray_from_y+n,(int)mgx_fish.ray_x,(int)mgx_fish.ray_y+n);SDL_SetRenderDrawColor(ren,242,255,255,255);SDL_RenderDrawLine(ren,(int)mgx_fish.ray_from_x,(int)mgx_fish.ray_from_y,(int)mgx_fish.ray_x,(int)mgx_fish.ray_y);}
     int x=(int)mgx_fish.x,y=(int)mgx_fish.y;SDL_Color cursor=monsters?(SDL_Color){111,242,249,255}:(SDL_Color){245,248,240,255};if(monsters){fill_rounded(ren,(SDL_Rect){x-11,y+9,22,9},4,th->accent2.r,th->accent2.g,th->accent2.b,255);SDL_SetRenderDrawColor(ren,226,247,249,255);SDL_RenderFillRect(ren,&(SDL_Rect){x+7,y+11,14,4});}SDL_SetRenderDrawColor(ren,cursor.r,cursor.g,cursor.b,235);SDL_RenderDrawLine(ren,x-9,y,x-3,y);SDL_RenderDrawLine(ren,x+3,y,x+9,y);SDL_RenderDrawLine(ren,x,y-9,x,y-3);SDL_RenderDrawLine(ren,x,y+3,x,y+9);
     SDL_SetRenderDrawColor(ren,8,28,43,255);SDL_RenderFillRect(ren,&(SDL_Rect){0,0,WIN_W,24});
-    char hud[180];snprintf(hud,sizeof hud,"%s %d-%d  $%d  Egg %d/3",chapter,ci+1,(mgx_fish.chapter-1)%4+1,mgx_fish.coins,mgx_fish.egg_pieces);
+    char hud[180];
+    if(mgx_fish.bonus)snprintf(hud,sizeof hud,"BONUS ROUND  %ds  %d shell%s  $%d",
+                               (int)ceilf(mgx_fish.bonus_time),mgx_fish.bonus_take,
+                               mgx_fish.bonus_take==1?"":"s",mgx_fish.coins);
+    else snprintf(hud,sizeof hud,"%s %d  Lv %d/%d  $%d  %d shell%s  Egg %d/3",chapter,chapter_no,level_no,
+                  mgx_fish_chapter_levels(chapter_no),mgx_fish.coins,mgx_fish.shells,
+                  mgx_fish.shells==1?"":"s",mgx_fish.egg_pieces);
     mgx_fish_text_fit(ren,hud,(SDL_Color){237,242,233,255},10,3,WIN_W-220,18);
-    char shop[160];if(mgx_fish.gun_level<5)snprintf(shop,sizeof shop,"Y Animals  X %s $%d  R1 Egg $%d  L1 Ray $%d",mgx_fish_type_name[mgx_fish.shop_type],mgx_fish_cost[mgx_fish.shop_type],mgx_fish_egg_cost(),65+mgx_fish.gun_level*45);
-    else snprintf(shop,sizeof shop,"Y Animals  X %s $%d  R1 Egg $%d  Ray MAX",mgx_fish_type_name[mgx_fish.shop_type],mgx_fish_cost[mgx_fish.shop_type],mgx_fish_egg_cost());
+    char shop[180];
+    snprintf(shop,sizeof shop,"Y Animals   X %s $%d   R1 Shop   A Feed $%d",
+             mgx_fish_type_name[mgx_fish.shop_type],mgx_fish_cost[mgx_fish.shop_type],
+             mgx_fish_food_cost());
     SDL_SetRenderDrawColor(ren,5,21,33,230);SDL_RenderFillRect(ren,&(SDL_Rect){10,WIN_H-29,WIN_W-20,23});
     mgx_fish_text_fit(ren,shop,(SDL_Color){230,245,248,255},12,WIN_H-28,WIN_W-24,20);
-    for(int h=0;h<mgx_fish.helpers && h<6;h++){
-        MgxFishPet p={0};p.type=mgx_fish_hatch_order[h];p.x=32+h*45;p.y=51+sinf(mgx_fish.clock+h)*5;p.dir=1;p.hp=p.max_hp=1;mgx_fish_draw_pet(ren,&p,h);
-    }
-    if(!mgx_fish.started)mgx_overlay_message(ren,"CRAZY FISH","A Begin   Y Animal collection - buy 3 egg pieces with R1 to hatch a helper");
-    else if(mgx_fish.intro>0){char title[90];snprintf(title,sizeof title,"%s - LEVEL %d",chapter,(mgx_fish.chapter-1)%4+1);
-        mgx_overlay_message(ren,title,"A Feed $10 / attack. Fish eat every 10s. Monsters every 90s. L1 upgrades ray.");}
+    if(!mgx_fish.started)mgx_overlay_message(ren,"CRAZY FISH","A or START Begin   Y Animal collection   R1 Shop - three egg pieces hatch a helper");
+    else if(mgx_fish.intro>0){char title[90];snprintf(title,sizeof title,"%s - LEVEL %d OF %d",chapter,level_no,mgx_fish_chapter_levels(chapter_no));
+        char sub[160];
+        snprintf(sub,sizeof sub,"A feeds $%d or fires. Feed a fish when it shows a dot. R1 opens the shop.",
+                 mgx_fish_food_cost());
+        mgx_overlay_message(ren,title,sub);}
     if(mgx_fish.over)mgx_overlay_message(ren,"THE AQUARIUM IS EMPTY","A Rebuild aquarium    B Exit");
     if(mgx_fish.collection)mgx_fish_collection_render(ren);
+    if(mgx_fish.shop_open)mgx_fish_shop_render(ren);
+    if(mgx_fish.picking)mgx_fish_pick_render(ren);
     if(mgx_fish.between)mgx_fish_hatch_render(ren);
-    if(mgx_fish.notice_time>0&&!mgx_fish.between){SDL_SetRenderDrawColor(ren,5,21,33,245);SDL_RenderFillRect(ren,&(SDL_Rect){20,WIN_H-122,WIN_W-40,30});mgx_fish_text_fit(ren,mgx_fish.notice,(SDL_Color){255,231,163,255},30,WIN_H-118,WIN_W-60,22);}
+    if(mgx_fish.paused)mgx_fish_pause_render(ren);
+    if(mgx_fish.notice_time>0&&!mgx_fish.between&&!mgx_fish.paused){SDL_SetRenderDrawColor(ren,5,21,33,245);SDL_RenderFillRect(ren,&(SDL_Rect){20,WIN_H-122,WIN_W-40,30});mgx_fish_text_fit(ren,mgx_fish.notice,(SDL_Color){255,231,163,255},30,WIN_H-118,WIN_W-60,22);}
 }
 
 #endif /* SNAP_FE_MINI_GAMES_EXTRA_H */

@@ -1,14 +1,14 @@
 static void test_continued_129(SDL_Renderer *ren){
     /* Repeated objective checks cannot advance; all three paid fragments can. */
     mgx_fish_reset();mgx_fish.started=1;mgx_fish.intro=0;mgx_fish.level_time=100;mgx_fish.coins=10000;
-    mgx_fish.level_resources=999;mgx_fish.chapter_kills=999;
-    for(int i=0;i<100;i++)mgx_fish_check_goal(100,100);assert(mgx_fish.chapter==1);
-    mgx_fish_buy_egg();mgx_fish_buy_egg();assert(mgx_fish.chapter==1&&mgx_fish.egg_pieces==2);
-    mgx_fish_buy_egg();assert(mgx_fish.chapter==1&&mgx_fish.helpers==0&&mgx_fish.hatch_pending);
+    mgx_fish.level_resources=999;mgx_fish.stage_kills=999;
+    for(int i=0;i<100;i++)mgx_fish_check_goal(100,100);assert(mgx_fish.stage==1);
+    mgx_fish_buy_egg();mgx_fish_buy_egg();assert(mgx_fish.stage==1&&mgx_fish.egg_pieces==2);
+    mgx_fish_buy_egg();assert(mgx_fish.stage==1&&mgx_fish.helpers==0&&mgx_fish.hatch_pending);
     mgx_fish.hatch_time=.01f;mgx_fish.last=SDL_GetTicks()-20;mgx_fish_step(0,0);
-    assert(mgx_fish.chapter==2&&mgx_fish.helpers==1&&mgx_fish.between==2);
+    assert(mgx_fish.stage==2&&mgx_fish.helpers==1&&mgx_fish.between==2);
     int cash=mgx_fish.coins;mgx_fish_key(SDLK_e);assert(mgx_fish.coins==cash);
-    mgx_fish_reset();assert(mgx_fish.helpers==1&&mgx_fish.chapter==2);
+    mgx_fish_reset();assert(mgx_fish.helpers==1&&mgx_fish.stage==2);
     mgx_fish.started=1;mgx_fish.intro=0;mgx_fish.x=120;mgx_fish.y=80;mgx_fish_key(SDLK_RETURN);
     int food=fish_find_drop(MGX_RES_FOOD);assert(food>=0&&mgx_fish.drops[food].x==120&&mgx_fish.drops[food].y==80);
     mgx_fish_render(ren);capture(ren,"continued-fish");
@@ -40,10 +40,32 @@ static void test_continued_129(SDL_Renderer *ren){
     free_games(ren);game_count=MAX_GAMES;for(int i=0;i<game_count;i++){memset(&games[i],0,sizeof games[i]);snprintf(games[i].title,128,"Game %04d",game_count-i);snprintf(games[i].path,768,"/test/%d",i);strcpy(games[i].platform_dir,"gb");}
     Uint32 began=SDL_GetTicks();sort_games(0);assert(!strcmp(games[0].title,"Game 0001"));assert(SDL_GetTicks()-began<3000);
     for(int i=1;i<game_count;i++)assert(strcmp(games[i-1].title,games[i].title)<0);free_games(ren);
-    widget_places_loaded=0;widget_places_init();widget_place_group=0;assert(widget_place_add("Miami"));assert(widget_place_add("Tokyo"));assert(!widget_place_add("London"));
-    assert(!strcmp(widget_place_name(0),"Tokyo"));widget_place_select(0,0);
-    widget_place_cycle(0,1);assert(!strcmp(widget_place_name(0),"Miami"));widget_place_cycle(0,1);assert(!strcmp(widget_place_name(0),"Tokyo"));
-    struct tm tokyo=widget_place_time(0,0);assert(tokyo.tm_hour==9);widget_place_remove();assert(widget_place_count[0]==2);
-    widget_places_loaded=0;widget_places_init();assert(widget_place_count[0]==2);
-    puts("PASS: egg-only progression + permanent helpers; 100% runner finish + gravity; dual Pong readiness; nearby Connect 4; best-of-three; settings rows; 4000-game sort; three saved widget places");
+    /* Saved places: the list fills to WIDGET_PLACE_MAX (Local occupies the
+       first slot) and then refuses further additions rather than overrunning. */
+    widget_places_loaded=0;widget_places_init();widget_place_group=0;
+    assert(widget_place_add("Miami"));assert(widget_place_add("Tokyo"));
+    const char *fillers[]={"London","Paris","Berlin","Madrid"};
+    for(unsigned f=0;f<sizeof fillers/sizeof *fillers;f++){
+        int room=widget_place_count[0]<WIDGET_PLACE_MAX;
+        assert(widget_place_add(fillers[f])==room);
+    }
+    assert(widget_place_count[0]==WIDGET_PLACE_MAX);
+    /* A brand-new city is refused once the list is full. (Re-adding one that is
+       already saved still succeeds -- it just selects it.) */
+    assert(!widget_place_add("Lisbon"));
+    assert(widget_place_add("Tokyo") && widget_place_count[0]==WIDGET_PLACE_MAX);
+    /* Cycling walks every saved place and wraps, whatever the limit is. */
+    widget_place_select(0,0);
+    for(int i=0;i<WIDGET_PLACE_MAX;i++){
+        assert(widget_place_sel[0]==i);
+        widget_place_cycle(0,1);
+    }
+    assert(widget_place_sel[0]==0);
+    widget_place_cycle(0,-1);assert(widget_place_sel[0]==WIDGET_PLACE_MAX-1);
+    widget_place_select(0,2);assert(!strcmp(widget_place_name(0),"Tokyo"));
+    struct tm tokyo=widget_place_time(0,0);assert(tokyo.tm_hour==9);
+    int before_remove=widget_place_count[0];
+    widget_place_remove();assert(widget_place_count[0]==before_remove-1);
+    widget_places_loaded=0;widget_places_init();assert(widget_place_count[0]==before_remove-1);
+    puts("PASS: egg-only progression + permanent helpers; 100% runner finish + gravity; dual Pong readiness; nearby Connect 4; best-of-three; settings rows; 4000-game sort; five saved widget places");
 }

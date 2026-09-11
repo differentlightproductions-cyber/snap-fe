@@ -12,15 +12,41 @@ static void test_widget_places(SDL_Renderer *ren){
     widget_places_key(SDLK_RETURN,&state);assert(!widget_place_searching&&widget_place_count[0]==2&&!strcmp(widget_place_name(0),"Tokyo"));
     struct tm tokyo=widget_place_time(0,0);assert(tokyo.tm_hour==9);
     widget_place_search("Phonix");widget_places_key(SDLK_RETURN,&state);assert(widget_place_count[0]==3&&!strcmp(widget_place_name(0),"Phoenix"));
-    widget_places_key(SDLK_RETURN,&state);assert(state==STATE_WIDGET_PLACES&&strstr(widget_place_status,"Three"));
-    widget_places_render(ren);capture(ren,"widget-three-time-locations");
-    widget_places_loaded=0;widget_places_init();assert(widget_place_count[0]==3&&widget_place_sel[0]==2&&!strcmp(widget_places[0][1].name,"Tokyo")&&!strcmp(widget_places[0][2].zone,"America/Phoenix"));
+    /* Fill the rest of the list, then confirm A is refused with a message that
+       names the real limit rather than a hard-coded "Three". */
+    const char *more[]={"Denver","Austin","Dallas","Boston"};
+    for(unsigned m=0;m<sizeof more/sizeof *more&&widget_place_count[0]<WIDGET_PLACE_MAX;m++){
+        widget_place_search(more[m]);
+        if(widget_place_result_count)widget_places_key(SDLK_RETURN,&state);
+    }
+    assert(widget_place_count[0]==WIDGET_PLACE_MAX);
+    char limit[16];snprintf(limit,sizeof limit,"%d",WIDGET_PLACE_MAX);
+    widget_places_key(SDLK_RETURN,&state);assert(state==STATE_WIDGET_PLACES&&strstr(widget_place_status,limit));
+    widget_places_render(ren);capture(ren,"widget-max-time-locations");
+    widget_places_loaded=0;widget_places_init();
+    assert(widget_place_count[0]==WIDGET_PLACE_MAX&&!strcmp(widget_places[0][1].name,"Tokyo")&&!strcmp(widget_places[0][2].zone,"America/Phoenix"));
+    /* Trim back down so the rest of this test works on a short list. */
+    widget_place_group=0;
+    while(widget_place_count[0]>3){widget_place_select(0,widget_place_count[0]-1);widget_place_remove();}
+    widget_place_select(0,2);
+    assert(widget_place_count[0]==3&&widget_place_sel[0]==2);
     widget_place_group=0;widget_place_select(0,2);widget_place_remove();assert(widget_place_count[0]==2&&!strcmp(widget_places[0][1].name,"Tokyo"));
-    widget_places_open(1);widget_place_search("Seaattle");assert(widget_place_count[1]==1);widget_places_key(SDLK_RETURN,&state);
-    assert(widget_place_count[1]==2&&!strcmp(widget_place_name(1),"Seattle")&&strstr(weather_loc,"Seattle"));
+    /* The list is shared now: the weather group sees exactly what the clock
+       group already saved, and adding Seattle here appends to that same list
+       rather than starting a second one. */
+    int shared_before=widget_place_count[0];
+    widget_places_open(1);widget_place_search("Seaattle");
+    assert(widget_place_count[1]==shared_before&&widget_place_count[1]==widget_place_count[0]);
+    widget_places_key(SDLK_RETURN,&state);
+    assert(widget_place_count[1]==shared_before+1&&widget_place_count[0]==widget_place_count[1]);
+    assert(!strcmp(widget_place_name(1),"Seattle")&&strstr(weather_loc,"Seattle"));
+    /* Same entry, reachable from the clock group, and it carries a zone so the
+       clock can actually render a time for it. */
+    assert(!strcmp(widget_places[0][widget_place_sel[1]].name,"Seattle"));
+    assert(widget_places[0][widget_place_sel[1]].zone[0]);
     strcpy(g_weather_str,"55F Clear");g_weather_at=123;weather_unit=0;widget_place_cycle(1,-1);widget_place_cycle(1,1);assert(!strcmp(g_weather_str,"55F Clear")&&g_weather_at==123);
     widget_place_cycle(1,-1);weather_unit=1;widget_place_cycle(1,1);assert(!g_weather_str[0]&&g_weather_at==0);
     widget_place_search("zzzzzzqqqq");assert(widget_place_result_count==0&&widget_place_searching);widget_places_render(ren);capture(ren,"widget-location-no-match");
     widget_places_key(SDLK_ESCAPE,&state);assert(!widget_place_searching&&state==STATE_WIDGET_PLACES);widget_places_key(SDLK_ESCAPE,&state);assert(state==STATE_HOME);
-    puts("PASS: keyboard search requires confirmation; typo choices; Local city; selected location immediately updates widgets; three-place limit; persistence/removal; weather units; empty results and Back");
+    puts("PASS: keyboard search requires confirmation; typo choices; Local city; selected location immediately updates widgets; five-place limit; persistence/removal; weather units; empty results and Back");
 }

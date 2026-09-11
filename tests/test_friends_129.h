@@ -6,6 +6,8 @@ static void test_friends_129(SDL_Renderer *ren){
     SfPacket p={0};p.magic=htonl(SF_MAGIC);p.version=1;strcpy(p.id,"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");strcpy(p.to,sf.id);strcpy(p.name,"Test friend");
     #define INJECT(t,token_value) do{p.type=(t);p.token=htonl(token_value);assert(sendto(peerfd,&p,sizeof p,0,(struct sockaddr*)&local,sizeof local)==sizeof p);sf.beacon=SDL_GetTicks();sf_tick();}while(0)
     INJECT(SF_CONNECT,1);assert(sf.prompt&&sf.n==1&&!sf.peers[0].saved);sf_answer(1);assert(sf.peers[0].met&&!strcmp(sf.connected,p.id));
+    /* A connected friend must not put a ROM-folder scan in front of a game that can't be linked. */
+    link_game_count=7;assert(!sf_offer_regular("/userdata/roms/snes/Test.sfc","Test","snes"));assert(link_game_count==7);link_game_count=0;
     INJECT(SF_FRIEND,2);assert(sf.prompt&&!sf.peers[0].saved);sf_answer(1);assert(sf.peers[0].saved);
     strcpy(p.name,"Renamed friend");INJECT(SF_BEACON,3);assert(sf.n==1&&!strcmp(sf.peers[0].name,"Renamed friend"));
     p.game=htons(MG_PONG);INJECT(SF_INVITE,4);assert(sf.prompt);sf_answer(0);assert(sf.start==-1);

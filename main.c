@@ -27,7 +27,7 @@
 #include <sys/mman.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.3.0"
+#define SNAPFE_VERSION "Alpha Build 1.3.1"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.
@@ -98,7 +98,12 @@ int WIN_H = 480;
 #define MAX_LINES 4
 #define MAX_GAMES 4000
 
-typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS, STATE_ROMFOLDERS, STATE_CALENDAR, STATE_CALCULATOR, STATE_BGCONFIG, STATE_FRIENDS, STATE_WIDGET_PLACES } AppState;
+typedef enum { STATE_BOOT, STATE_HOME, STATE_PLATFORM, STATE_MENU, STATE_SETTINGS, STATE_KEYBOARD, STATE_BG_PICKER, STATE_BG_ONLINE, STATE_BG_PREVIEW, STATE_BG_TARGET, STATE_SURPRISE, STATE_SYSCFG, STATE_HOTKEYS, STATE_WIFI, STATE_LINK, STATE_GAMEOPTS, STATE_BT, STATE_SETUP, STATE_BOOK, STATE_RADIO, STATE_MUSIC, STATE_QUICKCFG, STATE_FLASHLIGHT, STATE_MINIGAMES, STATE_MINIGAME, STATE_ACHIEVEMENTS, STATE_ROMFOLDERS, STATE_CALENDAR, STATE_CALCULATOR, STATE_WEATHER, STATE_WEATHER_HOURLY, STATE_WEATHER_SETTINGS, STATE_APPS, STATE_BGCONFIG, STATE_FRIENDS, STATE_WIDGET_PLACES, STATE_MESSAGES } AppState;
+/* Defined in messages.h, which needs the whole UI layer above it. */
+static void sm_enter(AppState back);
+static int sm_hud_badge(SDL_Renderer *ren, int right_x, int y);
+static void sm_send_text(const char *text);
+static int sm_unread_total(void);
 typedef enum { TAB_SOUND, TAB_DISPLAY, TAB_GAME, TAB_DEVICE, TAB_ACCOUNT, TAB_COUNT } SettingsTab;
 
 // Points at main()'s `state` so pre-main helpers (e.g. play_click) can tell
@@ -520,6 +525,13 @@ static void draw_theme_background(SDL_Renderer *ren, Theme *th, int idx) {
 }
 int theme_idx = 0;
 int g_ps_saved_theme = 0;   // theme to restore when Power Save Mode is turned off
+extern int power_save_mode;   /* defined below, with the other device state */
+/* Choosing a theme is choosing a theme, even while Power Save has Midnight
+   over the top of it. Without this, leaving Power Save reverted to whatever
+   had been selected before it came on and quietly discarded the newer pick. */
+static void theme_user_choice(void) {
+    if (power_save_mode) g_ps_saved_theme = theme_idx;
+}
 // Returns the theme to draw with. Everything is the stored theme unchanged
 // except Rainbow Road, whose accents shimmer -- so headers and highlights are
 // rainbow rather than one fixed turquoise.
@@ -565,6 +577,10 @@ int font_choice_big_size[]   = { 34, 34, 34, 34, 33, 33, 40, 33, 26, 24,  28, 30
 int font_choice_small_size[] = { 20, 20, 20, 20, 20, 20, 23, 20, 15, 15,  17, 18, 20, 21 };
 int font_choice_label_size[] = { 17, 17, 17, 17, 17, 17, 20, 17, 13, 13,  14, 15, 17, 18 };
 int font_choice_idx = 5;   // "Sans" (DejaVuSans) out of the box
+// Bumped every reload_fonts(): anything caching a TTF_Font* of its own must
+// notice, because TTF_OpenFont can hand back a pointer value that was just
+// closed and a stale cache entry would then render with the wrong face.
+unsigned g_font_gen = 1;
 TTF_Font *font_big = NULL;
 TTF_Font *font_small = NULL;
 TTF_Font *font_small_bold = NULL;   // font_small + BOLD -- section headers ("APPS", "YOUR STATS", ...)
@@ -624,6 +640,7 @@ void text_cache_clear(); // defined later, alongside render_text() and the cache
 // ALL THREE size slots, scaled by the Font Size setting -- called at startup
 // and any time Font Style or Font Size changes.
 int reload_fonts() {
+    g_font_gen++;
     // Must run before the TTF_CloseFont calls below invalidate the font
     // pointers the cache is keyed on -- TTF_OpenFont could reuse that same
     // pointer value for the new font, which would make a stale cache entry
@@ -849,6 +866,7 @@ int hk_sel = 0;            // selected row on the Hotkeys settings screen
 int hk_capture = -1;       // >=0 while waiting to capture a new button for that row
 int hk_edit_dirty = 0;     // Hotkeys are transactional: save/discard when leaving
 int hk_confirm_pending = 0;
+int hk_confirm_sel = 0;    // 0 = Save, 1 = Don't Save (shared modal)
 int hk_original_volup_btn = HK_VOLUP_DEFAULT;
 int hk_original_voldown_btn = HK_VOLDOWN_DEFAULT;
 int hk_original_mod_btn = HK_MOD_DEFAULT;
@@ -948,13 +966,14 @@ const char *auto_sleep_labels[AUTO_SLEEP_COUNT] = {"Off", "30s", "60s", "120s"};
 // The timeout starts a short, visible pre-sleep stage.  Keeping this as an
 // indexed choice makes room for more sleep screens without changing the
 // settings-file format later.
-#define SCREEN_SAVER_COUNT 6
+#define SCREEN_SAVER_COUNT 7
 #define SCREEN_SAVER_OFF 0
 #define SCREEN_SAVER_BOUNCE 1
 #define SCREEN_SAVER_STARFIELD 2
 #define SCREEN_SAVER_AQUARIUM 3
 #define SCREEN_SAVER_SYSTEM_DREAM 4
-#define SCREEN_SAVER_RANDOM 5
+#define SCREEN_SAVER_WEATHER 5
+#define SCREEN_SAVER_RANDOM 6
 #define SCREEN_SAVER_DURATION_COUNT 6
 #define SCREEN_SAVER_DURATION_DEFAULT 2
 const Uint32 screen_saver_duration_values[SCREEN_SAVER_DURATION_COUNT] = {15000u, 30000u, 60000u, 120000u, 300000u, 600000u};
@@ -967,9 +986,14 @@ static Uint32 screen_saver_duration_ms(void) {
     return screen_saver_duration_values[screen_saver_duration_valid(screen_saver_duration_idx)];
 }
 const char *screen_saver_names[SCREEN_SAVER_COUNT] = {
-    "Off", "DVD Bounce", "Starfield", "Aquarium", "System Dream", "Random"
+    "Off", "DVD Bounce", "Starfield", "Aquarium", "System Dream", "Weather", "Random"
 };
 int screen_saver_idx = SCREEN_SAVER_BOUNCE;
+// What to go back to when Sleep Screen Weather is switched off again.
+int screen_saver_prev_idx = SCREEN_SAVER_BOUNCE;
+// Hold the sleep screen up indefinitely instead of blanking after its duration.
+// Only honoured on wall power -- see power_is_plugged_in().
+int screen_saver_always_on = 0;
 static void battery_led_tick(int force);
 int launch_fullscreen = 1; // 1 = fullscreen, 0 = windowed (approx match)
 #ifdef SNAPOS_TARGET_KNULLI
@@ -977,7 +1001,7 @@ int reduce_motion = 1;     // default ON on the handheld -- snappier on the H700
 #else
 int reduce_motion = 0;
 #endif
-int show_fps = 0;
+int show_fps = 1;   // on out of the box; see the one-time flip in load_settings
 // Fast-forward speed cap, applied to whichever emulator a game runs on.
 //   0  -> Off  (no speedup, no hotkey bound)
 //  -1  -> Uncapped (as fast as the CPU allows)
@@ -1132,6 +1156,9 @@ int home_icon_pack_idx = 0;
 //   slot 2 (bottom) -- home_widget2_idx, grows upward
 // Any widget can sit in either slot; "Your Stats" is just one more choice and
 // keeps its collapse/expand (X on Home) behaviour, expanding away from its edge.
+// Calculator is deliberately NOT counted: the widget was not practical at
+// widget size, so it is out of the picker while its drawing and input code
+// stays put, ready to come back if it earns its place.
 #define HOME_WIDGET_COUNT 13
 const char *home_widget_names[HOME_WIDGET_COUNT] = {
     "None", "Clock", "Date", "Now Playing", "Favorite System", "Weather", "Date & Weather", "Your Stats",
@@ -1152,6 +1179,7 @@ int home_widget2_idx = 7;         // slot 2 (bottom) -- Your Stats out of the bo
 #define HOME_WIDGET_RECENT     10
 #define HOME_WIDGET_BATTERY    11
 #define HOME_WIDGET_CALENDAR   12
+#define HOME_WIDGET_CALC       13
 
 // App Focused owns a separate, phone-style two-cell widget. Switching Home
 // layouts never leaks either layout's widget choices into the other one.
@@ -1160,6 +1188,7 @@ int home_widget2_idx = 7;         // slot 2 (bottom) -- Your Stats out of the bo
 #define APP_WIDGET_CLOCK    2
 #define APP_WIDGET_BATTERY  3
 #define APP_WIDGET_CALENDAR 4
+#define APP_WIDGET_CALC     5   /* retired from the picker; see HOME_WIDGET_CALC */
 #define APP_WIDGET_COUNT    5
 const char *app_widget_names[APP_WIDGET_COUNT] = {
     "None", "Weather", "Clock", "Battery Health", "Calendar"
@@ -1169,6 +1198,7 @@ int app_widget_slot = 0;             // physical 4x2 grid cell; widget spans two
 int app_widget_picker = 0;
 int app_widget_picker_sel = 0;
 int app_widget_moving = 0;
+int app_widget_calc_active = 0;   // Calculator widget has the d-pad (App Focused)
 int app_widget_slot_backup = 0;
 time_t calendar_selected_date = 0;  // always reset to today on Calendar entry/exit
 #define CALENDAR_REMINDER_MAX 128
@@ -1416,6 +1446,18 @@ static void calculator_press(const char *key) {
     }
 }
 
+// The one keypad layout, shared by the full app and the widget so they can
+// never drift apart. "x" is what the app draws for multiply; calculator_press
+// takes "*".
+static const char *calc_keys[16] = {
+    "7", "8", "9", "/", "4", "5", "6", "*",
+    "1", "2", "3", "-", "0", ".", "+", "="
+};
+static const char *calc_key_labels[16] = {
+    "7", "8", "9", "/", "4", "5", "6", "x",
+    "1", "2", "3", "-", "0", ".", "+", "="
+};
+
 static void calculator_backspace(void) {
     if (calculator_error) { calculator_reset(); return; }
     if (calculator_new_entry) return;
@@ -1448,6 +1490,12 @@ static int home_widget_cycle(int cur, int other, int dir) {
 
 int home_recent_focus_slot = 0;  // 0=left navigation, 1=top widget, 2=bottom
 int home_recent_widget_sel = 0;
+// Which transport button the Music card has highlighted: back, play/pause, skip.
+#define MUSIC_BTN_BACK  0
+#define MUSIC_BTN_PLAY  1
+#define MUSIC_BTN_NEXT  2
+#define MUSIC_BTN_COUNT 3
+int home_music_btn = MUSIC_BTN_PLAY;
 
 // Weather requests run off the UI thread and retain their own city/unit identity.
 // Failed requests preserve the last good reading and retry promptly.
@@ -1464,7 +1512,215 @@ int    g_weather_failed = 0;
 int    weather_unit = 0;         // 0 = Fahrenheit (USCS), 1 = Celsius (metric); persisted
 int g_sunrise_minute = -1, g_sunset_minute = -1;
 time_t g_sun_times_at = 0;
+// The rest of the day, not just the next few hours: the Weather app has a
+// full-screen hourly view now, and the compact strips just show the first few.
+#define WEATHER_HOURLY_COUNT 18
+// Two weeks, so the by-week view has more than one week to compare. The free
+// forecast endpoint gives up to 16 days; 14 divides cleanly into weeks.
+#define WEATHER_DAILY_COUNT 16
+// The 8-Bit and 16-Bit styles only ever restyled the backdrop, which read as a
+// no-op on the device, so 1.3.1 drops them. Saved configs still carry the old
+// indices; the helpers below fold them onto the survivors.
+#define WEATHER_STYLE_MODERN  0
+#define WEATHER_STYLE_CHANNEL 1
+#define WEATHER_STYLE_MINIMAL 2
+#define WEATHER_STYLE_COUNT 3
+#define WEATHER_ALERT_MODE_COUNT 3
+const char *weather_style_names[WEATHER_STYLE_COUNT] = {
+    "SNAP Modern", "Weather Channel", "Minimal"
+};
+// The old on-disk order was Modern, 8-Bit, 16-Bit, Weather Channel, Minimal, so
+// indices 1 and 2 mean different styles before and after the removal. There is
+// no way to tell the two apart from the number alone, which is why the style is
+// now persisted by name and the numeric key is only ever read as legacy.
+static int weather_style_from_legacy(int saved){
+    if(saved==3)return WEATHER_STYLE_CHANNEL;
+    if(saved==4)return WEATHER_STYLE_MINIMAL;
+    return WEATHER_STYLE_MODERN;   /* 0, the two retired bit styles, and junk */
+}
+static int weather_style_from_name(const char *name){
+    for(int i=0;i<WEATHER_STYLE_COUNT;i++)
+        if(name&&!strcasecmp(name,weather_style_names[i]))return i;
+    return WEATHER_STYLE_MODERN;
+}
+const char *weather_alert_mode_names[WEATHER_ALERT_MODE_COUNT] = {
+    "Off", "Emergency Only", "All Alerts"
+};
+int weather_style_idx = 0;
+// Clamp for every read of the setting, so a value from an older or newer config
+// can never index off the end of the name table.
+static int weather_style_current(void){
+    return (weather_style_idx>=0&&weather_style_idx<WEATHER_STYLE_COUNT)
+           ? weather_style_idx : WEATHER_STYLE_MODERN;
+}
+int weather_wallpaper_enabled = 0;
+/* Your aquarium, drifting behind the interface. Off by default -- it is a
+   thing you turn on because you collected the fish, not a thing that turns
+   up uninvited. */
+int aquarium_wallpaper_enabled = 0;
+int weather_screensaver_enabled = 0;
+int weather_alert_mode = 1;
+int weather_auto_ip = 1;
+int weather_app_sel = 0;
+int weather_hourly_sel = 0;
+int weather_settings_sel = 0;
+int weather_settings_dirty = 0;
+int weather_settings_confirm_pending = 0;
+int weather_settings_confirm_sel = 0;
+AppState weather_settings_leave_state = STATE_WEATHER;
+AppState weather_return_state = STATE_HOME;
+Uint32 weather_ticker_started = 0;
+// The ticker used to start crawling the instant the app opened, which swept the
+// city name out of view before it could be read. Hold the line still for this
+// long first, then crawl.
+#define WEATHER_TICKER_HOLD_MS 3000u
+// Soft-shaded raster art for the wallpaper / sleep-screen weather layer. These
+// replace the flat discs and hard-edged rays the layer used to draw with SDL
+// primitives; every edge here is an alpha falloff, so the art dissolves into
+// whatever is behind it instead of clashing with the text on top.
+#define WEATHER_ART_CLOUD 0
+#define WEATHER_ART_SUN   1
+#define WEATHER_ART_MOON  2
+#define WEATHER_ART_COUNT 3
+static const char *weather_art_files[WEATHER_ART_COUNT] = {
+    "weather-cloud.png", "weather-sun.png", "weather-moon.png"
+};
+static SDL_Texture *weather_art_texture[WEATHER_ART_COUNT] = { NULL, NULL, NULL };
+static unsigned weather_art_epoch = 0;
+static int weather_art_tried[WEATHER_ART_COUNT] = { 0, 0, 0 };
+char g_weather_place[96] = "";
+char g_weather_condition[80] = "";
+char g_weather_feels[32] = "";
+char g_weather_high[32] = "";
+char g_weather_low[32] = "";
+char g_weather_precip[32] = "";
+char g_weather_wind[48] = "";
+char g_weather_humidity[32] = "";
+char g_weather_updated[64] = "";
+char g_weather_hourly[WEATHER_HOURLY_COUNT][64];
+char g_weather_daily[WEATHER_DAILY_COUNT][64];
+/* The ISO date behind each daily row, so a week average can say which days
+   it covers. Parallel to g_weather_daily and filled from the same reply. */
+char g_weather_daily_date[WEATHER_DAILY_COUNT][16];
+int g_weather_daily_date_count = 0;
+int g_weather_hourly_count = 0;
+int g_weather_daily_count = 0;
+int g_weather_alert_level = 0;
+char g_weather_alert[180] = "";
+
+/* ---- Forecast modes -------------------------------------------------------
+   The strip that used to be only "HOURLY" now shows one of three readings of
+   the same fetch, switched with L1/R1: the next hours, the next days, or those
+   days folded into week averages. Nothing extra is fetched -- the provider
+   already sends two weeks of daily rows, which is what makes a by-week average
+   mean anything. Every mode hands back a row in the same
+   "label value ... rain%" shape the strip already knows how to split, so the
+   drawing code stays one code path. */
+#define WEATHER_FC_HOURLY 0
+#define WEATHER_FC_DAILY  1
+#define WEATHER_FC_WEEKLY 2
+#define WEATHER_FC_COUNT  3
+#define WEATHER_FC_WEEK_DAYS 7
+int g_weather_fc_mode = WEATHER_FC_HOURLY;
+
+/* Weekly needs a whole week to average, otherwise it is just the daily view
+   with the days hidden. */
+static int weather_fc_count(int mode) {
+    if (mode == WEATHER_FC_DAILY) return g_weather_daily_count;
+    if (mode == WEATHER_FC_WEEKLY) {
+        if (g_weather_daily_count < WEATHER_FC_WEEK_DAYS) return 0;
+        return g_weather_daily_count / WEATHER_FC_WEEK_DAYS;
+    }
+    return g_weather_hourly_count;
+}
+
+static const char *weather_fc_title(int mode) {
+    if (mode == WEATHER_FC_DAILY) return "DAILY";
+    if (mode == WEATHER_FC_WEEKLY) return "BY WEEK";
+    return "HOURLY";
+}
+
+/* Pull the first number out of a daily row's "78F/54F" field, and the unit
+   letter trailing it, so an average can be printed back in the same units the
+   provider used. */
+static int weather_fc_pair(const char *row, int *high, int *low, int *pct, char *unit, char *day, size_t day_n) {
+    char text[64], *part[10], *save = NULL; int count = 0;
+    snprintf(text, sizeof text, "%s", row ? row : "");
+    for (char *p = strtok_r(text, " ", &save); p && count < 10; p = strtok_r(NULL, " ", &save)) part[count++] = p;
+    if (count < 2) return 0;
+    if (day) snprintf(day, day_n, "%s", part[0]);
+    const char *slash = strchr(part[1], '/');
+    if (!slash) return 0;
+    char hi[24]; int n = (int)(slash - part[1]); if (n > 23) n = 23;
+    memcpy(hi, part[1], (size_t)n); hi[n] = 0;
+    if (sscanf(hi, "%d", high) != 1 || sscanf(slash + 1, "%d", low) != 1) return 0;
+    for (const char *p = hi; *p; p++) if (isalpha((unsigned char)*p)) { *unit = *p; break; }
+    *pct = 0;
+    if (count > 2 && strchr(part[count - 1], '%')) sscanf(part[count - 1], "%d", pct);
+    return 1;
+}
+
+/* "Sep10-16", or "Sep28-Oct4" when the week crosses a month. One token with no
+   spaces, because the strip splits a row on spaces to find its parts. Falls
+   back to "Wk2" when the provider sent no dates. */
+static void weather_fc_week_label(int week,char *out,size_t out_n){
+    int first=week*WEATHER_FC_WEEK_DAYS,last=first+WEATHER_FC_WEEK_DAYS-1;
+    if(last>=g_weather_daily_count)last=g_weather_daily_count-1;
+    static const char *month[12]={"Jan","Feb","Mar","Apr","May","Jun",
+                                  "Jul","Aug","Sep","Oct","Nov","Dec"};
+    int ay=0,am=0,ad=0,by=0,bm=0,bd=0;
+    if(first<g_weather_daily_date_count&&last<g_weather_daily_date_count&&
+       sscanf(g_weather_daily_date[first],"%d-%d-%d",&ay,&am,&ad)==3&&
+       sscanf(g_weather_daily_date[last],"%d-%d-%d",&by,&bm,&bd)==3&&
+       am>=1&&am<=12&&bm>=1&&bm<=12){
+        if(am==bm)snprintf(out,out_n,"%s%d-%d",month[am-1],ad,bd);
+        else snprintf(out,out_n,"%s%d-%s%d",month[am-1],ad,month[bm-1],bd);
+        return;
+    }
+    snprintf(out,out_n,"Wk%d",week+1);
+}
+
+/* One row of whichever mode is showing, written into `out`. */
+static void weather_fc_row(int mode, int index, char *out, size_t out_n) {
+    out[0] = 0;
+    if (index < 0 || index >= weather_fc_count(mode)) return;
+    if (mode == WEATHER_FC_HOURLY) { snprintf(out, out_n, "%s", g_weather_hourly[index]); return; }
+    if (mode == WEATHER_FC_DAILY) {
+        /* "Mon 80/60 10%" rather than the raw "Mon 80F/60F Cloudy 10%": five
+           columns of a 640px strip cannot hold the unit letters twice, and the
+           big number above the strip already says which unit this is. */
+        int hi, lo, pct; char unit = 0, day[16] = "";
+        if (weather_fc_pair(g_weather_daily[index], &hi, &lo, &pct, &unit, day, sizeof day))
+            snprintf(out, out_n, "%s %d/%d %d%%", day, hi, lo, pct);
+        else snprintf(out, out_n, "%s", g_weather_daily[index]);
+        return;
+    }
+    int first = index * WEATHER_FC_WEEK_DAYS, hi_sum = 0, lo_sum = 0, pct_sum = 0, days = 0;
+    char unit = 'F';
+    for (int i = first; i < first + WEATHER_FC_WEEK_DAYS && i < g_weather_daily_count; i++) {
+        int hi, lo, pct; char u = unit;
+        if (!weather_fc_pair(g_weather_daily[i], &hi, &lo, &pct, &u, NULL, 0)) continue;
+        hi_sum += hi; lo_sum += lo; pct_sum += pct; unit = u; days++;
+    }
+    char span[24];weather_fc_week_label(index, span, sizeof span);
+    if (!days) { snprintf(out, out_n, "%s --/-- --%%", span); return; }
+    snprintf(out, out_n, "%s %d/%d %d%%", span,
+             (hi_sum + days / 2) / days, (lo_sum + days / 2) / days,
+             (pct_sum + days / 2) / days);
+    (void)unit;
+}
+
+/* L1/R1 steps to the next mode that actually has data, so a device that only
+   got hourly back never lands on an empty strip. */
+static int weather_fc_next(int mode, int dir) {
+    for (int step = 1; step <= WEATHER_FC_COUNT; step++) {
+        int m = ((mode + dir * step) % WEATHER_FC_COUNT + WEATHER_FC_COUNT) % WEATHER_FC_COUNT;
+        if (weather_fc_count(m) > 0) return m;
+    }
+    return mode;
+}
 static void weather_stop(void);
+static void weather_detail_clear(void);
 #include "widget_locations.h"
 
 static int weather_clock_minute(const char *s) {
@@ -1480,6 +1736,7 @@ static void weather_trim_plus(char *s) {
     if (s[0] == '+') memmove(s, s + 1, strlen(s));
 }
 #include "weather_fetch.h"
+#include "fish_rares.h"
 // Instant local F<->C flip of the cached string so a unit change shows right
 // away; the next fetch confirms it.
 static void weather_convert_cached(int to_celsius) {
@@ -1523,15 +1780,142 @@ static int weather_icon_kind(const char *s) {
     if (strstr(l, "sunny") || strstr(l, "clear") || strstr(l, "fair"))    return WX_SUN;
     return WX_NONE;
 }
+/* A small filled five-pointed star. The pin marker on the Apps page used to be
+   a dot, which reads as an unread-notification badge -- not what "this one is
+   also on Home" means. Ten alternating points make a simple concave polygon,
+   so an even-odd scanline fill gives a solid star. */
+static void fill_star(SDL_Renderer *ren, int cx, int cy, float r) {
+    float px[10], py[10];
+    for (int i = 0; i < 10; i++) {
+        float ang = -1.57079633f + i * 0.62831853f;      /* start at the top point */
+        float rad = (i & 1) ? r * 0.44f : r;
+        px[i] = cx + cosf(ang) * rad;
+        py[i] = cy + sinf(ang) * rad;
+    }
+    for (int y = (int)floorf(cy - r); y <= (int)ceilf(cy + r); y++) {
+        float sy = y + 0.5f, xs[12];
+        int nx = 0;
+        for (int i = 0; i < 10 && nx < 12; i++) {
+            int j = (i + 1) % 10;
+            float ay = py[i], by = py[j];
+            if ((ay <= sy && by > sy) || (by <= sy && ay > sy)) {
+                float t = (sy - ay) / (by - ay);
+                xs[nx++] = px[i] + t * (px[j] - px[i]);
+            }
+        }
+        for (int a = 1; a < nx; a++) {
+            float v = xs[a]; int b = a - 1;
+            while (b >= 0 && xs[b] > v) { xs[b + 1] = xs[b]; b--; }
+            xs[b + 1] = v;
+        }
+        for (int a = 0; a + 1 < nx; a += 2)
+            SDL_RenderDrawLine(ren, (int)(xs[a] + 0.5f), y, (int)(xs[a + 1] - 0.5f), y);
+    }
+}
 static void fill_disc(SDL_Renderer *ren, int cx, int cy, int r) {
     for (int dy = -r; dy <= r; dy++) {
         int dx = (int)(sqrt((double)(r * r - dy * dy)) + 0.5);
         SDL_RenderDrawLine(ren, cx - dx, cy + dy, cx + dx, cy + dy);
     }
 }
-// Draw a small weather glyph in an s x s box at (x,y). Cheap SDL primitives.
-// `bg` is the surface behind it, used to carve the crescent moon.
+// Defined with the rest of the wallpaper art, far below.
+static void weather_art_draw(SDL_Renderer *ren, int which, int x, int y, int width, SDL_Color color);
+static SDL_Texture *weather_art(SDL_Renderer *ren, int which);
+
+// The body in each art file covers roughly 46% of the image width (the rest is
+// its soft halo), so drawing at this multiple of the icon box makes the visible
+// sun/moon fill about two thirds of it -- the proportion the old primitive
+// glyphs had.
+#define WEATHER_ART_BODY_SCALE 1.35f
+
+// Draw a small weather glyph in an s x s box at (x,y).
+//
+// The primitive version below is the fallback. It broke down at small sizes:
+// the cloud is three discs plus a rectangle, and once integer division shrank
+// the discs faster than the rectangle the whole thing read as a bare half-box
+// with a flat bottom. The soft raster art already shipped for the wallpaper is
+// the same shape at every size, so prefer it whenever it loaded.
+//
+// `bg` is the surface behind it, used to carve the primitive crescent moon.
+static void draw_weather_icon_primitive(SDL_Renderer *ren, int x, int y, int s, int kind, SDL_Color c, SDL_Color bg);
+
 static void draw_weather_icon(SDL_Renderer *ren, int x, int y, int s, int kind, SDL_Color c, SDL_Color bg) {
+    if (s < 8) return;
+    int cxm = x + s / 2, cym = y + s / 2;
+
+    if (kind == WX_SUN || kind == WX_CLEARNIGHT) {
+        int which = (kind == WX_SUN) ? WEATHER_ART_SUN : WEATHER_ART_MOON;
+        if (weather_art(ren, which)) {
+            int w = (int)(s * WEATHER_ART_BODY_SCALE);
+            weather_art_draw(ren, which, cxm - w / 2, cym - w / 2, w,
+                             kind == WX_SUN ? (SDL_Color){ 255, 214, 120, 255 }
+                                            : (SDL_Color){ 226, 236, 255, 255 });
+            return;
+        }
+        draw_weather_icon_primitive(ren, x, y, s, kind, c, bg);
+        return;
+    }
+
+    // Everything else is a cloud plus whatever is falling out of it.
+    if (weather_art(ren, WEATHER_ART_CLOUD)) {
+        SDL_Texture *art = weather_art(ren, WEATHER_ART_CLOUD);
+        int tw = 1, th = 1; SDL_QueryTexture(art, NULL, NULL, &tw, &th);
+        int cw = s * 92 / 100, chh = tw > 0 ? cw * th / tw : cw / 2;
+        // Sits high in the box so the rain / snow / bolt below it has room.
+        int cxl = x + (s - cw) / 2, cyt = y + s / 100 * 12;
+        if (kind == WX_PARTLY && weather_art(ren, WEATHER_ART_SUN)) {
+            int sw = (int)(s * 0.62f * WEATHER_ART_BODY_SCALE);
+            weather_art_draw(ren, WEATHER_ART_SUN, x + s / 2 - sw / 2 - s / 5,
+                             y - sw / 2 + s / 4, sw, (SDL_Color){ 255, 214, 120, 235 });
+        }
+        SDL_Color cloud = (kind == WX_STORM) ? (SDL_Color){ 178, 186, 204, 255 }
+                                             : (SDL_Color){ 244, 247, 252, 255 };
+        if (kind == WX_CLOUD || kind == WX_FOG || kind == WX_WIND) cloud = (SDL_Color){ 232, 238, 246, 255 };
+        weather_art_draw(ren, WEATHER_ART_CLOUD, cxl, cyt, cw, cloud);
+
+        int below = cyt + chh - s / 14;      // just inside the cloud's soft base
+        SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 235);
+        SDL_BlendMode ob; SDL_GetRenderDrawBlendMode(ren, &ob);
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        if (kind == WX_RAIN) {
+            SDL_SetRenderDrawColor(ren, 132, 196, 244, 240);
+            for (int i = 0; i < 3; i++) {
+                int rx = x + s / 3 + i * s / 6;
+                for (int t = 0; t < 1 + s / 60; t++)
+                    SDL_RenderDrawLine(ren, rx + t, below, rx - s / 14 + t, below + s / 5);
+            }
+        } else if (kind == WX_SNOW) {
+            SDL_SetRenderDrawColor(ren, 236, 246, 255, 245);
+            for (int i = 0; i < 3; i++) {
+                int fx = x + s / 3 + i * s / 6, fy = below + s / 9, r = s / 18 + 1;
+                SDL_RenderDrawLine(ren, fx - r, fy, fx + r, fy);
+                SDL_RenderDrawLine(ren, fx, fy - r, fx, fy + r);
+                SDL_RenderDrawLine(ren, fx - r * 7 / 10, fy - r * 7 / 10, fx + r * 7 / 10, fy + r * 7 / 10);
+                SDL_RenderDrawLine(ren, fx - r * 7 / 10, fy + r * 7 / 10, fx + r * 7 / 10, fy - r * 7 / 10);
+            }
+        } else if (kind == WX_STORM) {
+            SDL_SetRenderDrawColor(ren, 255, 214, 84, 255);
+            int bx = x + s / 2, by = below;
+            for (int t = -(s / 28) - 1; t <= s / 28 + 1; t++) {
+                SDL_RenderDrawLine(ren, bx + s / 12 + t, by, bx - s / 20 + t, by + s / 8);
+                SDL_RenderDrawLine(ren, bx - s / 20 + t, by + s / 8, bx + s / 14 + t, by + s / 8);
+                SDL_RenderDrawLine(ren, bx + s / 14 + t, by + s / 8, bx - s / 12 + t, by + s / 4);
+            }
+        } else if (kind == WX_FOG || kind == WX_WIND) {
+            SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 190);
+            for (int i = 0; i < 3; i++) {
+                int ly = below + i * (s / 12 + 1), inset = (i & 1) ? s / 8 : 0;
+                for (int t = 0; t < 1 + s / 70; t++)
+                    SDL_RenderDrawLine(ren, x + s / 8 + inset, ly + t, x + s * 7 / 8 - inset, ly + t);
+            }
+        }
+        SDL_SetRenderDrawBlendMode(ren, ob);
+        return;
+    }
+    draw_weather_icon_primitive(ren, x, y, s, kind, c, bg);
+}
+
+static void draw_weather_icon_primitive(SDL_Renderer *ren, int x, int y, int s, int kind, SDL_Color c, SDL_Color bg) {
     SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 255);
     int cx = x + s / 2, cy = y + s / 2;
     int cloud_cy = cy + s / 8;
@@ -3425,6 +3809,20 @@ typedef struct {
 // The H700 battery exposes trustworthy health, cell voltage and temperature,
 // but no live discharge current/cycle count. Keep the widgets honest by using
 // only fields that are actually present instead of estimating time remaining.
+// Is the handheld on wall power right now? Cached briefly: this is read while
+// deciding whether to blank the panel, which happens on a timer, and the sysfs
+// read is not free.
+static int power_is_plugged_in(void) {
+    static Uint32 checked; static int plugged;
+    Uint32 now = SDL_GetTicks();
+    if (checked && now - checked < 4000u) return plugged;
+    checked = now ? now : 1;
+    int pct = -1, charging = 0;
+    read_battery(&pct, &charging);
+    plugged = charging;
+    return plugged;
+}
+
 static void read_battery_details(BatteryDetails *out) {
     static BatteryDetails cached;
     static Uint32 last = 0;
@@ -3553,23 +3951,57 @@ static Uint32 anim_start(void) {
     return reduce_motion ? (t > 100000u ? t - 100000u : 0u) : t;
 }
 
+/* The UI's frame rate. Variable is the adaptive pacing below and the device
+   default; the other two pin it, which is steadier to look at and costs more
+   battery. Pinning overrides Power Save and the idle step, but not the hot
+   thermal caps -- those protect the hardware rather than the battery. */
+#define FPS_MODE_VARIABLE 0
+#define FPS_MODE_30 1
+#define FPS_MODE_60 2
+#define FPS_MODE_COUNT 3
+int fps_mode_idx = FPS_MODE_VARIABLE;
+const char *fps_mode_names[FPS_MODE_COUNT] = { "Variable", "30 FPS", "60 FPS" };
+/* What the pacing settled on last frame, so effects that look wrong at a low
+   frame rate can thin themselves out instead of strobing. */
+int g_frame_target_ms = 33;
+
 // Target milliseconds-per-frame given current activity + heat + settings.
-static Uint32 frame_target_ms(int animating, int deep_idle) {
+// `realtime_game` is a mini-game actually being played: a running platformer at
+// 30fps reads as stuttering rather than as a battery saving, and the player is
+// plainly awake and using the device. It lifts the Power Save and warm caps --
+// but NOT the hot ones, which exist to protect the hardware.
+static Uint32 frame_target_ms(int animating, int deep_idle, int realtime_game) {
     int th = thermal_level();
     Uint32 t;
     if (th >= 3)      t = 66;   // ~15fps -- shed as much heat as possible
     else if (th == 2) t = 50;   // ~20fps
-    else if (animating) t = power_save_mode ? 33 : 16;   // 30 or 60 while moving
+    else if (fps_mode_idx == FPS_MODE_60) t = 16;
+    else if (fps_mode_idx == FPS_MODE_30) t = 33;
+    else if (animating) t = (power_save_mode && !realtime_game) ? 33 : 16;   // 30 or 60 while moving
     else if (deep_idle) t = 100; // ~10fps: nothing on screen has changed for a while -- big battery saver
     else             t = 33;    // ~30fps on a still screen just after input
-    if (th == 1 && t < 22) t = 22;   // warm: cap ~45fps even while animating
-    if (power_save_mode && t < 33 && !deep_idle) t = 33;
+    // A pinned rate stays pinned: neither the idle step nor Power Save pulls it
+    // back. The two thermal branches above already had their say.
+    if (fps_mode_idx == FPS_MODE_VARIABLE) {
+        if (th == 1 && t < 22 && !realtime_game) t = 22;   // warm: cap ~45fps even while animating
+        if (power_save_mode && t < 33 && !deep_idle && !realtime_game) t = 33;
+    }
+    g_frame_target_ms = (int)t;
     return t;
 }
 int confirm_reset_pending = 0;
 int confirm_account_restore = 0;
+/* Every Restore to Default asks before it acts. Restoring is instant and there
+   is nothing to undo it with, and the rows sit at the bottom of lists that the
+   D-pad wraps around -- one press too many on the way down used to land on
+   Restore, and one A there was the whole of a theme, a layout or a tab gone. */
+#define RC_NONE 0
+#define RC_TAB 1          /* restore_current_settings_tab(arg) */
+#define RC_DISP_GROUP 2   /* restore_display_group(arg) */
+int restore_confirm_kind = RC_NONE, restore_confirm_arg = 0;
 int settings_dirty = 0;
 int settings_confirm_pending = 0;
+int settings_confirm_sel = 0;      // 0 = Save, 1 = Don't Save (shared modal)
 int settings_night_theme_confirm = 0;
 int settings_pending_theme = 0;
 int settings_autops_confirm = 0;
@@ -3593,6 +4025,8 @@ enum {
     SP_ROW_TIMEOUT,
     SP_ROW_SAVER,
     SP_ROW_SAVER_DURATION,
+    SP_ROW_SAVER_ALWAYS,
+    SP_ROW_TANK_WALLPAPER,
     SP_ROW_ASPECT,
     SP_ROW_ROTATION,
     SP_ROW_REDUCE_MOTION,
@@ -3646,6 +4080,9 @@ int home_selected = 0;
 int flashlight_pending = 0;            // Flashlight row armed, waiting for the confirm press
 AppState flashlight_return = STATE_HOME;   // where "Start" drops you back to
 int home_scroll = 0;           // px the left column is scrolled up when it overflows
+// Screen y of the selected left-column row, recorded during render. Right uses
+// it to cross to whichever widget card the cursor is actually nearest.
+int home_selected_y = -1;
 int home_stats_expanded = 0;   // X on Home collapses / expands the Your Stats widget
 
 // "Your Stats" is one of the home widgets (HOME_WIDGET_STATS): pick up to
@@ -3729,6 +4166,11 @@ char bg_online_status[160] = "Connect to Wi-Fi to browse free backgrounds.";
 char bg_online_query[96] = "";
 int bg_online_search_pending = 0;
 int bg_target_selected = 0;
+/* That screen is reached from two places now: an online background waiting to
+   be downloaded, and a drawing out of Messages waiting to be copied in. */
+#define BG_TARGET_ONLINE 0
+#define BG_TARGET_DRAWING 1
+int bg_target_purpose = BG_TARGET_ONLINE;
 int bg_preview_index = 0;
 int bg_download_pending_index = -1;
 SDL_Texture *bg_preview_tex = NULL;
@@ -3745,8 +4187,22 @@ int settings_scroll_offset = 0;
 // height instead of a fixed guess, so a larger Font Size doesn't overflow the
 // bottom and a smaller one isn't wastefully capped at 8. Used by both the
 // input scroll clamp and the renderer so they always agree.
+/* A group page is laid out the way Screen & Power always was: its name in bold
+   at the top left, rows full width underneath on a looser pitch, a footer. */
+#define SETTINGS_PAGE_X 36
+#define SETTINGS_PAGE_HEAD_Y 62
+#define SETTINGS_ARROW_ROOM 22   /* the two value arrows, and the gaps beside them */
+static int sgp_depth;   /* the page stack's depth; defined with the group state */
+int settings_page_rows_top(void) {
+    int hh = font_small_bold ? TTF_FontHeight(font_small_bold) : 24;
+    return SETTINGS_PAGE_HEAD_Y + hh + 16;
+}
 int settings_visible_rows() {
     int lh = font_label ? TTF_FontHeight(font_label) : 22;
+    if (sgp_depth > 0) {
+        int n = (WIN_H - lh - 30 - settings_page_rows_top()) / (lh + 14);
+        return n < 3 ? 3 : n;
+    }
     int pitch = lh + SETTINGS_ROW_GAP;
     int n = (WIN_H - SETTINGS_ROWS_TOP - 12) / (pitch > 0 ? pitch : 1);
     if (n < 4) n = 4;
@@ -3889,6 +4345,7 @@ AppState kb_return_state = STATE_SETTINGS;
 #define KB_PURPOSE_BG_RENAME 16
 #define KB_PURPOSE_CALENDAR_REMINDER 17
 #define KB_PURPOSE_THEME_NAME 18
+#define KB_PURPOSE_MESSAGE 22
 int kb_purpose = KB_PURPOSE_API_KEY;
 
 // --- Scraper progress overlay (backgrounded scrape + polled status file) ---
@@ -3948,6 +4405,13 @@ int DEVICE_COUNT = 2;
 #define ROW_SCRAPE_SYSTEM_HEADER 30
 #define ROW_SCRAPE_SYSTEM_ITEM 31
 #define ROW_ART_EXTRAS_HEADER 32
+// Syncthing syncs saves and screenshots over the network. It reads as a
+// property of the handheld, but what it actually configures is a service and
+// the machines it talks to, so it belongs with the other online accounts.
+#define ROW_ONL_GRP_SYNC 33
+#define ROW_ONL_SYNC 34
+#define ROW_ONL_SYNC_INFO 35
+int onl_grp_sync_open = 0;
 #define MAX_ACCOUNT_ROWS (PLATFORM_COUNT + 128)
 #define ROW_SCRAPE_MAKER 121
 static const char *scrape_makers[]={"Nintendo","Sega","Sony","Atari","NEC","SNK","Other / Arcade / Computers"};
@@ -3956,6 +4420,10 @@ static int scrape_maker(int p){for(int i=0;i<6;i++)if(!strcasecmp(platform_maker
 
 int build_account_rows(int *row_type, int *row_extra) {
     int idx = 0;
+    // Scraper is one page, and each of its three lists is a page inside it.
+    // Nothing goes deeper than that: consoles are listed under maker headings
+    // and the extra art types under an Extras heading, instead of behind yet
+    // more rows to open.
     row_type[idx] = ROW_SCRAPE_HEADER; row_extra[idx] = 0; idx++;
     if (scrape_dropdown_open) {
         row_type[idx] = ROW_SCRAPE_SERVICE_HEADER; row_extra[idx] = 0; idx++;
@@ -3969,13 +4437,13 @@ int build_account_rows(int *row_type, int *row_extra) {
             }
         }
         row_type[idx] = ROW_SCRAPE_SYSTEM_HEADER; row_extra[idx] = 0; idx++;
-        if (scrape_systems_open)for(int group=0;group<7;group++){
-            row_type[idx]=ROW_SCRAPE_MAKER;row_extra[idx++]=group;
-            if(!scrape_maker_open[group])continue;
-            int ids[PLATFORM_COUNT],n=0;
-            for(int p=0;p<PLATFORM_COUNT;p++)if(scrape_maker(p)==group)ids[n++]=p;
-            for(int i=1;i<n;i++){int key=ids[i],j=i-1;while(j>=0&&platform_game_count_cache[ids[j]]<platform_game_count_cache[key]){ids[j+1]=ids[j];j--;}ids[j+1]=key;}
-            for(int i=0;i<n;i++){row_type[idx]=ROW_SCRAPE_SYSTEM_ITEM;row_extra[idx++]=ids[i];}
+        if (scrape_systems_open) for (int group = 0; group < 7; group++) {
+            int ids[PLATFORM_COUNT], n = 0;
+            for (int p = 0; p < PLATFORM_COUNT; p++) if (scrape_maker(p) == group) ids[n++] = p;
+            if (!n) continue;                     // no heading over an empty group
+            for (int i = 1; i < n; i++) { int key = ids[i], j = i - 1; while (j >= 0 && platform_game_count_cache[ids[j]] < platform_game_count_cache[key]) { ids[j + 1] = ids[j]; j--; } ids[j + 1] = key; }
+            row_type[idx] = ROW_SCRAPE_MAKER; row_extra[idx++] = group;
+            for (int i = 0; i < n; i++) { row_type[idx] = ROW_SCRAPE_SYSTEM_ITEM; row_extra[idx++] = ids[i]; }
         }
         row_type[idx] = ROW_ART_HEADER; row_extra[idx] = 0; idx++;
         if (art_dropdown_open) {
@@ -3987,13 +4455,17 @@ int build_account_rows(int *row_type, int *row_extra) {
             if (art_type_supported(ART_TYPE_CARTRIDGE)) {   // primary, not an extra
                 row_type[idx] = ROW_ART_ITEM; row_extra[idx] = ART_TYPE_CARTRIDGE; idx++;
             }
-            row_type[idx] = ROW_ART_EXTRAS_HEADER; row_extra[idx] = 0; idx++;
-            if (scrape_extras_open)
+            int extras = 0;
+            for (int i = 4; i < ART_TYPE_COUNT; i++)
+                if (i != ART_TYPE_CARTRIDGE && art_type_supported(i)) extras++;
+            if (extras) {
+                row_type[idx] = ROW_ART_EXTRAS_HEADER; row_extra[idx] = 0; idx++;
                 for (int i = 4; i < ART_TYPE_COUNT; i++) {
                     if (i == ART_TYPE_CARTRIDGE) continue;   // already listed above
                     if (!art_type_supported(i)) continue;
                     row_type[idx] = ROW_ART_ITEM; row_extra[idx] = i; idx++;
                 }
+            }
         }
         row_type[idx] = ROW_ONLY_MISSING; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_FIX_TITLES; row_extra[idx] = 0; idx++;
@@ -4016,6 +4488,11 @@ int build_account_rows(int *row_type, int *row_extra) {
         row_type[idx] = ROW_WALLHAVEN_NOTE; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_WALLHAVEN_KEY; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_WALLHAVEN_SEARCH; row_extra[idx] = 0; idx++;
+    }
+    row_type[idx] = ROW_ONL_GRP_SYNC; row_extra[idx] = 0; idx++;
+    if (onl_grp_sync_open) {
+        row_type[idx] = ROW_ONL_SYNC; row_extra[idx] = 0; idx++;
+        if (syncthing_enabled) { row_type[idx] = ROW_ONL_SYNC_INFO; row_extra[idx] = 0; idx++; }
     }
     row_type[idx] = ROW_ACCT_RESTORE; row_extra[idx] = 0; idx++;
     return idx;
@@ -4051,6 +4528,8 @@ int build_account_rows(int *row_type, int *row_extra) {
 #define ROW_G_BG_SEARCH 19    // Backgrounds page: search Wallhaven
 #define ROW_G_BG_RESTORE 28
 #define ROW_G_FAVORITES_VIEW 29
+#define ROW_G_GRP_PLAY 30   // Fast Forward and Auto-Save: what happens in a game
+int game_grp_play_open = 0;
 #define MAX_GAME_ROWS 64
 static const char *bg_maker_names[] = { "NINTENDO", "SONY", "SEGA", "NEC", "SNK", "ATARI", "ARCADE" };
 #define BG_MAKER_COUNT 7
@@ -4064,9 +4543,14 @@ extern int platform_bg_mode;
 
 int build_game_rows(int *row_type, int *row_extra) {
     int idx = 0;
-    row_type[idx] = ROW_G_FASTFORWARD; row_extra[idx] = 0; idx++;
-    if (fast_forward_values[fast_forward_idx] != 0) { row_type[idx] = ROW_G_FASTFWD_MODE; row_extra[idx] = 0; idx++; }
-    row_type[idx] = ROW_G_AUTOSAVE; row_extra[idx] = 0; idx++;
+    // Fast Forward and Auto-Save both change what a running game does; the
+    // rows below are about the library you pick that game from.
+    row_type[idx] = ROW_G_GRP_PLAY; row_extra[idx] = 0; idx++;
+    if (game_grp_play_open) {
+        row_type[idx] = ROW_G_FASTFORWARD; row_extra[idx] = 0; idx++;
+        if (fast_forward_values[fast_forward_idx] != 0) { row_type[idx] = ROW_G_FASTFWD_MODE; row_extra[idx] = 0; idx++; }
+        row_type[idx] = ROW_G_AUTOSAVE; row_extra[idx] = 0; idx++;
+    }
 
     // Systems View, Library View and Display Art now live in Settings > Display.
     row_type[idx] = ROW_G_SHOW_DESC; row_extra[idx] = 0; idx++;
@@ -4102,7 +4586,6 @@ int build_bg_rows(int *row_type, int *row_extra) {
             }
             if (!any) continue;               // no visible systems from this maker
             row_type[idx] = ROW_G_BG_MAKER; row_extra[idx] = m; idx++;
-            if (bg_maker_open[m])
                 for (int p = 0; p < PLATFORM_COUNT; p++) {
                     int match = !strcmp(platform_maker[p], bg_maker_names[m]) ||
                                 (m == 6 && !strcmp(platform_maker[p], "FINALBURN NEO"));
@@ -4204,10 +4687,20 @@ int build_sound_rows(int *row_type, int *row_extra) {
 #define ROW_DEV_PERF_OVERLAY 23   // moved from Display: it reports on the device
 #define ROW_DEV_PERF_OPACITY 24
 #define ROW_DEV_PERF_TEXT 25
+#define ROW_DEV_FPS_MODE 26   // Variable / 30 / 60
+#define ROW_DEV_HEADER 27      // which handheld this is; a heading, not a setting
+#define ROW_DEV_GRP_PERF 28
+#define ROW_DEV_GRP_CONNECT 29
+#define ROW_DEV_GRP_CONTROLS 30
+#define ROW_DEV_GRP_SYSTEM 31
 int dev_grp_batt_open = 0;
 int dev_grp_night_open = 0;
+int dev_grp_perf_open = 0;
+int dev_grp_connect_open = 0;
+int dev_grp_controls_open = 0;
+int dev_grp_system_open = 0;
 int confirm_es_pending = 0;   // ROW_DEV_EXIT_ES needs a second Enter to confirm
-#define MAX_DEVICE_ROWS 32
+#define MAX_DEVICE_ROWS 48
 
 static void syncthing_apply(void) {
 #ifdef SNAPOS_TARGET_KNULLI
@@ -4226,21 +4719,26 @@ static void syncthing_apply(void) {
 
 int build_device_rows(int *row_type, int *row_extra) {
     int idx = 0;
-    // Start with the actual device, then keep all battery behavior together.
-    row_type[idx] = ROW_DEV_DEVICE; row_extra[idx] = 0; idx++;
+    // Which handheld this is names the page; it is not something you set from
+    // here day to day, so it is a heading and the cursor skips it. The profile
+    // behind it is still changeable, under System.
+    row_type[idx] = ROW_DEV_HEADER; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_DEV_GRP_BATT; row_extra[idx] = 0; idx++;
     if (dev_grp_batt_open) {
         row_type[idx] = ROW_DEV_POWERSAVE; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_AUTOPS; row_extra[idx] = 0; idx++;
         row_type[idx] = ROW_DEV_BATTERY_ICON; row_extra[idx] = 0; idx++;
     }
-    row_type[idx] = ROW_DEV_CPU_PERF; row_extra[idx] = 0; idx++;
-    // What the handheld is doing belongs with the handheld, next to the mode
-    // that governs it -- not under Display, which is about how the UI looks.
-    row_type[idx] = ROW_DEV_PERF_OVERLAY; row_extra[idx] = 0; idx++;
-    if (show_perf_overlay) {
-        row_type[idx] = ROW_DEV_PERF_OPACITY; row_extra[idx] = 0; idx++;
-        row_type[idx] = ROW_DEV_PERF_TEXT; row_extra[idx] = 0; idx++;
+    // How hard the handheld is allowed to work, and what it reports about it.
+    row_type[idx] = ROW_DEV_GRP_PERF; row_extra[idx] = 0; idx++;
+    if (dev_grp_perf_open) {
+        row_type[idx] = ROW_DEV_CPU_PERF; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_FPS_MODE; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_PERF_OVERLAY; row_extra[idx] = 0; idx++;
+        if (show_perf_overlay) {
+            row_type[idx] = ROW_DEV_PERF_OPACITY; row_extra[idx] = 0; idx++;
+            row_type[idx] = ROW_DEV_PERF_TEXT; row_extra[idx] = 0; idx++;
+        }
     }
     row_type[idx] = ROW_DEV_GRP_NIGHT; row_extra[idx] = 0; idx++;
     if (dev_grp_night_open) {
@@ -4252,15 +4750,27 @@ int build_device_rows(int *row_type, int *row_extra) {
         if (night_mode != 0) { row_type[idx] = ROW_DEV_NIGHT_BRIGHT; row_extra[idx] = 0; idx++; }
         if (night_mode != 0) { row_type[idx] = ROW_DEV_NIGHT_HOTKEY; row_extra[idx] = 0; idx++; }
     }
-    row_type[idx] = ROW_DEV_TEST_KEYBOARD; row_extra[idx] = 0; idx++;
+    row_type[idx] = ROW_DEV_GRP_CONNECT; row_extra[idx] = 0; idx++;
+    if (dev_grp_connect_open) {
+        row_type[idx] = ROW_DEV_WIFI; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_BLUETOOTH; row_extra[idx] = 0; idx++;
+    }
+    // Hotkeys and the keyboard test are both "what do the buttons do".
+    row_type[idx] = ROW_DEV_GRP_CONTROLS; row_extra[idx] = 0; idx++;
+    if (dev_grp_controls_open) {
+        row_type[idx] = ROW_DEV_HOTKEYS; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_TEST_KEYBOARD; row_extra[idx] = 0; idx++;
+    }
     row_type[idx] = ROW_DEV_SYSCFG; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_DEV_WIFI; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_DEV_BLUETOOTH; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_DEV_SYNCTHING; row_extra[idx] = 0; idx++;
-    if (syncthing_enabled) { row_type[idx] = ROW_DEV_SYNCTHING_INFO; row_extra[idx] = 0; idx++; }
-    row_type[idx] = ROW_DEV_HOTKEYS; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_DEV_EXIT_ES; row_extra[idx] = 0; idx++;
-    row_type[idx] = ROW_DEV_RESET; row_extra[idx] = 0; idx++;
+    // The two ways out of Snap FE, and the profile that says what hardware it
+    // is running on. All three are rare and consequential, so they are one
+    // step further in rather than sitting under the cursor on the way past.
+    row_type[idx] = ROW_DEV_GRP_SYSTEM; row_extra[idx] = 0; idx++;
+    if (dev_grp_system_open) {
+        row_type[idx] = ROW_DEV_DEVICE; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_EXIT_ES; row_extra[idx] = 0; idx++;
+        row_type[idx] = ROW_DEV_RESET; row_extra[idx] = 0; idx++;
+    }
     row_type[idx] = ROW_DEV_RESTORE; row_extra[idx] = 0; idx++;
     return idx;
 }
@@ -4336,6 +4846,9 @@ static int custom_theme_choice=0;
 #define ROW_DISP_LIB_ROWS 64
 #define ROW_DISP_BG_PAGE 65       // opens the Backgrounds page
 #define ROW_DISP_SINGLE_CARD_TITLE_SIDE 66
+#define ROW_DISP_SINGLE_CARD_INFO 67
+#define ROW_DISP_SYS_VIEW 68       // Systems View, as a value inside Presentation
+#define ROW_DISP_ART_VALUE 69      // Display Art, as a value inside Presentation
 #define MAX_DISPLAY_ROWS 96
 int disp_grp_stats_open = 0;
 int disp_grp_apps_open = 0;
@@ -4357,11 +4870,43 @@ int favorites_view_idx = 0;
 #define APP_FLASHLIGHT 5
 #define APP_ACHIEVEMENTS 6
 #define APP_CALCULATOR 7
-#define APP_COUNT      8
+#define APP_WEATHER    8
+#define APP_MESSAGES   9
+#define APP_WILDKINS   10   // a separate full-screen game, launched like a real one
+#define APP_COUNT      11
 const char *home_app_names[APP_COUNT] = {
-    "RetroArch", "Radio", "Music", "Mini Games", "Link Play", "Flashlight", "Achievements Book", "Calculator"
+    "RetroArch", "Radio", "Music", "Mini Games", "Link Play", "Flashlight", "Achievements", "Calculator", "Weather", "Messages", "Wildkins"
 };
-int home_apps_mask = (1 << APP_COUNT) - 1;   // all visible
+// Nine apps in one scrolling column pushed the last of them a long way below
+// the fold, so the Informational home now carries an "Apps" row that opens a
+// page holding all of them. home_apps_mask keeps its meaning but changes its
+// job: it is the PIN list -- which apps also sit directly on Home for one-press
+// access. Everything stays reachable from the Apps page either way.
+#define APP_PINNED_DEFAULT ((1 << APP_RETROARCH) | (1 << APP_RADIO) | (1 << APP_MUSIC) | (1 << APP_MESSAGES))
+int home_apps_mask = APP_PINNED_DEFAULT;
+
+// The order apps appear in, on Home and on the Apps page. Rearranged by the
+// user (Y on the Apps page) and persisted; any id missing from a saved order is
+// appended, so adding a new app later never corrupts an existing config.
+int home_app_order[APP_COUNT] = {
+    APP_RETROARCH, APP_RADIO, APP_MUSIC, APP_MINIGAMES, APP_LINK,
+    APP_FLASHLIGHT, APP_ACHIEVEMENTS, APP_CALCULATOR, APP_WEATHER, APP_MESSAGES, APP_WILDKINS
+};
+int apps_page_sel = 0;
+int apps_page_reorder = 0;      // Y: jiggle mode
+int apps_page_dragging = 0;     // Y again: this tile is being carried
+AppState apps_page_return = STATE_HOME;
+
+static void home_app_order_normalize(void) {
+    int seen[APP_COUNT] = { 0 }, out[APP_COUNT], n = 0;
+    for (int i = 0; i < APP_COUNT; i++) {
+        int id = home_app_order[i];
+        if (id < 0 || id >= APP_COUNT || seen[id]) continue;
+        seen[id] = 1; out[n++] = id;
+    }
+    for (int id = 0; id < APP_COUNT; id++) if (!seen[id]) out[n++] = id;
+    memcpy(home_app_order, out, sizeof out);
+}
 
 int bg_dropdown_open = 0;
 int disp_grp_home_open = 0;     // Home
@@ -4371,12 +4916,21 @@ int disp_grp_libview_open = 0;   // Library View group in Settings > Display
 int disp_grp_hud_open = 0;      // Status Bar
 int disp_grp_screen_open = 0;   // Screen & Power
 
+// How deep into group pages the settings list currently is; 0 is a tab's own
+// list. Declared here so settings_close_all_groups() can clear it -- leaving a
+// page open while its group's flag was reset would show an empty list.
+static int sgp_depth = 0;
+
 // Collapsible Settings groups are deliberately session-only. Closing Settings
 // always starts the next visit from a clean, predictable collapsed layout.
 static void settings_close_all_groups(void) {
+    sgp_depth = 0;
     snd_grp_osui_open = snd_grp_boot_open = 0;
     snd_grp_radio_open = snd_grp_music_open = 0;
     dev_grp_batt_open = dev_grp_night_open = 0;
+    dev_grp_perf_open = dev_grp_connect_open = 0;
+    dev_grp_controls_open = dev_grp_system_open = 0;
+    game_grp_play_open = onl_grp_sync_open = 0;
     disp_grp_home_open = disp_grp_text_open = disp_grp_view_open = 0;
     disp_grp_libview_open = 0;
     disp_grp_hud_open = disp_grp_screen_open = 0;
@@ -4429,6 +4983,12 @@ int platform_grid_rows = 2;
 // accent), NOT the status-backdrop chrome, so it always matches the global look.
 int carousel_titles_on = 1;
 int single_card_title_side = 0; // 0 = left, 1 = right
+/* How much of a system's record the Single Card panel carries. Simple is the
+   two things you navigate by; Informational is the full write-up. */
+#define SINGLE_INFO_SIMPLE 0
+#define SINGLE_INFO_FULL   1
+int single_card_info_idx = SINGLE_INFO_FULL;
+const char *single_card_info_names[2] = { "Simple", "Informational" };
 const char *single_card_title_side_names[2] = { "Left", "Right" };
 
 // Platform-screen background source: 0 = per-system image (assets/backgrounds/),
@@ -4571,10 +5131,8 @@ int build_display_rows(int *row_type, int *row_extra) {
         if (home_view_idx == HOME_VIEW_APPS) D_ADD(ROW_DISP_ICON_PACK, 0);
         D_ADD(ROW_DISP_GREETING, 0);
         if (greeting_enabled) D_ADD(ROW_DISP_PLAYER_NAME, 0);
-        // Both home layouts manage their widgets directly on Home.
-        D_ADD(ROW_DISP_GRP_APPS, 0);
-        if (disp_grp_apps_open)
-            for (int _a = 0; _a < APP_COUNT; _a++) { row_type[idx] = ROW_DISP_APP_ITEM; row_extra[idx] = _a; idx++; }
+        // Which apps are pinned is set on the Apps page itself, under either
+        // home layout -- a second copy of that list here only disagreed with it.
         D_ADD(ROW_DISP_SURPRISE, 0);
     }
     // Theme & Text
@@ -4592,16 +5150,25 @@ int build_display_rows(int *row_type, int *row_extra) {
     // Systems View, and the Library View that follows from it. Both lived in
     // the Game tab for a while, which had grown crowded; they are display
     // choices, so they belong here.
+    // Presentation: how the systems and their games are laid out and drawn.
+    // Systems View used to change from the parent row itself, which made the
+    // row do two different things; it is an ordinary value on this page now,
+    // with the library's layout and its artwork beside it.
     D_ADD(ROW_DISP_GRP_VIEW, 0);
     if (disp_grp_view_open) {
+        D_ADD(ROW_DISP_SYS_VIEW, 0);
+        D_ADD(ROW_DISP_LIB_VIEW, 0);
+        D_ADD(ROW_DISP_ART_VALUE, 0);
         D_ADD(ROW_DISP_SHOW_EMPTY, 0);
         D_ADD(ROW_DISP_FAVORITES_VIEW, 0);
         // Carousel, Grid and Single Card overlay a title that can be turned
         // off. List and Bookshelf ARE their titles, so it is not offered there.
         if (platform_view_style == 1 || platform_view_style == 2)
             D_ADD(ROW_DISP_CAROUSEL_TITLES, 0);
-        if (platform_view_style == 0)
+        if (platform_view_style == 0) {
             D_ADD(ROW_DISP_SINGLE_CARD_TITLE_SIDE, 0);
+            D_ADD(ROW_DISP_SINGLE_CARD_INFO, 0);
+        }
         if (platform_view_style == 2) {
             D_ADD(ROW_DISP_PGRID_COLS, 0);
             D_ADD(ROW_DISP_PGRID_ROWS, 0);
@@ -4611,23 +5178,12 @@ int build_display_rows(int *row_type, int *row_extra) {
             // No frame-colour row: it is derived from the bar so the two always agree.
             D_ADD(ROW_DISP_LIST_TEXT_COLOR, 0);
         }
+        if (library_view_style() == 2) {   // only a Grid library has columns and rows
+            D_ADD(ROW_DISP_LIB_COLS, 0);
+            D_ADD(ROW_DISP_LIB_ROWS, 0);
+        }
         D_ADD(ROW_DISP_RST_VIEW, 0);
     }
-
-    // Library View -- was "Columns/Rows". The layout is always changeable now,
-    // even when the active Systems View supplies one of its own; it just starts
-    // out following it.
-    D_ADD(ROW_DISP_GRP_LIBVIEW, 0);
-    if (disp_grp_libview_open && library_view_style() == 2) {   // only Grid uses columns/rows
-        D_ADD(ROW_DISP_LIB_COLS, 0);
-        D_ADD(ROW_DISP_LIB_ROWS, 0);
-    }
-
-    // Which artwork the library draws. It sat under Game, but it decides how
-    // the library looks, so it belongs beside the layout that arranges it.
-    D_ADD(ROW_DISP_ART_HEADER, 0);
-    if (display_dropdown_open)
-        for (int _t = 0; _t < ART_TYPE_COUNT; _t++) { row_type[idx] = ROW_DISP_ART_ITEM; row_extra[idx] = _t; idx++; }
 
     // Backgrounds: a page of its own rather than a dropdown, because the
     // per-system list is far too long to scroll inside a crowded tab.
@@ -4656,10 +5212,27 @@ static int format_systems_view_row(int rt, char *text, size_t cap, int *indent) 
     *indent = 1;
     switch (rt) {
         case ROW_DISP_GRP_VIEW:
-            snprintf(text, cap, "%c Systems View: %s", disp_grp_view_open ? 'v' : '>',
+            snprintf(text, cap, "Presentation: %s  \xE2\x80\xBA",
                      view_style_names[(platform_view_style >= 0 && platform_view_style < VIEW_STYLE_COUNT) ? platform_view_style : 0]);
             *indent = 0;
             break;
+        case ROW_DISP_SYS_VIEW:
+            snprintf(text, cap, "Systems View: %s",
+                     view_style_names[(platform_view_style >= 0 && platform_view_style < VIEW_STYLE_COUNT) ? platform_view_style : 0]);
+            break;
+        case ROW_DISP_LIB_VIEW:
+            if (library_view_idx < 0)
+                snprintf(text, cap, "Library View: Match Systems (%s)",
+                         library_view_names[platform_view_style % VIEW_STYLE_COUNT]);
+            else
+                snprintf(text, cap, "Library View: %s", library_view_names[library_view_idx]);
+            break;
+        case ROW_DISP_ART_VALUE:
+            snprintf(text, cap, "Display Art: %s",
+                     art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0]);
+            break;
+        case ROW_DISP_LIB_COLS: snprintf(text, cap, "Library Grid Columns: %d", grid_cols); break;
+        case ROW_DISP_LIB_ROWS: snprintf(text, cap, "Library Grid Rows: %d", grid_rows); break;
         case ROW_DISP_SHOW_EMPTY:
             snprintf(text, cap, "Show Systems Without Games: %s", show_empty_systems ? "ON" : "OFF");
             break;
@@ -4673,8 +5246,12 @@ static int format_systems_view_row(int rt, char *text, size_t cap, int *indent) 
             snprintf(text, cap, "Single Card Title Side: %s",
                      single_card_title_side_names[single_card_title_side ? 1 : 0]);
             break;
-        case ROW_DISP_PGRID_COLS: snprintf(text, cap, "Grid Columns: %d", platform_grid_cols); break;
-        case ROW_DISP_PGRID_ROWS: snprintf(text, cap, "Grid Rows: %d", platform_grid_rows); break;
+        case ROW_DISP_SINGLE_CARD_INFO:
+            snprintf(text, cap, "Single Card Detail: %s",
+                     single_card_info_names[single_card_info_idx ? 1 : 0]);
+            break;
+        case ROW_DISP_PGRID_COLS: snprintf(text, cap, "Systems Grid Columns: %d", platform_grid_cols); break;
+        case ROW_DISP_PGRID_ROWS: snprintf(text, cap, "Systems Grid Rows: %d", platform_grid_rows); break;
         case ROW_DISP_LIST_BAR_COLOR:
             snprintf(text, cap, "List Bar Color: %s", list_bar_color_idx == LIST_BAR_THEME ? "Theme" : hud_chrome_colors[(list_bar_color_idx >= 0 && list_bar_color_idx < HUD_CHROME_COLOR_COUNT) ? list_bar_color_idx : 0].name);
             break;
@@ -4698,6 +5275,7 @@ static int disp_row_is_value(int rt) {
         case ROW_DISP_GRP_HUD:  case ROW_DISP_GRP_SCREEN: case ROW_DISP_GRP_STATS:
         case ROW_DISP_GRP_APPS: case ROW_DISP_GRP_WIDGETS: case ROW_DISP_STAT_GRP:
         case ROW_DISP_STAT_ITEM: case ROW_DISP_APP_ITEM: case ROW_DISP_APP_WIDGET:
+        case ROW_DISP_THEME: case ROW_DISP_CUSTOM_THEME:   // A opens the editor
         case ROW_DISP_ICON_PACK: case ROW_DISP_FONT_BOLD:
         case ROW_DISP_GREETING: case ROW_DISP_PLAYER_NAME:
         case ROW_DISP_BG_PAGE: case ROW_DISP_BG_HEADER: case ROW_DISP_BG_ITEM:
@@ -4712,6 +5290,223 @@ static int disp_row_is_value(int rt) {
         default: return 1;
     }
 }
+
+/* ---- Settings group pages -------------------------------------------------
+   Groups used to expand in place, so one tab could hold several groups open at
+   once and you scrolled past unrelated settings to reach your own. A group
+   opens as its own page now, the way Backgrounds and Screen & Power already
+   did.
+
+   No group needs a hand-written page. The tab builders already emit a group's
+   children directly after its header, and only while that group's open flag is
+   set -- so building the tab twice, once with the flag set and once clear, and
+   taking the difference, yields exactly that group's body. Nested groups and
+   conditionally-hidden rows come along for free, and a group added later
+   becomes a page by appearing in the table below and nowhere else. */
+typedef struct {
+    int tab;
+    int row;             /* the group header's row type */
+    int *open;           /* its open flag, or the base of an indexed array */
+    int indexed;         /* 1 when row_extra picks the flag out of that array */
+    const char *title;   /* page heading */
+} SettingsGroup;
+
+static const SettingsGroup settings_groups[] = {
+    { TAB_SOUND,   ROW_SND_GRP_OSUI,          &snd_grp_osui_open,     0, "OS & UI Sound" },
+    { TAB_SOUND,   ROW_SND_GRP_BOOT,          &snd_grp_boot_open,     0, "Boot Sound" },
+    { TAB_SOUND,   ROW_SND_GRP_RADIO,         &snd_grp_radio_open,    0, "Radio" },
+    { TAB_SOUND,   ROW_SND_GRP_MUSIC,         &snd_grp_music_open,    0, "Music (SD Card)" },
+
+    { TAB_DISPLAY, ROW_DISP_GRP_HOME,         &disp_grp_home_open,    0, "Home" },
+    { TAB_DISPLAY, ROW_DISP_GRP_TEXT,         &disp_grp_text_open,    0, "Theme & Text" },
+    { TAB_DISPLAY, ROW_DISP_GRP_VIEW,         &disp_grp_view_open,    0, "Presentation" },
+    { TAB_DISPLAY, ROW_DISP_GRP_HUD,          &disp_grp_hud_open,     0, "Status Bar" },
+
+    { TAB_GAME,    ROW_G_GRP_PLAY,            &game_grp_play_open,    0, "Gameplay" },
+
+    { TAB_DEVICE,  ROW_DEV_GRP_BATT,          &dev_grp_batt_open,     0, "Battery & Power" },
+    { TAB_DEVICE,  ROW_DEV_GRP_PERF,          &dev_grp_perf_open,     0, "Performance" },
+    { TAB_DEVICE,  ROW_DEV_GRP_NIGHT,         &dev_grp_night_open,    0, "Night Mode" },
+    { TAB_DEVICE,  ROW_DEV_GRP_CONNECT,       &dev_grp_connect_open,  0, "Connections" },
+    { TAB_DEVICE,  ROW_DEV_GRP_CONTROLS,      &dev_grp_controls_open, 0, "Controls" },
+    { TAB_DEVICE,  ROW_DEV_GRP_SYSTEM,        &dev_grp_system_open,   0, "System" },
+
+    { TAB_ACCOUNT, ROW_SCRAPE_HEADER,         &scrape_dropdown_open,  0, "Scraper" },
+    { TAB_ACCOUNT, ROW_SCRAPE_SERVICE_HEADER, &scrape_service_open,   0, "Source & Sign-In" },
+    { TAB_ACCOUNT, ROW_SCRAPE_SYSTEM_HEADER,  &scrape_systems_open,   0, "Systems to Scrape" },
+    { TAB_ACCOUNT, ROW_ART_HEADER,            &art_dropdown_open,     0, "Scrape Art Types" },
+    { TAB_ACCOUNT, ROW_RA_HEADER,             &ra_dropdown_open,      0, "RetroAchievements" },
+    { TAB_ACCOUNT, ROW_WALLHAVEN_HEADER,      &wallhaven_dropdown_open, 0, "WallHaven" },
+    { TAB_ACCOUNT, ROW_ONL_GRP_SYNC,          &onl_grp_sync_open,     0, "Syncthing" },
+};
+#define SETTINGS_GROUP_COUNT ((int)(sizeof settings_groups / sizeof settings_groups[0]))
+
+static const SettingsGroup *settings_group_find(int tab, int row) {
+    for (int i = 0; i < SETTINGS_GROUP_COUNT; i++)
+        if (settings_groups[i].tab == tab && settings_groups[i].row == row)
+            return &settings_groups[i];
+    return NULL;
+}
+static int *settings_group_flag(const SettingsGroup *g, int extra) {
+    return g->indexed ? g->open + extra : g->open;
+}
+
+/* Two levels is the whole depth SNAP FE uses -- a group, and at most one group
+   inside it. The third slot exists only so a mistake overflows into a spare
+   instead of past the end of the array. */
+#define SETTINGS_PAGE_DEPTH_MAX 3
+static struct { int row, extra, sel, scroll; } sgp_stack[SETTINGS_PAGE_DEPTH_MAX];
+
+#define MAX_SETTINGS_ROWS (MAX_ACCOUNT_ROWS > MAX_DISPLAY_ROWS ? MAX_ACCOUNT_ROWS : MAX_DISPLAY_ROWS)
+
+static int settings_build_tab_rows(int tab, int *rt, int *rx) {
+    if (tab == TAB_SOUND)   return build_sound_rows(rt, rx);
+    if (tab == TAB_DISPLAY) return build_display_rows(rt, rx);
+    if (tab == TAB_GAME)    return build_game_rows(rt, rx);
+    if (tab == TAB_DEVICE)  return build_device_rows(rt, rx);
+    if (tab == TAB_ACCOUNT) return build_account_rows(rt, rx);
+    return 0;
+}
+
+/* How many rows a group contributes right now: the tab built with it open,
+   less the same tab built with it closed. */
+static int settings_group_body(int tab, const SettingsGroup *g, int extra) {
+    int tmp_rt[MAX_SETTINGS_ROWS], tmp_rx[MAX_SETTINGS_ROWS];
+    int *flag = settings_group_flag(g, extra);
+    int keep = *flag;
+    *flag = 1; int open_n   = settings_build_tab_rows(tab, tmp_rt, tmp_rx);
+    *flag = 0; int closed_n = settings_build_tab_rows(tab, tmp_rt, tmp_rx);
+    *flag = keep;
+    return open_n - closed_n;
+}
+
+/* The rows the settings list should show: the whole tab at the root, or one
+   group's body while a group page is open. */
+static int settings_build_rows(int tab, int *rt, int *rx) {
+    int n = settings_build_tab_rows(tab, rt, rx);
+    for (int d = 0; d < sgp_depth; d++) {
+        const SettingsGroup *g = settings_group_find(tab, sgp_stack[d].row);
+        if (!g) return 0;
+        int body = settings_group_body(tab, g, sgp_stack[d].extra);
+        int h = -1;
+        for (int i = 0; i < n; i++)
+            if (rt[i] == g->row && (!g->indexed || rx[i] == sgp_stack[d].extra)) { h = i; break; }
+        if (h < 0 || body <= 0 || h + 1 + body > n) return 0;
+        memmove(rt, rt + h + 1, (size_t)body * sizeof *rt);
+        memmove(rx, rx + h + 1, (size_t)body * sizeof *rx);
+        n = body;
+    }
+    return n;
+}
+
+/* Not every row is somewhere the cursor can go. The device name heads the
+   Device tab because it says which handheld you are looking at, not because
+   there is anything to press on it. */
+static int settings_row_selectable(int tab, int rt) {
+    if (tab == TAB_DEVICE && rt == ROW_DEV_HEADER) return 0;
+    if (tab == TAB_ACCOUNT && (rt == ROW_SCRAPE_MAKER || rt == ROW_ART_EXTRAS_HEADER)) return 0;
+    return 1;
+}
+
+/* Rows whose value Left/Right steps through. These get the arrows either side
+   of their value, and they are the only rows a Left/Right press can have
+   changed -- on anything else it did nothing, and must not mark Settings as
+   needing a save. */
+static int settings_row_cycles(int tab, int rt) {
+    switch (tab) {
+    case TAB_SOUND:
+        return !(rt == ROW_SND_GRP_OSUI || rt == ROW_SND_GRP_BOOT || rt == ROW_SND_GRP_RADIO ||
+                 rt == ROW_SND_GRP_MUSIC || rt == ROW_SND_RESTORE);
+    case TAB_DISPLAY:
+        if (rt == ROW_DISP_THEME || rt == ROW_DISP_CUSTOM_THEME || rt == ROW_DISP_ICON_PACK ||
+            rt == ROW_DISP_FONT_BOLD || rt == ROW_DISP_GREETING) return 1;
+        return disp_row_is_value(rt);
+    case TAB_GAME:
+        return rt == ROW_G_FASTFORWARD || rt == ROW_G_FASTFWD_MODE || rt == ROW_G_AUTOSAVE ||
+               rt == ROW_G_SHOW_DESC;
+    case TAB_DEVICE:
+        return rt == ROW_DEV_POWERSAVE || rt == ROW_DEV_AUTOPS || rt == ROW_DEV_BATTERY_ICON ||
+               rt == ROW_DEV_CPU_PERF || rt == ROW_DEV_FPS_MODE || rt == ROW_DEV_PERF_OVERLAY ||
+               rt == ROW_DEV_PERF_OPACITY || rt == ROW_DEV_PERF_TEXT || rt == ROW_DEV_NIGHT ||
+               rt == ROW_DEV_NIGHT_START || rt == ROW_DEV_NIGHT_END || rt == ROW_DEV_NIGHT_BRIGHT ||
+               rt == ROW_DEV_NIGHT_HOTKEY || rt == ROW_DEV_DEVICE;
+    case TAB_ACCOUNT:
+        return rt == ROW_SCRAPE_SOURCE || rt == ROW_SCRAPE_SYSTEM_ITEM || rt == ROW_ART_ITEM ||
+               rt == ROW_SCRAPE_DESC || rt == ROW_ONLY_MISSING || rt == ROW_FIX_TITLES ||
+               rt == ROW_RA_ENABLED || rt == ROW_RA_HARDCORE || rt == ROW_RA_LEADERBOARDS ||
+               rt == ROW_RA_RICHPRESENCE || rt == ROW_ONL_SYNC;
+    }
+    return 0;
+}
+
+/* What A does on a row, where the row cannot say so itself. Themes are the
+   case: Left/Right picks one, and A opening the editor is otherwise invisible. */
+static const char *settings_row_hint(int tab, int rt) {
+    if (tab != TAB_DISPLAY) return NULL;
+    if (rt == ROW_DISP_THEME) return "A  Edit Theme";
+    if (rt == ROW_DISP_CUSTOM_THEME)
+        return custom_theme_choice < theme_count - THEME_COUNT ? "A  Edit Theme     Y  Delete" : "A  Create Theme";
+    return NULL;
+}
+static void settings_skip_unselectable(int tab, const int *rt, int n, int *sel, int dir) {
+    if (n <= 0) return;
+    if (*sel < 0) *sel = 0;
+    if (*sel >= n) *sel = n - 1;
+    for (int i = 0; i < n && !settings_row_selectable(tab, rt[*sel]); i++)
+        *sel = (*sel + dir + n) % n;
+}
+
+/* Restore to Default is the one row on a page you never want to land on by
+   accident, so it sits last with a gap above it rather than in the run of
+   values. */
+static int settings_row_is_restore(int tab, int rt) {
+    if (tab == TAB_SOUND)   return rt == ROW_SND_RESTORE;
+    if (tab == TAB_DISPLAY) return rt == ROW_DISP_RESTORE || rt == ROW_DISP_RST_TEXT ||
+                                   rt == ROW_DISP_RST_VIEW || rt == ROW_DISP_RST_HUD ||
+                                   rt == ROW_DISP_RST_BG   || rt == ROW_DISP_RST_SCREEN;
+    if (tab == TAB_GAME)    return rt == ROW_G_RESTORE;
+    if (tab == TAB_DEVICE)  return rt == ROW_DEV_RESTORE;
+    if (tab == TAB_ACCOUNT) return rt == ROW_ACCT_RESTORE;
+    return 0;
+}
+
+/* The heading a group page shows in place of the tab strip, or NULL at root. */
+const char *settings_page_heading(void) {
+    if (sgp_depth <= 0) return NULL;
+    const SettingsGroup *g = settings_group_find(current_tab, sgp_stack[sgp_depth - 1].row);
+    return g ? g->title : NULL;
+}
+
+/* Open a group as a page. Returns 0 when the row is not a group, or when the
+   group has nothing under it at the moment -- the caller then handles A as it
+   would on any other row rather than pushing an empty page. */
+int settings_group_enter(int tab, int row, int extra, int *sel, int *scroll) {
+    if (sgp_depth >= SETTINGS_PAGE_DEPTH_MAX) return 0;
+    const SettingsGroup *g = settings_group_find(tab, row);
+    if (!g) return 0;
+    if (settings_group_body(tab, g, extra) <= 0) return 0;
+    sgp_stack[sgp_depth].row = row;
+    sgp_stack[sgp_depth].extra = extra;
+    sgp_stack[sgp_depth].sel = *sel;
+    sgp_stack[sgp_depth].scroll = *scroll;
+    sgp_depth++;
+    *settings_group_flag(g, extra) = 1;
+    *sel = 0; *scroll = 0;
+    return 1;
+}
+
+/* Step back out of a group page, landing on the row you came in on. */
+int settings_group_leave(int tab, int *sel, int *scroll) {
+    if (sgp_depth <= 0) return 0;
+    sgp_depth--;
+    const SettingsGroup *g = settings_group_find(tab, sgp_stack[sgp_depth].row);
+    if (g) *settings_group_flag(g, sgp_stack[sgp_depth].extra) = 0;
+    *sel = sgp_stack[sgp_depth].sel;
+    *scroll = sgp_stack[sgp_depth].scroll;
+    return 1;
+}
+
+void settings_group_reset(void) { sgp_depth = 0; }
 
 Uint32 last_input_time = 0;
 int is_sleeping = 0;
@@ -4744,10 +5539,33 @@ typedef struct {
     float x, y, vx;
     Uint32 next_change;
     unsigned char size, color, kind;
+    /* 0 for an ordinary resident, otherwise the rare species + 1. The
+       aquarium sleep screen is where the rare fish you bought actually get
+       looked at, so the idle tank is YOUR tank, not a generic one. */
+    unsigned char rare;
 } SaverFish;
 typedef struct { float x, y, vy; unsigned char size; } SaverBubble;
 static SaverFish saver_fish[SAVER_FISH_COUNT];
 static SaverBubble saver_bubbles[SAVER_BUBBLE_COUNT];
+
+/* Which rare fish the aquarium mini-game has recorded as owned. Read from the
+   file the game writes rather than from the game's state, because the sleep
+   screen is drawn long before mini_games_extra.h is included -- so the
+   dependency only ever runs one way. Re-read each time the tank is stocked,
+   which is often enough: buying a fish and then idling shows it. */
+static int saver_tank_rares(void) {
+    char path[768];
+    snprintf(path, sizeof path, "%s/fish-helpers.cfg", sn_data_root());
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int helpers = 0, shells = 0, rares = 0;
+    if (fscanf(f, "%d", &helpers) != 1) rares = 0;
+    else if (fscanf(f, "%d", &shells) != 1) rares = 0;
+    else if (fscanf(f, "%d", &rares) != 1) rares = 0;
+    fclose(f);
+    (void)helpers; (void)shells;
+    return rares & ((1 << MGX_RARE_COUNT) - 1);
+}
 static Uint32 saver_aqua_event_at = 0, saver_aqua_event_started = 0, saver_aqua_event_until = 0;
 static int saver_aqua_event = 0;
 static int saver_dream_offset = 0;
@@ -5170,13 +5988,17 @@ int build_recent_list(int *recent_indices, int continue_idx) {
 #define ROW_H_QUICK_ACHIEVEMENTS 15
 #define ROW_H_APP_WIDGET 16
 #define ROW_H_QUICK_CALCULATOR 17
-#define MAX_HOME_ROWS 24
+#define ROW_H_QUICK_WEATHER 18
+#define ROW_H_QUICK_APPS 19
+#define ROW_H_QUICK_MESSAGES 20
+#define ROW_H_QUICK_WILDKINS 21
+#define MAX_HOME_ROWS 26
 
 // App Focused keeps the Resume tile pinned, while these launch tiles
 // can be rearranged into persistent phone-style slots. Values are stable keys,
 // not row indices (row indices change when optional apps are hidden).
-#define HOME_ORDER_COUNT 13
-int home_tile_order[HOME_ORDER_COUNT] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+#define HOME_ORDER_COUNT 16
+int home_tile_order[HOME_ORDER_COUNT] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 int home_grid_reorder = 0;
 int home_grid_dragging = 0;
 int home_grid_reorder_dirty = 0;
@@ -5197,6 +6019,9 @@ static int home_tile_key(int row_type) {
         case ROW_H_SURPRISE:        return 10;
         case ROW_H_QUICK_ACHIEVEMENTS:return 11;
         case ROW_H_QUICK_CALCULATOR:return 12;
+        case ROW_H_QUICK_WEATHER:   return 13;
+        case ROW_H_QUICK_MESSAGES:  return 14;
+        case ROW_H_QUICK_WILDKINS:  return 15;
         default:                    return -1; // Resume/Welcome are pinned
     }
 }
@@ -5216,6 +6041,30 @@ static void normalize_home_tile_order(void) {
 // always line up with what's actually drawn. recent_indices[] is filled here
 // so the caller (either input or render) can resolve ROW_H_RECENT_ITEM's
 // row_extra (a position 0..N-1) back to a real activity_records index.
+/* The one place app ids and Home row types are tied together. Both directions
+   exist because Home rows dispatch by row type while the Apps page works in
+   ids, and the two must never disagree about which app is which. */
+static int home_app_row_type(int app_id) {
+    switch (app_id) {
+        case APP_RETROARCH:    return ROW_H_QUICK_RETROARCH;
+        case APP_RADIO:        return ROW_H_QUICK_RADIO;
+        case APP_MUSIC:        return ROW_H_QUICK_MUSIC;
+        case APP_MINIGAMES:    return ROW_H_QUICK_MINIGAMES;
+        case APP_LINK:         return ROW_H_QUICK_LINK;
+        case APP_FLASHLIGHT:   return ROW_H_QUICK_FLASHLIGHT;
+        case APP_ACHIEVEMENTS: return ROW_H_QUICK_ACHIEVEMENTS;
+        case APP_CALCULATOR:   return ROW_H_QUICK_CALCULATOR;
+        case APP_WEATHER:      return ROW_H_QUICK_WEATHER;
+        case APP_MESSAGES:     return ROW_H_QUICK_MESSAGES;
+        case APP_WILDKINS:     return ROW_H_QUICK_WILDKINS;
+    }
+    return -1;
+}
+static int home_app_id_for_row(int row_type) {
+    for (int id = 0; id < APP_COUNT; id++) if (home_app_row_type(id) == row_type) return id;
+    return -1;
+}
+
 int build_home_rows(int *row_type, int *row_extra, int *recent_indices, int *recent_count_out) {
     int idx = 0;
     // Surprise is visually attached to the HOME heading, so keep it first in
@@ -5234,16 +6083,23 @@ int build_home_rows(int *row_type, int *row_extra, int *recent_indices, int *rec
     row_type[idx] = ROW_H_QUICK_FAVORITES; row_extra[idx] = 0; idx++;
     row_type[idx] = ROW_H_QUICK_SETTINGS; row_extra[idx] = 0; idx++;   // bottom of HOME
 
-    // APPS: standalone features. Order is fixed; each can be hidden via
-    // Settings > Display > Home > Home Apps (home_apps_mask).
-    if (home_apps_mask & (1 << APP_RETROARCH)) { row_type[idx] = ROW_H_QUICK_RETROARCH; row_extra[idx] = 0; idx++; }
-    if (home_apps_mask & (1 << APP_RADIO))     { row_type[idx] = ROW_H_QUICK_RADIO;     row_extra[idx] = 0; idx++; }
-    if (home_apps_mask & (1 << APP_MUSIC))     { row_type[idx] = ROW_H_QUICK_MUSIC;     row_extra[idx] = 0; idx++; }
-    if (home_apps_mask & (1 << APP_MINIGAMES)) { row_type[idx] = ROW_H_QUICK_MINIGAMES; row_extra[idx] = 0; idx++; }
-    if (home_apps_mask & (1 << APP_LINK))      { row_type[idx] = ROW_H_QUICK_LINK;      row_extra[idx] = 0; idx++; }
-    if (home_apps_mask & (1 << APP_FLASHLIGHT)) { row_type[idx] = ROW_H_QUICK_FLASHLIGHT; row_extra[idx] = 0; idx++; }  // bottom of APPS
-    if (home_apps_mask & (1 << APP_ACHIEVEMENTS)) { row_type[idx] = ROW_H_QUICK_ACHIEVEMENTS; row_extra[idx] = 0; idx++; }
-    if (home_apps_mask & (1 << APP_CALCULATOR)) { row_type[idx] = ROW_H_QUICK_CALCULATOR; row_extra[idx] = 0; idx++; }
+    // APPS: the ones pinned to Home, in the user's own order, followed by the
+    // Apps row that opens the page holding every app. Nine apps inline was a
+    // long scroll to reach the last of them; pinning keeps Home short without
+    // putting anything out of reach.
+    for (int a = 0; a < APP_COUNT; a++) {
+        int id = home_app_order[a];
+        if (id < 0 || id >= APP_COUNT) continue;
+        // App Focused already shows every app as a tile, so the pin list only
+        // filters the Informational column.
+        if (home_view_idx != HOME_VIEW_APPS && !(home_apps_mask & (1 << id))) continue;
+        int rt = home_app_row_type(id);
+        if (rt < 0) continue;
+        row_type[idx] = rt; row_extra[idx] = id; idx++;
+    }
+    // The App Focused view lays every app out as a grid already, so the page
+    // would only be a second copy of what is on screen.
+    if (home_view_idx != HOME_VIEW_APPS) { row_type[idx] = ROW_H_QUICK_APPS; row_extra[idx] = 0; idx++; }
     if (home_view_idx == HOME_VIEW_APPS && app_widget_kind != APP_WIDGET_NONE) {
         row_type[idx] = ROW_H_APP_WIDGET; row_extra[idx] = app_widget_kind; idx++;
     }
@@ -5296,6 +6152,7 @@ void load_settings() {
     FILE *f = fopen(settings_path(), "r");
     if (!f) return;
     int home_apps_schema_loaded = 0;
+    int fps_default_applied = 0;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         char *eq = strchr(line, '=');
@@ -5334,6 +6191,10 @@ void load_settings() {
             auto_sleep_idx = (val >= 0 && val < AUTO_SLEEP_COUNT) ? val : 0;
         else if (strcmp(key, "screen_saver_idx") == 0)
             screen_saver_idx = (val >= 0 && val < SCREEN_SAVER_COUNT) ? val : SCREEN_SAVER_BOUNCE;
+        else if (strcmp(key, "screen_saver_always_on") == 0) screen_saver_always_on = val ? 1 : 0;
+        else if (strcmp(key, "screen_saver_prev_idx") == 0)
+            screen_saver_prev_idx = (val >= 0 && val < SCREEN_SAVER_COUNT && val != SCREEN_SAVER_WEATHER)
+                                  ? val : SCREEN_SAVER_BOUNCE;
         else if (strcmp(key, "screen_saver_duration_idx") == 0) {
             char *end = NULL; long duration = strtol(valstr, &end, 10);
             int parsed = end && end != valstr;
@@ -5350,12 +6211,27 @@ void load_settings() {
         else if (strcmp(key, "platform_grid_rows") == 0) platform_grid_rows = val;
         else if (strcmp(key, "carousel_titles_on") == 0) carousel_titles_on = val;
         else if (strcmp(key, "single_card_title_side") == 0) single_card_title_side = val ? 1 : 0;
+        else if (strcmp(key, "single_card_info") == 0) single_card_info_idx = val ? 1 : 0;
+        else if (strcmp(key, "fps_default_v2") == 0) fps_default_applied = val;
         else if (strcmp(key, "home_widget_idx") == 0) home_widget_idx = (val >= 0 && val < HOME_WIDGET_COUNT) ? val : 1;
         else if (strcmp(key, "home_widget2_idx") == 0) home_widget2_idx = (val >= 0 && val < HOME_WIDGET_COUNT) ? val : 0;
         else if (strcmp(key, "app_widget_kind") == 0) app_widget_kind = (val >= 0 && val < APP_WIDGET_COUNT) ? val : 0;
         else if (strcmp(key, "app_widget_slot") == 0) app_widget_slot = val >= 0 ? val : 0;
         else if (strcmp(key, "home_apps_mask") == 0) home_apps_mask = val & ((1 << APP_COUNT) - 1);
-        else if (strcmp(key, "home_apps_schema") == 0) home_apps_schema_loaded = val >= 2;
+        // Comma-separated app ids. home_app_order_normalize() repairs anything
+        // short, duplicated or out of range, so a hand-edited config cannot
+        // leave an app unreachable.
+        else if (strcmp(key, "home_app_order") == 0) {
+            int n = 0;
+            for (const char *p = valstr; *p && n < APP_COUNT; ) {
+                home_app_order[n++] = atoi(p);
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+            for (int i = n; i < APP_COUNT; i++) home_app_order[i] = -1;
+            home_app_order_normalize();
+        }
+        else if (strcmp(key, "home_apps_schema") == 0) home_apps_schema_loaded = val;
         else if (strncmp(key, "home_tile_order_", 16) == 0) {
             int oi = atoi(key + 16);
             if (oi >= 0 && oi < HOME_ORDER_COUNT) home_tile_order[oi] = val;
@@ -5386,6 +6262,15 @@ void load_settings() {
         else if (strcmp(key, "font_bold") == 0) font_bold = val;
         else if (strcmp(key, "weather_loc") == 0) snprintf(weather_loc, sizeof weather_loc, "%s", valstr);
         else if (strcmp(key, "weather_unit") == 0) weather_unit = val;
+        // Legacy numeric key from 1.3.0 and earlier; "weather_style" below is
+        // what current builds write, and wins when both are present.
+        else if (strcmp(key, "weather_style_idx") == 0) weather_style_idx = weather_style_from_legacy(val);
+        else if (strcmp(key, "weather_style") == 0) weather_style_idx = weather_style_from_name(valstr);
+        else if (strcmp(key, "weather_wallpaper_enabled") == 0) weather_wallpaper_enabled = val ? 1 : 0;
+        else if (strcmp(key, "aquarium_wallpaper_enabled") == 0) aquarium_wallpaper_enabled = val ? 1 : 0;
+        else if (strcmp(key, "weather_screensaver_enabled") == 0) weather_screensaver_enabled = val ? 1 : 0;
+        else if (strcmp(key, "weather_alert_mode") == 0) weather_alert_mode = (val >= 0 && val < WEATHER_ALERT_MODE_COUNT) ? val : 1;
+        else if (strcmp(key, "weather_auto_ip") == 0) weather_auto_ip = val ? 1 : 0;
         else if (strcmp(key, "weather_last") == 0) { snprintf(g_weather_str, sizeof g_weather_str, "%s", valstr); weather_trim_plus(g_weather_str); }
         else if (strcmp(key, "weather_last_at") == 0) g_weather_at = (time_t)atol(valstr);
         else if (strcmp(key, "sunrise_minute") == 0) g_sunrise_minute = val >= 0 && val < 1440 ? val : -1;
@@ -5405,6 +6290,7 @@ void load_settings() {
         else if (strcmp(key, "launch_fullscreen") == 0) launch_fullscreen = val;
         else if (strcmp(key, "reduce_motion") == 0) reduce_motion = val;
         else if (strcmp(key, "show_fps") == 0) show_fps = val;
+        else if (strcmp(key, "fps_mode") == 0) fps_mode_idx = (val >= 0 && val < FPS_MODE_COUNT) ? val : 0;
         else if (strcmp(key, "show_perf_overlay") == 0) show_perf_overlay = val;
         else if (strcmp(key, "perf_overlay_opacity") == 0) perf_overlay_opacity = (val < 20) ? 20 : (val > 100) ? 100 : val;
         else if (strcmp(key, "perf_overlay_text_idx") == 0) perf_overlay_text_idx = (val >= 0 && val < FONT_COLOR_COUNT) ? val : 1;
@@ -5475,9 +6361,27 @@ void load_settings() {
     // existing user expects after upgrading.
     if (!menu_gesture_loaded)
         menu_triple_action = hk_flashlight_on ? MENU_ACT_FLASHLIGHT : MENU_ACT_NONE;
-    // Version 2 adds Calculator. Give it to existing installs exactly once;
-    // after the migrated file is saved, a user's explicit Hidden choice wins.
-    if (!home_apps_schema_loaded) home_apps_mask |= (1 << APP_CALCULATOR);
+    // Version 2 adds Calculator; version 4 force-shows the new Weather app
+    // once for existing installs that may have saved the earlier app mask.
+    if (home_apps_schema_loaded < 2) home_apps_mask |= (1 << APP_CALCULATOR);
+    if (home_apps_schema_loaded < 4) home_apps_mask |= (1 << APP_WEATHER);
+    // Version 5 changes what the mask MEANS: it used to be "show this app on
+    // Home", and every app was on, which is what made the Home column nine rows
+    // long. It is now the pin list, with the rest reachable from the Apps page,
+    // so an upgraded install starts from the pinned default instead of
+    // inheriting "everything pinned".
+    if (home_apps_schema_loaded < 5) home_apps_mask = APP_PINNED_DEFAULT;
+    // Version 6 adds Messages, which is no use to anyone it never shows to.
+    if (home_apps_schema_loaded < 6) home_apps_mask |= (1 << APP_MESSAGES);
+    // Version 8: Wildkins lives on the Apps page and is not pinned to Home by
+    // default. Test builds (schema 7) pinned it, so unpin it once on upgrade;
+    // a player can pin it again from the Apps page and it stays pinned.
+    if (home_apps_schema_loaded < 8) home_apps_mask &= ~(1 << APP_WILDKINS);
+    // The performance overlay ships on now. Existing configs saved the old
+    // OFF default, so flip it on once -- and only once, so anyone who turns
+    // it back off keeps it off.
+    if (!fps_default_applied) show_fps = 1;
+    home_app_order_normalize();
     normalize_home_tile_order();
     display_art_saved_idx = display_art_idx;
 }
@@ -5523,12 +6427,17 @@ void save_settings() {
     fprintf(f, "platform_grid_rows=%d\n", platform_grid_rows);
     fprintf(f, "carousel_titles_on=%d\n", carousel_titles_on);
     fprintf(f, "single_card_title_side=%d\n", single_card_title_side ? 1 : 0);
+    fprintf(f, "single_card_info=%d\n", single_card_info_idx ? 1 : 0);
+    fprintf(f, "fps_default_v2=1\n");
     fprintf(f, "home_widget_idx=%d\n", home_widget_idx);
     fprintf(f, "home_widget2_idx=%d\n", home_widget2_idx);
     fprintf(f, "app_widget_kind=%d\n", app_widget_kind);
     fprintf(f, "app_widget_slot=%d\n", app_widget_slot);
     fprintf(f, "home_apps_mask=%d\n", home_apps_mask);
-    fprintf(f, "home_apps_schema=2\n");
+    fprintf(f, "home_app_order=");
+    for (int i = 0; i < APP_COUNT; i++) fprintf(f, "%s%d", i ? "," : "", home_app_order[i]);
+    fprintf(f, "\n");
+    fprintf(f, "home_apps_schema=8\n");
     for (int i = 0; i < HOME_ORDER_COUNT; i++)
         fprintf(f, "home_tile_order_%d=%d\n", i, home_tile_order[i]);
     fprintf(f, "hk_flashlight_btn=%d\n", hk_flashlight_btn);
@@ -5551,6 +6460,14 @@ void save_settings() {
     fprintf(f, "font_bold=%d\n", font_bold);
     fprintf(f, "weather_loc=%s\n", weather_loc);
     fprintf(f, "weather_unit=%d\n", weather_unit);
+    // By name, not index: the removal of the 8-Bit / 16-Bit styles renumbered
+    // the list, so an index alone is ambiguous across versions.
+    fprintf(f, "weather_style=%s\n", weather_style_names[weather_style_current()]);
+    fprintf(f, "weather_wallpaper_enabled=%d\n", weather_wallpaper_enabled);
+    fprintf(f, "aquarium_wallpaper_enabled=%d\n", aquarium_wallpaper_enabled);
+    fprintf(f, "weather_screensaver_enabled=%d\n", weather_screensaver_enabled);
+    fprintf(f, "weather_alert_mode=%d\n", weather_alert_mode);
+    fprintf(f, "weather_auto_ip=%d\n", weather_auto_ip);
     fprintf(f, "weather_last=%s\n", g_weather_str);
     fprintf(f, "weather_last_at=%ld\n", (long)g_weather_at);
     fprintf(f, "sunrise_minute=%d\n", g_sunrise_minute);
@@ -5570,6 +6487,7 @@ void save_settings() {
     fprintf(f, "launch_fullscreen=%d\n", launch_fullscreen);
     fprintf(f, "reduce_motion=%d\n", reduce_motion);
     fprintf(f, "show_fps=%d\n", show_fps);
+    fprintf(f, "fps_mode=%d\n", fps_mode_idx);
     fprintf(f, "show_perf_overlay=%d\n", show_perf_overlay);
     fprintf(f, "perf_overlay_opacity=%d\n", perf_overlay_opacity);
     fprintf(f, "perf_overlay_text_idx=%d\n", perf_overlay_text_idx);
@@ -6976,10 +7894,6 @@ static void draw_calendar_reminder_popup(SDL_Renderer *ren, Theme *th) {
 }
 
 static void draw_calculator_app(SDL_Renderer *ren, Theme *th) {
-    static const char *keys[16] = {
-        "7", "8", "9", "/", "4", "5", "6", "x",
-        "1", "2", "3", "-", "0", ".", "+", "="
-    };
     draw_dock_logo(ren, font_small);
     int panel_w = WIN_W > 680 ? 430 : WIN_W - 100;
     int px = (WIN_W - panel_w) / 2, py = 64, display_h = 70;
@@ -7009,7 +7923,7 @@ static void draw_calculator_app(SDL_Renderer *ren, Theme *th) {
             SDL_SetRenderDrawColor(ren, g_ui_text.r, g_ui_text.g, g_ui_text.b, 255);
             SDL_RenderDrawRect(ren, &kb);
         }
-        SDL_Texture *kt = render_text(ren, font_small_bold ? font_small_bold : font_small, keys[i],
+        SDL_Texture *kt = render_text(ren, font_small_bold ? font_small_bold : font_small, calc_key_labels[i],
                                       (c == 3 || i == 14) ? th->bg : g_ui_text);
         int kw, kh; SDL_QueryTexture(kt, NULL, NULL, &kw, &kh);
         SDL_RenderCopy(ren, kt, NULL, &(SDL_Rect){ kb.x + (kb.w - kw) / 2, kb.y + (kb.h - kh) / 2, kw, kh });
@@ -7020,6 +7934,78 @@ static void draw_calculator_app(SDL_Renderer *ren, Theme *th) {
     SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ (WIN_W - hw) / 2, WIN_H - hh - 7, hw, hh });
 }
 
+// --- Calculator as a widget ------------------------------------------------
+// The full app still exists and is unchanged; this is a second way to reach the
+// same calculator state, small enough for a Home widget slot. It is live rather
+// than a launcher: while the widget holds focus the d-pad walks the keypad and
+// A presses, exactly as in the app, and B hands focus back so it can never trap
+// the user. Both views share this state, so a sum started in the widget is
+// still there when the app opens.
+//
+// Height the keypad needs before it is worth drawing at all; below this the
+// widget shows the running value on its own.
+#define CALC_WIDGET_MIN_PAD_H 62
+
+static int calculator_widget_key(SDL_Keycode key) {
+    int row = calculator_selected / 4, col = calculator_selected % 4;
+    if (key == SDLK_LEFT)       { calculator_selected = row * 4 + (col + 3) % 4; return 1; }
+    if (key == SDLK_RIGHT)      { calculator_selected = row * 4 + (col + 1) % 4; return 1; }
+    if (key == SDLK_UP)         { calculator_selected = ((row + 3) % 4) * 4 + col; return 1; }
+    if (key == SDLK_DOWN)       { calculator_selected = ((row + 1) % 4) * 4 + col; return 1; }
+    if (key == SDLK_RETURN)     { calculator_press(calc_keys[calculator_selected]); return 1; }
+    if (key == SDLK_s)          { calculator_reset(); return 1; }        // X
+    if (key == SDLK_f)          { calculator_backspace(); return 1; }    // Y
+    return 0;
+}
+
+// Draw the calculator into `box`. Returns the height it actually used, so the
+// informational slot can size its focus ring around real content.
+static int draw_calculator_widget(SDL_Renderer *ren, Theme *th, SDL_Rect box, int focused) {
+    if (box.w < 90 || box.h < 26) return 0;
+    int pad = 6;
+    TTF_Font *vf = box.h >= 96 ? (font_small ? font_small : font_label) : font_label;
+    SDL_Texture *vt = render_text_fit(ren, vf, calculator_display,
+                                      calculator_error ? (SDL_Color){ 236, 150, 150, 255 } : g_ui_text,
+                                      box.w - 16);
+    int vw, vh; SDL_QueryTexture(vt, NULL, NULL, &vw, &vh);
+    SDL_Rect display = { box.x, box.y, box.w, vh + 10 };
+    fill_rounded(ren, display, 7, th->select_bg.r, th->select_bg.g, th->select_bg.b, 225);
+    SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 170);
+    SDL_RenderDrawRect(ren, &display);
+    SDL_RenderCopy(ren, vt, NULL, &(SDL_Rect){ display.x + display.w - vw - 8,
+                                               display.y + (display.h - vh) / 2, vw, vh });
+
+    int pad_top = display.y + display.h + pad;
+    int pad_h = box.y + box.h - pad_top;
+    if (pad_h < CALC_WIDGET_MIN_PAD_H) return display.h;
+
+    int gap = 3;
+    int key_w = (box.w - 3 * gap) / 4, key_h = (pad_h - 3 * gap) / 4;
+    TTF_Font *kf = key_h >= 26 ? (font_label_bold ? font_label_bold : font_label)
+                               : (font_fixed ? font_fixed : font_label);
+    for (int i = 0; i < 16; i++) {
+        int r = i / 4, c = i % 4;
+        SDL_Rect kb = { box.x + c * (key_w + gap), pad_top + r * (key_h + gap), key_w, key_h };
+        int sel = focused && i == calculator_selected;
+        // The operator column and "+" stay accented so the pad still reads as a
+        // calculator at this size; only the focused key inverts.
+        SDL_Color base = (c == 3 || i == 14) ? th->accent2 : th->select_bg;
+        fill_rounded(ren, kb, 6, base.r, base.g, base.b, sel ? 250 : focused ? 200 : 150);
+        if (sel) {
+            SDL_SetRenderDrawColor(ren, g_ui_text.r, g_ui_text.g, g_ui_text.b, 255);
+            SDL_RenderDrawRect(ren, &kb);
+        }
+        SDL_Texture *kt = render_text_fit(ren, kf, calc_key_labels[i],
+                                          (c == 3 || i == 14) ? th->bg : g_ui_text, key_w - 4);
+        int kw, kh; SDL_QueryTexture(kt, NULL, NULL, &kw, &kh);
+        SDL_RenderCopy(ren, kt, NULL, &(SDL_Rect){ kb.x + (kb.w - kw) / 2, kb.y + (kb.h - kh) / 2, kw, kh });
+    }
+    return display.h + pad + 4 * key_h + 3 * gap;
+}
+
+// Shared with the Weather app; defined alongside the rest of its helpers.
+static const char *weather_age_text(void);
+
 static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
                              int region_top, int region_bot, int wmaxw,
                              int anchor_bottom) {
@@ -7027,6 +8013,52 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
     if (kind == HOME_WIDGET_NONE) return;
     if (region_bot - region_top < 28) return;
     Theme *th = theme_for_frame();
+
+    // ---------------- Calculator: the real keypad, widget-sized ------------
+    if (kind == HOME_WIDGET_CALC) {
+        int slot = anchor_bottom ? 2 : 1;
+        int focused = home_recent_focus_slot == slot;
+        int hint_h = TTF_FontHeight(font_label);
+        int header_h = TTF_FontHeight(font_small_bold ? font_small_bold : font_small) + 8;
+        int room = region_bot - region_top - header_h - hint_h - 6;
+        if (room < 34) room = 34;
+        // Give the keypad what it needs and no more, so the widget sits at its
+        // natural height rather than stretching to fill the region.
+        int want = 34 + CALC_WIDGET_MIN_PAD_H + 40;
+        int body_h = room < want ? room : want;
+        int total = header_h + body_h + hint_h + 4;
+        int wy = anchor_bottom ? region_bot - total : region_top;
+        if (wy < region_top) wy = region_top;
+        home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
+
+        if (focused) {
+            SDL_Rect fr = { wx - 10, wy - 6, wmaxw + 18,
+                            (total + 10 < region_bot - wy + 6) ? total + 10 : region_bot - wy + 6 };
+            SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 230);
+            SDL_RenderFillRect(ren, &fr);
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+            SDL_RenderDrawRect(ren, &fr);
+            SDL_Rect inner = { fr.x + 1, fr.y + 1, fr.w - 2, fr.h - 2 };
+            SDL_RenderDrawRect(ren, &inner);
+        }
+
+        SDL_Texture *ht = render_text(ren, font_small_bold ? font_small_bold : font_small, "CALCULATOR", th->accent2);
+        int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
+        SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ wx, wy, hw, hh });
+        SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+        SDL_RenderFillRect(ren, &(SDL_Rect){ wx, wy + hh + 2, hw + 10, 2 });
+        wy += header_h;
+
+        int used = draw_calculator_widget(ren, th, (SDL_Rect){ wx, wy, wmaxw, body_h }, focused);
+        wy += used > 0 ? used + 4 : body_h + 4;
+
+        SDL_Texture *hint = render_text_fit(ren, font_label,
+            focused ? "A Press   X Clear   Y Delete   B Back" : "",
+            focused ? th->accent2 : g_ui_dim, wmaxw);
+        int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
+        if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
+        return;
+    }
 
     // ---------------- Calendar: a useful current-week glance --------------
     // The widget itself never browses or remembers another date. A opens the
@@ -7074,7 +8106,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         wy += strip_h;
 
         SDL_Texture *hint = render_text_fit(ren, font_label,
-            focused ? "A  Open Calendar     B  Back" : "Right  Focus",
+            focused ? "A  Open Calendar     B  Back" : "",
             focused ? th->accent2 : g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
@@ -7128,7 +8160,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
             }
         }
         SDL_Texture *hint = render_text_fit(ren, font_label,
-            focused ? "D-Pad  Choose    A  Play    B  Back" : "Right  Focus for quick launch",
+            focused ? "D-Pad  Choose    A  Play    B  Back" : "",
             focused ? th->accent2 : g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
@@ -7194,6 +8226,8 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
 
     // ---------------- Music player: track + transport buttons ----------------
     if (kind == HOME_WIDGET_MUSIC) {
+        int slot = anchor_bottom ? 2 : 1;
+        int focused = home_recent_focus_slot == slot;
         int hth   = TTF_FontHeight(font_small_bold);
         int nameh = TTF_FontHeight(font_small);
         int box   = TTF_FontHeight(font_label) + 14;
@@ -7202,6 +8236,19 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         int wy = anchor_bottom ? (region_bot - total) : region_top;
         if (wy < region_top) wy = region_top;
         home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
+
+        // This was the one focusable card with no highlight -- it took focus and
+        // opened on A, but gave no sign it was selected.
+        if (focused) {
+            SDL_Rect fr = { wx - 10, wy - 6, wmaxw + 18,
+                            (total + 10 < region_bot - wy + 6) ? total + 10 : region_bot - wy + 6 };
+            SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 230);
+            SDL_RenderFillRect(ren, &fr);
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+            SDL_RenderDrawRect(ren, &fr);
+            SDL_Rect inner = { fr.x + 1, fr.y + 1, fr.w - 2, fr.h - 2 };
+            SDL_RenderDrawRect(ren, &inner);
+        }
 
         SDL_Texture *ht = render_text(ren, font_small_bold, "MUSIC PLAYER", th->accent2);
         int hw, hh2; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh2);
@@ -7222,22 +8269,33 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         if (wy + nh <= region_bot) SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ wx, wy, nw, nh });
         wy += nameh + 6;
 
+        // Three transport buttons, driven Left/Right with A -- so the card is
+        // usable without opening the app. Left off the first one hands focus
+        // back to the list; Up/Down move to the other card.
         int gap = 14;
-        int gk1 = (music_playing < 0 || music_paused) ? MG_PLAY : MG_PAUSE;
-        int gks[2] = { MG_PREV, gk1 };
-        const char *keys[2] = { "L1", "Sel" };
-        for (int b = 0; b < 2; b++) {
+        int gks[MUSIC_BTN_COUNT] = {
+            MG_PREV,
+            (music_playing < 0 || music_paused) ? MG_PLAY : MG_PAUSE,
+            MG_NEXT
+        };
+        for (int b = 0; b < MUSIC_BTN_COUNT; b++) {
             int bx = wx + b * (box + gap);
             if (wy + box > region_bot) break;
-            SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 170);
+            int on = focused && b == home_music_btn;
+            SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, on ? 245 : 170);
             SDL_RenderFillRect(ren, &(SDL_Rect){ bx, wy, box, box });
-            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 220);
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, on ? 255 : 220);
             SDL_RenderDrawRect(ren, &(SDL_Rect){ bx, wy, box, box });
-            draw_media_glyph(ren, bx + box/2, wy + box/2, box/2, gks[b], g_ui_text);
-            SDL_Texture *kt = render_text(ren, font_label, keys[b], g_ui_dim);
-            int kw, kh; SDL_QueryTexture(kt, NULL, NULL, &kw, &kh);
-            if (wy + box + 4 + kh <= region_bot)
-                SDL_RenderCopy(ren, kt, NULL, &(SDL_Rect){ bx + box/2 - kw/2, wy + box + 4, kw, kh });
+            if (on) SDL_RenderDrawRect(ren, &(SDL_Rect){ bx - 2, wy - 2, box + 4, box + 4 });
+            draw_media_glyph(ren, bx + box/2, wy + box/2, box/2, gks[b],
+                             on ? th->accent2 : g_ui_text);
+        }
+        if (focused) {
+            SDL_Texture *hint = render_text_fit(ren, font_label,
+                "Left/Right  Choose    A  Use    B  Back", th->accent2, wmaxw);
+            int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
+            if (wy + box + 6 + ih <= region_bot)
+                SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy + box + 6, iw, ih });
         }
         return;
     }
@@ -7283,7 +8341,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
             if (wy + eh2 <= region_bot) SDL_RenderCopy(ren, e2, NULL, &(SDL_Rect){ wx, wy, ew2, eh2 });
             wy += eh2 + 4;
             SDL_Texture *hint = render_text_fit(ren, font_label,
-                focused ? "A  Open Radio     B  Back" : "Right  Focus",
+                focused ? "A  Open Radio     B  Back" : "",
                 focused ? th->accent2 : g_ui_dim, wmaxw);
             int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
             if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
@@ -7331,7 +8389,7 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         wy += nameh + 4;
 
         SDL_Texture *hint = render_text_fit(ren, font_label,
-            focused ? "Up/Down  Tune    A  Play/Stop    B  Back" : "Right  Focus",
+            focused ? "Up/Down  Tune    A  Play/Stop    B  Back" : "",
             focused ? th->accent2 : g_ui_dim, wmaxw);
         int iw, ih; SDL_QueryTexture(hint, NULL, NULL, &iw, &ih);
         if (wy + ih <= region_bot) SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ wx, wy, iw, ih });
@@ -7341,17 +8399,37 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
     // ---------------- Now Playing: the last game's cover, big + clickable ----
     if (kind == HOME_WIDGET_NOWPLAY) {
         int npi = most_recently_played_index();
+        int slot = anchor_bottom ? 2 : 1;
+        int np_focused = home_recent_focus_slot == slot;
         int hth = TTF_FontHeight(font_small_bold);
-        int nameh = TTF_FontHeight(font_small);
-        int subh = TTF_FontHeight(font_label);
+        // The title used to render at font_small and the cover was capped at
+        // 150px whatever room there was, which on a short slot left the art and
+        // the text jammed against each other with the system name wedged
+        // between. The cover is the thing worth looking at, so it takes the
+        // room; the title is the smaller face; the system name is gone (the box
+        // art already says which system it is).
+        int nameh = TTF_FontHeight(font_label);
         int hinth = TTF_FontHeight(font_label);
-        int art_side = region_bot - region_top - (hth + 10) - (nameh + 4) - (subh + 4) - (hinth + 6);
-        if (art_side > wmaxw) art_side = wmaxw;
-        if (art_side > 150) art_side = 150;
-        int total = (hth + 10) + (art_side > 24 ? art_side + 8 : 0) + (nameh + 4) + (subh + 4) + hinth;
+        int art_side = region_bot - region_top - (hth + 10) - (nameh + 6) - (hinth + 8);
+        if (art_side > wmaxw - 8) art_side = wmaxw - 8;
+        if (art_side > 190) art_side = 190;
+        int total = (hth + 10) + (art_side > 24 ? art_side + 8 : 0) + (nameh + 6) + hinth;
         int wy = anchor_bottom ? (region_bot - total) : region_top;
         if (wy < region_top) wy = region_top;
         home_widget_draw_top[anchor_bottom ? 1 : 0] = wy;
+
+        // Informational widgets sit outside the row list, so being focused has
+        // to be unmistakable -- the same treatment Calendar gets.
+        if (np_focused) {
+            SDL_Rect fr = { wx - 10, wy - 6, wmaxw + 18,
+                            (total + 12 < region_bot - wy + 6) ? total + 12 : region_bot - wy + 6 };
+            SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 230);
+            SDL_RenderFillRect(ren, &fr);
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
+            SDL_RenderDrawRect(ren, &fr);
+            SDL_Rect inner = { fr.x + 1, fr.y + 1, fr.w - 2, fr.h - 2 };
+            SDL_RenderDrawRect(ren, &inner);
+        }
 
         SDL_Texture *ht = render_text(ren, font_small_bold, "NOW PLAYING", th->accent2);
         int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
@@ -7388,25 +8466,27 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
             else { np_op[0]=np_op[1]=0; np_op[2]=np_op[3]=255; }
             snprintf(np_key, sizeof np_key, "%s", activity_records[npi].path);
         }
+        // Everything below is centred on the card rather than left-aligned:
+        // one column of cover, title and hint reads as a unit instead of three
+        // ragged lines beside a square.
+        int cx = wx + wmaxw / 2;
         if (np_art && art_side > 24) {
-            SDL_Rect ab = { wx, wy, art_side, art_side };
+            SDL_Rect ab = { cx - art_side / 2, wy, art_side, art_side };
             SDL_Rect fit = fit_rect_for_texture(np_art, ab);
             if (np_shadow) draw_silhouette_shadow(ren, np_shadow, fit, selection_shadow_color());
             else           draw_soft_shadow(ren, art_tight_rect(fit, np_op), selection_shadow_color());
             SDL_RenderCopy(ren, np_art, NULL, &fit);
             wy += art_side + 8;
         }
-        SDL_Texture *tt = render_text_fit(ren, font_small, activity_records[npi].title, g_ui_text, wmaxw);
+        SDL_Texture *tt = render_text_fit(ren, font_label, activity_records[npi].title, g_ui_text, wmaxw);
         int tw2, th2; SDL_QueryTexture(tt, NULL, NULL, &tw2, &th2);
-        SDL_RenderCopy(ren, tt, NULL, &(SDL_Rect){ wx, wy, tw2, th2 });
-        wy += nameh + 4;
-        SDL_Texture *st = render_text_fit(ren, font_label, platform_display_name(activity_records[npi].platform_dir), g_ui_dim, wmaxw);
-        int sw2, sh2; SDL_QueryTexture(st, NULL, NULL, &sw2, &sh2);
-        SDL_RenderCopy(ren, st, NULL, &(SDL_Rect){ wx, wy, sw2, sh2 });
-        wy += subh + 4;
-        SDL_Texture *pl = render_text_fit(ren, font_label, "Y: Play", th->accent2, wmaxw);
+        SDL_RenderCopy(ren, tt, NULL, &(SDL_Rect){ cx - tw2 / 2, wy, tw2, th2 });
+        wy += nameh + 6;
+        SDL_Texture *pl = render_text_fit(ren, font_label,
+            np_focused ? "A  Play     B  Back" : "",
+            np_focused ? th->accent2 : g_ui_dim, wmaxw);
         int pw2, ph2; SDL_QueryTexture(pl, NULL, NULL, &pw2, &ph2);
-        if (wy + ph2 <= region_bot) SDL_RenderCopy(ren, pl, NULL, &(SDL_Rect){ wx, wy, pw2, ph2 });
+        if (wy + ph2 <= region_bot) SDL_RenderCopy(ren, pl, NULL, &(SDL_Rect){ cx - pw2 / 2, wy, pw2, ph2 });
         return;
     }
 
@@ -7495,7 +8575,11 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
     int fresh_adv = (kind == HOME_WIDGET_WEATHER) ? TTF_FontHeight(font_label) : 0;
     TTF_Font *hint_font = font_fixed ? font_fixed : font_label;
     int hint_width = 0, hint_height = 0;
-    if (place_widget) TTF_SizeUTF8(hint_font, "A Locations   Up/Down Zones", &hint_width, &hint_height);
+    // Measure the longest hint this card can show, not a shorter stand-in --
+    // the position counter appended below made the real line wider than what
+    // was being measured, so it would have been ellipsised on one line instead
+    // of wrapping onto two.
+    if (place_widget) TTF_SizeUTF8(hint_font, "A  Weather App", &hint_width, &hint_height);
     int hint_lines = hint_width > wmaxw ? 2 : 1;
     int hint_adv = place_widget ? TTF_FontHeight(hint_font) * hint_lines + 8 : 0;
     if (place_widget && big_h > 0) {
@@ -7587,15 +8671,13 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
         wy += (misz > t2h ? misz : t2h) + 3;
     }
     if (kind == HOME_WIDGET_WEATHER) {
+        // One phrasing shared with the app, plus the refresh key -- this is the
+        // one place the card can say how stale its reading is.
         char fresh[64];
-        if (weather_refreshing() || SDL_GetTicks() < g_weather_refresh_msg_until) snprintf(fresh, sizeof fresh, "Refreshing...");
-        else if (g_weather_failed) snprintf(fresh, sizeof fresh, "Refresh unavailable - retrying");
-        else if (g_weather_at) {
-            long mins = (long)((time(NULL) - g_weather_at) / 60);
-            if (mins <= 0)      snprintf(fresh, sizeof fresh, "Updated Just Now   -   Y: Refresh");
-            else if (mins < 60) snprintf(fresh, sizeof fresh, "Updated %ldm Ago   -   Y: Refresh", mins);
-            else                snprintf(fresh, sizeof fresh, "Updated %ldh Ago   -   Y: Refresh", mins / 60);
-        } else snprintf(fresh, sizeof fresh, "Y: Refresh");
+        const char *age = weather_age_text();
+        if (g_weather_failed) snprintf(fresh, sizeof fresh, "Unavailable - retrying   Y Refresh");
+        else if (age[0])      snprintf(fresh, sizeof fresh, "%s   Y Refresh", age);
+        else                  snprintf(fresh, sizeof fresh, "Y Refresh");
         SDL_Texture *frt = render_text_fit(ren, font_label, fresh, th->accent2, wmaxw);
         int frw, frh; SDL_QueryTexture(frt, NULL, NULL, &frw, &frh);
         if (wy + frh <= wbot) SDL_RenderCopy(ren, frt, NULL, &(SDL_Rect){ wx, wy, frw, frh });
@@ -7603,11 +8685,20 @@ static void draw_home_widget(SDL_Renderer *ren, int kind, int wx,
     if (place_widget) {
         int hint_bottom = home_widget_draw_top[anchor_bottom ? 1 : 0] + total_h;
         if (hint_bottom > region_bot) hint_bottom = region_bot;
+        // Say where in the list this card is, and how long the list is. The
+        // hint used to promise "Up/Down Zones" even when the widget's group had
+        // exactly one saved place, so pressing Up/Down correctly did nothing
+        // and looked broken. Clock and Date cycle the Time Locations list;
+        // Weather and Date & Weather cycle the Weather Locations list -- two
+        // separate lists, which is easy to be caught out by.
+        // "2/4 saved" said nothing the card itself does not: the place name is
+        // right there, and the list is one press away. Unfocused shows nothing
+        // at all -- d-pad navigation needs no caption.
         for (int line = 0; line < hint_lines; line++) {
-            if (!place_focused && line < hint_lines - 1) continue;
-            const char *hint = !place_focused ? "Right  Select" : hint_lines == 1 ?
-                "A Locations   Up/Down Zones" : line == 0 ? "A Locations" : "Up/Down Zones";
-            SDL_Texture *ht = render_text_fit(ren, hint_font, hint, place_focused ? g_ui_text : g_ui_dim, wmaxw);
+            if (!place_focused) break;
+            if (line < hint_lines - 1) continue;
+            const char *hint = widget_place_family(kind) ? "A  Weather App" : "A  Locations";
+            SDL_Texture *ht = render_text_fit(ren, hint_font, hint, g_ui_text, wmaxw);
             int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
             int hy = hint_bottom - (hint_lines - line) * TTF_FontHeight(hint_font);
             SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ wx, hy, hw, hh });
@@ -8286,7 +9377,11 @@ static void surface_opaque_bbox(SDL_Surface *s, unsigned char op[4]) {
 // SDL_SetTextureColorMod can tint it any colour (black for a normal shadow, a
 // light colour for a luminous halo on dark themes); a black bake would make
 // the colour-mod multiply to zero and ignore the tint.
-static SDL_Texture *make_silhouette_shadow(SDL_Renderer *ren, SDL_Surface *src) {
+// The surface half, split out so the background art thread can do this work
+// instead of the main thread: it is a full-surface format conversion plus a
+// box-filtered downscale, which is exactly the kind of thing that showed up as
+// a hitch every time a cover landed mid-scroll. No renderer is touched.
+static SDL_Surface *make_silhouette_shadow_surface(SDL_Surface *src) {
     if (!src || src->w < 8 || src->h < 8) return NULL;
     SDL_Surface *c = (src->format->format == SDL_PIXELFORMAT_RGBA32) ? src
                      : SDL_ConvertSurfaceFormat(src, SDL_PIXELFORMAT_RGBA32, 0);
@@ -8315,10 +9410,21 @@ static SDL_Texture *make_silhouette_shadow(SDL_Renderer *ren, SDL_Surface *src) 
     }
     SDL_UnlockSurface(out); SDL_UnlockSurface(c);
     if (c != src) SDL_FreeSurface(c);
+    return out;
+}
+
+// Upload half. Callers that already have the surface (the art thread) skip
+// straight to shadow_tex_from_surface() instead.
+static SDL_Texture *shadow_tex_from_surface(SDL_Renderer *ren, SDL_Surface *out) {
+    if (!out) return NULL;
     SDL_Texture *t = SDL_CreateTextureFromSurface(ren, out);
     SDL_FreeSurface(out);
     if (t) SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
     return t;
+}
+
+static SDL_Texture *make_silhouette_shadow(SDL_Renderer *ren, SDL_Surface *src) {
+    return shadow_tex_from_surface(ren, make_silhouette_shadow_surface(src));
 }
 
 // Draw a compact alpha-shaped lift around transparent artwork. The old version
@@ -9015,6 +10121,9 @@ void poll_scrape_status(SDL_Renderer *ren, TTF_Font *font_label, int platform) {
 // card has scraped art. Finished decodes are uploaded to textures on the main
 // thread a few per frame. A small MRU ring bounds how many textures we hold.
 #define ART_CACHE_CAP 96
+// Covers this close to the cursor are never the eviction victim: they are what
+// the next few flips will land on, in either direction.
+#define ART_KEEP_NEAR 12
 static int art_ring[ART_CACHE_CAP];
 static int art_ring_n = 0, art_ring_head = 0;
 
@@ -9033,14 +10142,36 @@ static SDL_Texture *art_pending_tex(SDL_Renderer *ren) {
 }
 
 // --- Background cover decoder ---------------------------------------------
-typedef struct { int gen, idx, art_idx; char pdir[16]; char raw[160]; } ArtReq;
-typedef struct { int gen, idx; SDL_Surface *surf; } ArtDone;
+// `backdrop`: the carousel's full-bleed screenshot behind the highlighted game,
+// rather than a cover. Those used to be decoded synchronously on the render
+// thread, one per frame -- a whole PNG decode plus a downscale inside the frame
+// budget, which is why a cartridge and its background only appeared after
+// sitting on it for a couple of seconds, and why scrolling stuttered while it
+// happened. They now travel the same async path as covers.
+// What a queued decode is for. All of them used to be done on the render
+// thread by whichever view needed them, one per frame at best -- which is why
+// the Cartridges and Carousel views only filled in the card you were sitting on.
+#define ART_KIND_COVER    0   /* games[].box_art, with shadow + opaque bbox */
+#define ART_KIND_BACKDROP 1   /* full-bleed screenshot behind the carousel     */
+#define ART_KIND_CART     2   /* the cartridge art, with its silhouette        */
+#define ART_KIND_BOOK     3   /* the bookshelf page's screenshot, art_idx = slot */
+typedef struct { int gen, idx, art_idx, kind; char pdir[16]; char raw[160]; } ArtReq;
+// The worker hands back everything the main thread would otherwise have to
+// compute: the art already converted to the upload format, its opaque bounding
+// box, and the finished shadow surface. All the main thread does with one of
+// these is the texture upload.
+typedef struct { int gen, idx, kind; SDL_Surface *surf, *shadow; unsigned char op[4]; } ArtDone;
 #define ART_Q_CAP 96
 #define ART_DONE_CAP 96
+// One decoder could not keep up: a scraped cover is a full-size PNG decode plus
+// a CPU downscale, and the handheld has four cores sitting idle while the queue
+// backs up. Three workers share the queue, so a flick through five cards is
+// three decodes deep instead of one.
+#define ART_WORKERS 3
 
 static SDL_mutex  *art_mtx = NULL;
 static SDL_cond   *art_cv  = NULL;
-static SDL_Thread *art_thr = NULL;
+static SDL_Thread *art_thr[ART_WORKERS];
 static int art_thr_run = 1;
 static int art_gen = 0;                  // bumped when games[] is replaced
 static ArtReq  art_q[ART_Q_CAP];    static int art_q_head = 0,   art_q_n = 0;
@@ -9060,28 +10191,56 @@ static int art_worker(void *unused) {
         if (stale) continue;
 
         SDL_Surface *s = load_cached_art_surface(r.pdir, r.raw, r.art_idx);
+        // A backdrop is the screenshot, falling back to the title screen. Doing
+        // that fallback here keeps the whole decision off the render thread.
+        if (!s && r.kind == ART_KIND_BACKDROP) s = load_cached_art_surface(r.pdir, r.raw, 3);
+        SDL_Surface *shadow = NULL;
+        unsigned char op[4] = { 0, 0, 255, 255 };
+        // Backdrops are drawn full-bleed behind everything, so they need
+        // neither an opaque bounding box nor a silhouette shadow.
+        if (s && r.kind != ART_KIND_BACKDROP) {
+            // Convert once, here, so neither of the two passes below -- nor the
+            // upload on the main thread -- has to copy the whole image again.
+            if (s->format->format != SDL_PIXELFORMAT_RGBA32) {
+                SDL_Surface *conv = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_RGBA32, 0);
+                if (conv) { SDL_FreeSurface(s); s = conv; }
+            }
+            surface_opaque_bbox(s, op);
+            shadow = make_silhouette_shadow_surface(s);
+        }
 
         SDL_LockMutex(art_mtx);
         if (r.gen == art_gen && art_done_n < ART_DONE_CAP) {
-            art_done[(art_done_head + art_done_n) % ART_DONE_CAP] = (ArtDone){ r.gen, r.idx, s };
+            ArtDone *d = &art_done[(art_done_head + art_done_n) % ART_DONE_CAP];
+            d->gen = r.gen; d->idx = r.idx; d->kind = r.kind;
+            d->surf = s; d->shadow = shadow;
+            memcpy(d->op, op, sizeof op);
             art_done_n++;
-            s = NULL;
+            s = NULL; shadow = NULL;
         }
         SDL_UnlockMutex(art_mtx);
-        if (s) SDL_FreeSurface(s);        // couldn't hand it off -> drop
+        if (s) SDL_FreeSurface(s);             // couldn't hand it off -> drop
+        if (shadow) SDL_FreeSurface(shadow);
     }
 }
 
 static void art_async_start(void) {
     art_mtx = SDL_CreateMutex();
     art_cv  = SDL_CreateCond();
-    art_thr = SDL_CreateThread(art_worker, "art", NULL);
+    for (int i = 0; i < ART_WORKERS; i++) {
+        char name[16]; snprintf(name, sizeof name, "art%d", i);
+        art_thr[i] = SDL_CreateThread(art_worker, name, NULL);
+    }
 }
 static void art_async_stop(void) {
-    if (!art_thr) return;
-    SDL_LockMutex(art_mtx); art_thr_run = 0; SDL_CondSignal(art_cv); SDL_UnlockMutex(art_mtx);
-    SDL_WaitThread(art_thr, NULL);
-    art_thr = NULL;
+    if (!art_thr[0]) return;
+    // Broadcast, not signal: every worker is parked on this condition and all
+    // of them have to see the shutdown, or the join below waits forever.
+    SDL_LockMutex(art_mtx); art_thr_run = 0; SDL_CondBroadcast(art_cv); SDL_UnlockMutex(art_mtx);
+    for (int i = 0; i < ART_WORKERS; i++) {
+        if (art_thr[i]) SDL_WaitThread(art_thr[i], NULL);
+        art_thr[i] = NULL;
+    }
 }
 
 // Discard everything tied to the old games[] before it's overwritten.
@@ -9091,35 +10250,93 @@ static void art_async_reset(void) {
     art_gen++;
     art_q_head = art_q_n = 0;
     while (art_done_n > 0) {
-        SDL_Surface *s = art_done[art_done_head].surf;
-        if (s) SDL_FreeSurface(s);
+        ArtDone *d = &art_done[art_done_head];
+        if (d->surf) SDL_FreeSurface(d->surf);
+        if (d->shadow) SDL_FreeSurface(d->shadow);
         art_done_head = (art_done_head + 1) % ART_DONE_CAP;
         art_done_n--;
     }
     SDL_UnlockMutex(art_mtx);
 }
 
-static void art_enqueue(int i) {
-    if (i < 0 || i >= game_count || games[i].art_q_state != 0) return;
-    games[i].art_q_state = 1;
+// Put one decode on the queue. `backdrop` picks the carousel screenshot rather
+// than the cover; the caller owns the bookkeeping that stops it being asked for
+// twice. Returns 1 if it was actually queued.
+static int art_idx_override = 0;   /* only read for ART_KIND_BOOK */
+static int art_enqueue_kind(int i, int kind) {
+    // Before art_async_start() there is no mutex, and touching the queue counters
+    // unprotected would corrupt them the moment the workers did start.
+    if (!art_mtx || i < 0 || i >= game_count) return 0;
+    int queued = 0;
     SDL_LockMutex(art_mtx);
     if (art_q_n < ART_Q_CAP) {
         ArtReq *rq = &art_q[(art_q_head + art_q_n) % ART_Q_CAP];
-        rq->gen = art_gen; rq->idx = i; rq->art_idx = display_art_idx;
+        rq->gen = art_gen; rq->idx = i; rq->kind = kind;
+        rq->art_idx = kind == ART_KIND_BACKDROP ? 2
+                    : kind == ART_KIND_CART     ? ART_TYPE_CARTRIDGE
+                    : kind == ART_KIND_BOOK     ? art_idx_override
+                    :                             display_art_idx;
         snprintf(rq->pdir, sizeof rq->pdir, "%s", games[i].platform_dir);
         snprintf(rq->raw,  sizeof rq->raw,  "%s", games[i].raw_filename);
         art_q_n++;
+        queued = 1;
         SDL_CondSignal(art_cv);
-    } else {
-        games[i].art_q_state = 0;   // queue full; try again a later frame
     }
     SDL_UnlockMutex(art_mtx);
+    return queued;
+}
+
+static void art_enqueue(int i) {
+    if (i < 0 || i >= game_count || games[i].art_q_state != 0) return;
+    games[i].art_q_state = 1;
+    if (!art_enqueue_kind(i, ART_KIND_COVER)) games[i].art_q_state = 0;   // queue full; retry a later frame
 }
 
 // Ask for covers around `center` so an adjacent flip already has art ready.
+// Nearest-first: `center` itself, then alternating outward, so the queue (and
+// the eviction ring) fill in the order the user will actually see them.
 static void art_prefetch(int center, int back, int fwd) {
-    for (int d = -back; d <= fwd; d++) art_enqueue(center + d);
+    art_enqueue(center);
+    int far = back > fwd ? back : fwd;
+    for (int d = 1; d <= far; d++) {
+        if (d <= fwd)  art_enqueue(center + d);
+        if (d <= back) art_enqueue(center - d);
+    }
 }
+
+// Where the cursor is, so eviction can avoid throwing away art the user is
+// about to scroll onto. -1 means "no library on screen".
+static int art_cursor = -1;
+static int art_cursor_dir = 1;
+
+// How far to look ahead of the cursor and how far to keep behind it. The old
+// policy fetched a fixed window and NARROWED it while scrolling, so a held
+// d-pad outran the decoder and each cover only appeared once it was already
+// selected. Lead the cursor instead, and keep leading it while it moves.
+// `total` is the library size; big libraries get a shorter lead so the queue
+// does not fill with covers the user has already scrolled past.
+static void art_scroll_window(int total, int scrolling, int dir, int *back, int *fwd) {
+    int big = total > 1200;
+    int lead  = scrolling ? (big ? 14 : 20) : (big ? 10 : 24);
+    // Never zero: letting go and stepping back one is a common move, and
+    // reversing direction must not start from an empty cache.
+    int trail = scrolling ? 4 : (big ? 6 : 10);
+    if (dir >= 0) { *back = trail; *fwd = lead; }
+    else          { *back = lead;  *fwd = trail; }
+}
+
+// Queue the covers around `selected`, leading in whichever direction the cursor
+// is currently travelling.
+static void art_prefetch_scroll(int selected, int scrolling) {
+    int back, fwd;
+    art_scroll_window(game_count, scrolling, art_cursor_dir, &back, &fwd);
+    art_prefetch(selected, back, fwd);
+}
+
+// Defined with the carousel backdrop and cartridge rings, further down.
+static void backdrop_store(SDL_Renderer *ren, int idx, SDL_Surface *sf);
+static void gcart_store(SDL_Renderer *ren, int idx, SDL_Surface *sf, SDL_Surface *shadow);
+static void book_shot_store(SDL_Renderer *ren, int idx, SDL_Surface *sf, SDL_Surface *shadow);
 
 // Main thread: upload up to `budget` finished decodes to textures.
 static void art_drain(SDL_Renderer *ren, int budget) {
@@ -9132,15 +10349,37 @@ static void art_drain(SDL_Renderer *ren, int budget) {
         art_done_n--;
         SDL_UnlockMutex(art_mtx);
 
-        if (d.gen != art_gen || d.idx < 0 || d.idx >= game_count) { if (d.surf) SDL_FreeSurface(d.surf); continue; }
-        if (games[d.idx].box_art) { if (d.surf) SDL_FreeSurface(d.surf); continue; }
+        if (d.gen != art_gen || d.idx < 0 || d.idx >= game_count) {
+            if (d.surf) SDL_FreeSurface(d.surf);
+            if (d.shadow) SDL_FreeSurface(d.shadow);
+            continue;
+        }
+        if (d.kind == ART_KIND_BACKDROP) {
+            // Straight into the carousel's ring; nothing else to compute.
+            backdrop_store(ren, d.idx, d.surf);
+            if (d.shadow) SDL_FreeSurface(d.shadow);
+            continue;
+        }
+        if (d.kind == ART_KIND_CART) {
+            gcart_store(ren, d.idx, d.surf, d.shadow);
+            continue;
+        }
+        if (d.kind == ART_KIND_BOOK) {
+            book_shot_store(ren, d.idx, d.surf, d.shadow);
+            continue;
+        }
+        if (games[d.idx].box_art) {
+            if (d.surf) SDL_FreeSurface(d.surf);
+            if (d.shadow) SDL_FreeSurface(d.shadow);
+            continue;
+        }
 
         games[d.idx].art_missing = d.surf ? 0 : 1;
-        if (d.surf) {
-            surface_opaque_bbox(d.surf, games[d.idx].art_op);
+        memcpy(games[d.idx].art_op, d.op, sizeof d.op);
+        if (d.shadow) {
             if (games[d.idx].box_shadow) SDL_DestroyTexture(games[d.idx].box_shadow);
-            games[d.idx].box_shadow = make_silhouette_shadow(ren, d.surf);
-        } else { games[d.idx].art_op[0] = games[d.idx].art_op[1] = 0; games[d.idx].art_op[2] = games[d.idx].art_op[3] = 255; }
+            games[d.idx].box_shadow = shadow_tex_from_surface(ren, d.shadow);
+        }
         SDL_Texture *t = d.surf ? tex_from_surface(ren, d.surf)
                                 : build_box_art(ren, font_label, games[d.idx].title, games[d.idx].color);
         if (!t) { games[d.idx].art_q_state = 0; continue; }
@@ -9148,6 +10387,21 @@ static void art_drain(SDL_Renderer *ren, int budget) {
         games[d.idx].art_q_state = 2;
 
         if (art_ring_n >= ART_CACHE_CAP) {
+            // Plain FIFO used to evict whatever was decoded longest ago, which
+            // during a scroll BACK through the library is the cover two rows
+            // ahead of the cursor -- so reversing direction re-decoded
+            // everything. Skip past anything still close to the cursor and
+            // evict the first entry that is genuinely off-screen instead.
+            // Second chance: the ring is circular, so stepping the head past a
+            // near entry leaves it in place and simply reconsiders it later.
+            if (art_cursor >= 0) {
+                for (int skipped = 0; skipped < ART_CACHE_CAP; skipped++) {
+                    int dist = art_ring[art_ring_head] - art_cursor;
+                    if (dist < 0) dist = -dist;
+                    if (dist > ART_KEEP_NEAR) break;
+                    art_ring_head = (art_ring_head + 1) % ART_CACHE_CAP;
+                }
+            }
             int old = art_ring[art_ring_head];
             if (old >= 0 && old < game_count && games[old].box_art) {
                 SDL_DestroyTexture(games[old].box_art);
@@ -11460,7 +12714,7 @@ static SDL_Rect draw_cartridge_donor(SDL_Renderer *ren, SDL_Rect box, CartDonor 
 // and decoded it again on the main thread, which is what made scrolling
 // stutter. A handful of entries covers the visible window both ways.
 #define BD_CAP 7
-static struct { char key[832]; SDL_Texture *tex; int gen; } bd_ring[BD_CAP];
+static struct { char key[832]; SDL_Texture *tex; int gen, pending; } bd_ring[BD_CAP];
 static int      bd_n = 0;
 static unsigned bd_epoch = 0;
 
@@ -11473,50 +12727,139 @@ static void game_key_of(int idx, char *out, size_t n) {
 // Decode and store one game's backdrop. Returns 1 if it did real work, so a
 // caller can budget itself to a single decode per frame. A miss is cached too,
 // otherwise games with no screenshot get retried on every single frame.
-static int backdrop_load(SDL_Renderer *ren, int idx) {
-    if (idx < 0 || idx >= game_count) return 0;
-    bd_reset_if_stale();
+// The Cartridges view's art cache. Hoisted out of the render function so the
+// decode thread's results can be filed into it: it used to decode inline, and
+// only for the centre card once a big library had gone idle for 320ms, which is
+// exactly why cartridges appeared one at a time as you rested on them.
+#define GCART_CAP 12
+static struct { char key[832]; SDL_Texture *tex, *sil; int gen, pending; } gcart[GCART_CAP];
+static int gcart_n = 0;
+static unsigned gcart_epoch = 0;
+
+static void gcart_reset_if_stale(void) {
+    if (gcart_epoch != renderer_epoch) { memset(gcart, 0, sizeof gcart); gcart_n = 0; gcart_epoch = renderer_epoch; }
+}
+static int gcart_slot_of(int idx) {
     char key[832]; game_key_of(idx, key, sizeof key);
-    for (int i = 0; i < bd_n; i++)
-        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return 0;
-
-    SDL_Surface *sf = load_cached_art_surface(games[idx].platform_dir, games[idx].raw_filename, 2); // screenshot
-    if (!sf) sf = load_cached_art_surface(games[idx].platform_dir, games[idx].raw_filename, 3);     // title screen
-
-    int slot = (bd_n < BD_CAP) ? bd_n++ : (idx % BD_CAP);
-    if (bd_ring[slot].tex) SDL_DestroyTexture(bd_ring[slot].tex);
-    snprintf(bd_ring[slot].key, sizeof bd_ring[slot].key, "%s", key);
-    bd_ring[slot].tex = sf ? tex_from_surface(ren, sf) : NULL;
-    bd_ring[slot].gen = art_gen;
+    for (int i = 0; i < gcart_n; i++)
+        if (gcart[i].gen == art_gen && strcmp(gcart[i].key, key) == 0) return i;
+    return -1;
+}
+// Ask for one cartridge. Returns 1 if a request went out.
+static int gcart_request(int idx) {
+    if (idx < 0 || idx >= game_count) return 0;
+    gcart_reset_if_stale();
+    if (gcart_slot_of(idx) >= 0) return 0;
+    int slot = gcart_n < GCART_CAP ? gcart_n++ : (idx % GCART_CAP);
+    if (gcart[slot].tex) SDL_DestroyTexture(gcart[slot].tex);
+    if (gcart[slot].sil) SDL_DestroyTexture(gcart[slot].sil);
+    game_key_of(idx, gcart[slot].key, sizeof gcart[slot].key);
+    gcart[slot].tex = gcart[slot].sil = NULL;
+    gcart[slot].gen = art_gen; gcart[slot].pending = 1;
+    if (!art_enqueue_kind(idx, ART_KIND_CART)) {
+        gcart[slot].gen = 0; gcart[slot].pending = 0; gcart[slot].key[0] = '\0';
+        return 0;
+    }
     return 1;
 }
-static SDL_Texture *game_backdrop_art(SDL_Renderer *ren, int idx) {
-    if (idx < 0 || idx >= game_count) return NULL;
-    bd_reset_if_stale();
+static void gcart_store(SDL_Renderer *ren, int idx, SDL_Surface *sf, SDL_Surface *shadow) {
+    gcart_reset_if_stale();
+    int slot = gcart_slot_of(idx);
+    if (slot < 0) {                       // evicted while it was decoding
+        if (sf) SDL_FreeSurface(sf);
+        if (shadow) SDL_FreeSurface(shadow);
+        return;
+    }
+    if (gcart[slot].tex) SDL_DestroyTexture(gcart[slot].tex);
+    if (gcart[slot].sil) SDL_DestroyTexture(gcart[slot].sil);
+    gcart[slot].tex = sf ? tex_from_surface(ren, sf) : NULL;
+    gcart[slot].sil = shadow ? shadow_tex_from_surface(ren, shadow) : NULL;
+    gcart[slot].pending = 0;
+}
+
+// Find a game's slot in the ring, or -1.
+static int bd_slot_of(int idx) {
     char key[832]; game_key_of(idx, key, sizeof key);
     for (int i = 0; i < bd_n; i++)
-        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return bd_ring[i].tex;
-    backdrop_load(ren, idx);
-    for (int i = 0; i < bd_n; i++)
-        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return bd_ring[i].tex;
+        if (bd_ring[i].gen == art_gen && strcmp(bd_ring[i].key, key) == 0) return i;
+    return -1;
+}
+// Claim a slot for this game and mark it in flight (tex NULL, pending set), so
+// the same backdrop is not requested again on every frame while it decodes.
+static int bd_claim(int idx) {
+    int slot = (bd_n < BD_CAP) ? bd_n++ : (idx % BD_CAP);
+    if (bd_ring[slot].tex) SDL_DestroyTexture(bd_ring[slot].tex);
+    game_key_of(idx, bd_ring[slot].key, sizeof bd_ring[slot].key);
+    bd_ring[slot].tex = NULL;
+    bd_ring[slot].gen = art_gen;
+    bd_ring[slot].pending = 1;
+    return slot;
+}
+// Ask for one game's backdrop. Returns 1 if a request was actually made. The
+// decode happens on the art thread; the result arrives via backdrop_store.
+// A miss is cached as a NULL texture, otherwise a game with no screenshot gets
+// re-requested on every single frame.
+static int backdrop_request(int idx) {
+    if (idx < 0 || idx >= game_count) return 0;
+    bd_reset_if_stale();
+    if (bd_slot_of(idx) >= 0) return 0;          // have it, or already waiting
+    int slot = bd_claim(idx);
+    if (!art_enqueue_kind(idx, ART_KIND_BACKDROP)) {
+        // Queue was full. Drop the claim so a later frame tries again rather
+        // than leaving a permanently blank slot behind.
+        bd_ring[slot].gen = 0; bd_ring[slot].pending = 0; bd_ring[slot].key[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+// Called from art_drain on the main thread when a backdrop decode lands.
+static void backdrop_store(SDL_Renderer *ren, int idx, SDL_Surface *sf) {
+    bd_reset_if_stale();
+    int slot = bd_slot_of(idx);
+    if (slot < 0) { if (sf) SDL_FreeSurface(sf); return; }   // evicted while decoding
+    if (bd_ring[slot].tex) SDL_DestroyTexture(bd_ring[slot].tex);
+    bd_ring[slot].tex = sf ? tex_from_surface(ren, sf) : NULL;
+    bd_ring[slot].pending = 0;
+}
+static SDL_Texture *game_backdrop_art(SDL_Renderer *ren, int idx) {
+    (void)ren;
+    if (idx < 0 || idx >= game_count) return NULL;
+    bd_reset_if_stale();
+    int slot = bd_slot_of(idx);
+    if (slot >= 0) return bd_ring[slot].tex;
+    // Never decode here: this runs inside the frame. Ask, and show the theme
+    // background for the frame or two until it arrives.
+    backdrop_request(idx);
     return NULL;
 }
-// Warm the neighbours the carousel is about to reach -- at most one decode per
-// call, so a frame is never held up by it.
+// Warm the neighbours the carousel is about to reach. This is now just queueing,
+// so it no longer has to ration itself to one per call -- the whole visible
+// window can be in flight at once across the decode threads.
 static void backdrop_prefetch(SDL_Renderer *ren, int centre) {
+    (void)ren;
     for (int d = 1; d <= 3; d++)
         for (int side = 0; side < 2; side++) {
             int i = side ? centre + d : centre - d;
             if (i < 0 || i >= game_count) continue;
-            if (backdrop_load(ren, i)) return;
+            backdrop_request(i);
         }
 }
 // Bulk warm, for use while a loading screen is already on screen so the first
 // scroll through the carousel is not paying for every decode.
 static void backdrop_warm(SDL_Renderer *ren, int centre, int count) {
-    for (int d = 0; d < count && d < game_count; d++) {
+    for (int d = 0; d < count && d < game_count && d < BD_CAP; d++) {
         int i = (centre + d) % game_count;
-        backdrop_load(ren, i);
+        backdrop_request(i);
+    }
+    // The boot screen is already up and nothing competes for the frame, so it
+    // is worth waiting briefly for the first backdrops to actually land.
+    Uint32 until = SDL_GetTicks() + 900;
+    for (;;) {
+        art_drain(ren, 8);
+        int waiting = 0;
+        for (int i = 0; i < bd_n; i++) if (bd_ring[i].pending) waiting = 1;
+        if (!waiting || SDL_GetTicks() >= until) break;
+        SDL_Delay(8);
     }
 }
 
@@ -11618,13 +12961,27 @@ static void warm_console_assets(SDL_Renderer *ren) {
 // already visible. Loading every cover would waste VRAM on a large card, but
 // 48 covers fills multiple pages and stays comfortably inside ART_CACHE_CAP.
 static void warm_initial_game_art(SDL_Renderer *ren) {
-    int target = game_count < 48 ? game_count : 48;
+    // Fill the cache rather than a fixed 48: the boot screen is already up, the
+    // decode thread is otherwise idle, and every cover warmed here is one the
+    // first scroll does not have to wait for. Stay a few under ART_CACHE_CAP so
+    // the warm set does not immediately start evicting itself.
+    int target = ART_CACHE_CAP - 8;
+    if (target > game_count) target = game_count;
     if (target <= 0) { draw_progress(ren, "Game art ready", 1.0f); return; }
     art_prefetch(0, 0, target - 1);
+    // The cursor starts at 0, so keep the front of the run un-evictable while
+    // the tail streams in.
+    art_cursor = 0;
     Uint32 started = SDL_GetTicks(), last_draw = 0;
     int ready = 0;
     do {
-        art_drain(ren, 10);
+        // Uploads are all that is left on this thread, so drain hard: the boot
+        // screen is not competing with anything for the frame budget.
+        art_drain(ren, 24);
+        // The run is wider than ART_Q_CAP, so the first pass necessarily hits a
+        // full queue and drops the tail. Re-issue as the queue drains -- the
+        // requests that already landed are no-ops.
+        art_prefetch(0, 0, target - 1);
         ready = 0;
         for (int i = 0; i < target; i++) if (games[i].art_q_state == 2) ready++;
         Uint32 now = SDL_GetTicks();
@@ -11632,8 +12989,8 @@ static void warm_initial_game_art(SDL_Renderer *ren) {
             draw_progress(ren, "Warming game art", (float)ready / target);
             last_draw = now;
         }
-        if (ready >= target || now - started >= 2600) break;
-        SDL_Delay(12);
+        if (ready >= target || now - started >= 3400) break;
+        SDL_Delay(8);
     } while (1);
     art_drain(ren, target);
     draw_progress(ren, "Game art ready", 1.0f);
@@ -11658,6 +13015,38 @@ SDL_Texture *book_shot_tex = NULL;
 SDL_Texture *book_shot_shadow = NULL;   // silhouette shadow for book_shot_tex
 int book_shot_for = -1;       // game index book_shot_tex was loaded for (-2 = tried, none)
 int book_shot_slot = -1;      // which artwork slot (index into art_type_slugs) is loaded
+// What the bookshelf page currently wants, versus what it has. The decode is
+// handed to the art threads; the page shows nothing for a frame or two rather
+// than stalling on a 640px load plus a silhouette blur, which is what made
+// flipping pages feel clunky.
+static int book_shot_want_gi = -1, book_shot_want_slot = -1, book_shot_pending = 0;
+static void book_shot_want(int gi, int slot) {
+    if (book_shot_want_gi == gi && book_shot_want_slot == slot) return;
+    book_shot_want_gi = gi; book_shot_want_slot = slot; book_shot_pending = 0;
+}
+// Called once a frame from the main loop: if the page wants a shot it does not
+// have and none is in flight, queue one.
+static void book_shot_pump(void) {
+    if (book_shot_want_gi < 0 || book_shot_pending) return;
+    if (book_shot_for == book_shot_want_gi && book_shot_slot == book_shot_want_slot) return;
+    art_idx_override = book_shot_want_slot;
+    if (art_enqueue_kind(book_shot_want_gi, ART_KIND_BOOK)) book_shot_pending = 1;
+}
+static void book_shot_store(SDL_Renderer *ren, int idx, SDL_Surface *sf, SDL_Surface *shadow) {
+    book_shot_pending = 0;
+    // The page moved on while this decoded; drop it rather than flashing the
+    // wrong screenshot onto the new page.
+    if (idx != book_shot_want_gi) {
+        if (sf) SDL_FreeSurface(sf);
+        if (shadow) SDL_FreeSurface(shadow);
+        return;
+    }
+    if (book_shot_tex) { SDL_DestroyTexture(book_shot_tex); book_shot_tex = NULL; }
+    if (book_shot_shadow) { SDL_DestroyTexture(book_shot_shadow); book_shot_shadow = NULL; }
+    book_shot_tex = sf ? tex_from_surface(ren, sf) : NULL;
+    book_shot_shadow = shadow ? shadow_tex_from_surface(ren, shadow) : NULL;
+    book_shot_for = book_shot_want_gi; book_shot_slot = book_shot_want_slot;
+}
 int    book_flip_dir = 0;        // +1 flipping to next page, -1 to previous, 0 idle
 int    book_prev_sel = 0;
 #define BOOK_FLIP_MS 440
@@ -12956,10 +14345,25 @@ static void link_write_core_opts(int is_host, const char *peer_ip) {
     fclose(w);
 }
 
+/* Every stage of a launch, timed from the button press, appended to
+   /tmp/snapfe-launch-perf.log. "begin" starts a fresh block so one launch can be
+   read at a glance -- these marks cover SNAP's side of the handoff only; once
+   `spawned-emulatorlauncher` lands, the rest of the wait is configgen and
+   RetroArch loading the core and ROM, which SNAP no longer controls. */
+/* How long SNAP's own half of a launch took: from the button press to the
+   moment Batocera's emulatorlauncher is running. Everything after that --
+   configgen's Python startup, core load, RetroArch bringing up the display --
+   is out of this process's hands, so separating the two is the difference
+   between optimising something and guessing at it. */
+int g_launch_snap_ms = -1;
+
 static void launch_perf_mark(const char *stage, Uint32 started) {
+    if (stage && !strcmp(stage, "spawned-emulatorlauncher"))
+        g_launch_snap_ms = (int)(SDL_GetTicks() - started);
 #ifdef SNAPOS_TARGET_KNULLI
     FILE *f = fopen("/tmp/snapfe-launch-perf.log", "a");
     if (f) {
+        if (stage && !strcmp(stage, "begin")) fprintf(f, "--- launch ---\n");
         fprintf(f, "%u +%u ms %s\n", SDL_GetTicks(), SDL_GetTicks() - started,
                 stage ? stage : "?");
         fclose(f);
@@ -13525,6 +14929,11 @@ static void ingame_osd_clear_stale(void) {}
 #endif
 
 static int sf_offer_regular(const char *path,const char *title,const char *system);
+/* Set the backlight and keep re-asserting it, once the emulator is on its way. */
+static void launch_begin_brightness(void) {
+    apply_brightness();
+    brightness_guard_start();
+}
 void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
                  const char *path, const char *title, const char *platform_dir) {
     if(sf_offer_regular(path,title,platform_dir))return;
@@ -13533,9 +14942,12 @@ void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
     int p = platform_index_for_dir(platform_dir);
     ra_score_pre_game = ra_score;   // baseline for the post-game "+N points" banner
     cpu_apply_pref();               // carry "Performance" (or Power Save) into the game
-    apply_brightness();             // set it once now...
-    brightness_guard_start();       // ...and keep re-asserting it through the game + loading screens
     gamepad_evdev_reset();          // no stale level/button events from the previous session
+    // Brightness used to be set here, which put two shell forks in front of the
+    // emulator rather than alongside it. The guard re-asserts the level
+    // continuously anyway, so starting it just after the handoff reaches the
+    // same place while overlapping configgen's own start-up instead of queueing
+    // behind it. See launch_begin_brightness() at both spawn sites.
     // Stop streams unless that source is allowed to continue during games.
     // Each source independently controls whether game effects remain audible.
     game_audio_mute(game_background_audio_prepare(),
@@ -13602,6 +15014,7 @@ void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
         }
         emu_pid = spawn_emulatorlauncher(sysbuf, path, selected_core);
         launch_perf_mark("spawned-emulatorlauncher", launch_started);
+        launch_begin_brightness();
         if (emu_pid < 0) {
             launch_restore_after_failure(win, ren, video_released);
             return;
@@ -13669,6 +15082,7 @@ void launch_game(SDL_Window **win, SDL_Renderer **ren, int *video_released,
     emu_pid = pid;
     emu_is_mgba = use_mgba;
     game_running = 1;
+    launch_begin_brightness();   /* the emulator is away; now hold the backlight */
     last_autosave_time = SDL_GetTicks();
     record_game_launch(path, title, platform_dir);
     // The emulator opens its own SDL audio device for the game itself; the audio
@@ -13734,6 +15148,132 @@ void launch_retroarch_menu(SDL_Window **win, SDL_Renderer **ren, int *video_rele
     last_autosave_time = SDL_GetTicks();
 }
 
+/* --- Wildkins -------------------------------------------------------------
+   Wildkins is a whole game of its own: a separate native program with its own
+   world, saves and menus. It is an app of its own on the Apps page (and can be
+   pinned to Home), never one of the mini games SNAP FE draws inside its own
+   window. Opening it works the way SNAP launches a real game: SNAP gives up the
+   screen and controller, the game runs full screen until it exits, and SNAP
+   comes back where it was.
+
+   Wildkins installs itself (from its own project) under
+   /userdata/roms/ports/wildkins/, with a Ports launcher that runs its
+   run-game.py with --preview. That flag exists for launching from a computer
+   over SSH: it pauses every running snapos_ui with SIGSTOP and grabs the
+   controller exclusively. Run from SNAP FE, it would freeze its own parent for
+   the whole session. So SNAP reads which runner the launcher points at and
+   runs that runner itself, without --preview -- nothing is paused, nothing is
+   grabbed, and SNAP's own in-game handling (lid pause, quit combo, the return
+   path) applies exactly as it does to an emulator. The game's files are only
+   ever read. */
+#define WILDKINS_LAUNCHER "/userdata/roms/ports/Wildkins.sh"
+#define WILDKINS_ROOT     "/userdata/roms/ports/wildkins/"
+static char wildkins_notice[140];
+static Uint32 wildkins_notice_until = 0;
+
+/* The runner the launcher points at, or 0. Only a run-game.py inside the game's
+   own folder is accepted -- the launcher is a file on a writable card, and SNAP
+   is not going to execute whatever it happens to name. */
+static int wildkins_parse_launcher(const char *text, char *out, size_t cap) {
+    const char *p = text ? strstr(text, "exec python3 ") : NULL;
+    if (!p) return 0;
+    p += strlen("exec python3 ");
+    while (*p == ' ') p++;
+    char path[512]; size_t n = 0;
+    if (*p == '\'') {                       /* shlex.quote()'s form, when quoting was needed */
+        p++;
+        while (*p && *p != '\'' && n < sizeof path - 1) path[n++] = *p++;
+        if (*p != '\'') return 0;
+    } else {
+        while (*p && *p != ' ' && *p != '\n' && *p != '\r' && n < sizeof path - 1) path[n++] = *p++;
+    }
+    path[n] = 0;
+    static const char tail[] = "/run-game.py";
+    size_t rl = strlen(WILDKINS_ROOT), tl = strlen(tail);
+    if (n <= rl + tl || strncmp(path, WILDKINS_ROOT, rl) != 0 ||
+        strcmp(path + n - tl, tail) != 0 || strstr(path, "..")) return 0;
+    if (n + 1 > cap) return 0;
+    memcpy(out, path, n + 1);
+    return 1;
+}
+
+static int wildkins_find_runner(char *out, size_t cap) {
+    FILE *f = fopen(WILDKINS_LAUNCHER, "r");
+    if (!f) return 0;
+    char text[2048];
+    size_t got = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[got] = 0;
+    if (!strstr(text, "# Wildkins standalone launcher")) return 0;   /* not the game's own launcher */
+    return wildkins_parse_launcher(text, out, cap) && access(out, R_OK) == 0;
+}
+
+/* Whether it is there to open. Checked at most every few seconds, since Home is
+   drawn every frame and the answer only changes when it is installed. */
+int wildkins_installed(void) {
+#ifdef SNAPOS_TARGET_KNULLI
+    static int cached = 0; static Uint32 checked_at = 0;
+    Uint32 now = SDL_GetTicks();
+    if (!checked_at || now - checked_at > 3000) {
+        char runner[512];
+        cached = wildkins_find_runner(runner, sizeof runner);
+        checked_at = now ? now : 1;
+    }
+    return cached;
+#else
+    return 0;
+#endif
+}
+
+void wildkins_launch(SDL_Window **win, SDL_Renderer **ren, int *video_released) {
+#ifdef SNAPOS_TARGET_KNULLI
+    char runner[512];
+    if (!wildkins_find_runner(runner, sizeof runner)) {
+        snprintf(wildkins_notice, sizeof wildkins_notice,
+                 "Wildkins isn't installed on this handheld yet.");
+        wildkins_notice_until = SDL_GetTicks() + 3000;
+        return;
+    }
+    ra_score_pre_game = ra_score;   // nothing to announce afterwards but what was earned now
+    cpu_apply_pref();
+    gamepad_evdev_reset();
+    game_audio_mute(game_background_audio_prepare(), game_aspect_idx, game_rotation_idx);
+    apply_brightness();
+    brightness_guard_start();
+    launch_release_video(win, ren, video_released);
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Its own session and process group, as an emulator gets: closing the
+        // lid stops the group, so the runner and the game pause together.
+        setsid();
+        int null_out = open("/dev/null", O_WRONLY);   // the runner keeps its own log
+        if (null_out >= 0) {
+            (void)dup2(null_out, STDOUT_FILENO);
+            if (null_out != STDOUT_FILENO) close(null_out);
+        }
+        setenv("HOME", "/userdata/system", 1);
+        setenv("XDG_RUNTIME_DIR", "/var/run", 1);
+        setenv("SDL_NOMOUSE", "1", 1);
+        execlp("python3", "python3", runner, (char *)NULL);   // no --preview: see above
+        _exit(127);
+    }
+    if (pid < 0) {
+        launch_restore_after_failure(win, ren, video_released);
+        snprintf(wildkins_notice, sizeof wildkins_notice, "Wildkins couldn't be started.");
+        wildkins_notice_until = SDL_GetTicks() + 3000;
+        return;
+    }
+    emu_pid = pid;
+    emu_is_mgba = 0;
+    game_running = 1;
+    last_autosave_time = SDL_GetTicks();
+#else
+    (void)win; (void)ren; (void)video_released;
+    snprintf(wildkins_notice, sizeof wildkins_notice, "Wildkins runs on the handheld.");
+    wildkins_notice_until = SDL_GetTicks() + 3000;
+#endif
+}
+
 // Create the Snap OS window + renderer and, if the real display isn't 640x480,
 // stretch the whole 640x480 UI across it with a render scale (no letterbox, no
 // SDL logical-size -- that path draws black bars on the H700 "mali" driver).
@@ -13765,6 +15305,19 @@ static void snap_make_window(SDL_Window **win, SDL_Renderer **ren) {
     SDL_GetRendererOutputSize(*ren, &ow, &oh);
     if (ow >= 320 && oh >= 240) { WIN_W = ow; WIN_H = oh; }
     g_img_wsquash = 1.0f; // no stretch -> no photo squash needed
+
+    // Flush every buffer in the swap chain to black before anything is drawn.
+    // Clearing once only clears the buffer we happen to be rendering into; the
+    // others still hold whatever was on the panel when we took the display --
+    // Knulli's last frame at boot, or the emulator's last frame on the way back
+    // from a game. Those surface as a torn or half-stale first frame. Three
+    // passes covers double and triple buffering, and this runs once per
+    // window, not per frame.
+    for (int i = 0; i < 3; i++) {
+        SDL_SetRenderDrawColor(*ren, 0, 0, 0, 255);
+        SDL_RenderClear(*ren);
+        SDL_RenderPresent(*ren);
+    }
 }
 
 // --- Hand the screen to the emulator ---------------------------------------
@@ -13782,6 +15335,7 @@ static void snap_release_video(SDL_Window **win, SDL_Renderer **ren) {
     launch_perf_mark("video-release:art-reset", release_started);
     battery_prompt_render_clear();
     if (*ren) { SDL_DestroyRenderer(*ren); *ren = NULL; } // destroys all its textures too
+    for (int wi = 0; wi < WEATHER_ART_COUNT; wi++) { weather_art_texture[wi] = NULL; weather_art_tried[wi] = 0; }
     launch_perf_mark("video-release:renderer-destroyed", release_started);
     if (*win) { SDL_DestroyWindow(*win); *win = NULL; }
     launch_perf_mark("video-release:window-destroyed", release_started);
@@ -13882,7 +15436,7 @@ void factory_reset() {
     radio_persist = 1; radio_over_games = 0; radio_game_audio = 1; radio_volume_pct = 100;
     music_persist = 1; music_over_games = 0; music_game_audio = 0;
     sys_volume_pct = 80; sys_volume_apply(sys_volume_pct);
-    theme_idx = 0; g_ps_saved_theme = 0; power_save_mode = 0; launch_fullscreen = 1; reduce_motion = 0; show_fps = 0;
+    theme_idx = 0; g_ps_saved_theme = 0; power_save_mode = 0; launch_fullscreen = 1; reduce_motion = 0; show_fps = 1;
     fast_forward_idx = 1; fast_forward_mode = 0; auto_save_games = 0; power_save_mode = 0; power_save_auto = 0;
     cpu_perf_mode = 0; show_perf_overlay = 0; perf_overlay_opacity = 90; perf_overlay_text_idx = 1;
     auto_ps_pct = 0; battery_icon_enabled = 1;
@@ -13897,9 +15451,9 @@ void factory_reset() {
     disp_grp_view_open = 0; disp_grp_hud_open = 0; disp_grp_screen_open = 0;
     disp_grp_stats_open = 0; disp_grp_widgets_open = 0; stats_mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5);
     for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
-    disp_grp_apps_open = 0; home_apps_mask = (1 << APP_COUNT) - 1;
+    disp_grp_apps_open = 0; home_apps_mask = APP_PINNED_DEFAULT;
     home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
-    app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
+    app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0; app_widget_calc_active = 0;
     menu_double_action = MENU_ACT_NONE; menu_triple_action = MENU_ACT_FLASHLIGHT;
     for (int i = 0; i < ART_TYPE_COUNT; i++) scrape_art_enabled[i] = (i == 0) ? 1 : 0;
     for (int i = 0; i < PLATFORM_COUNT; i++) scrape_system_enabled[i] = 1;
@@ -13908,6 +15462,12 @@ void factory_reset() {
     font_bold = 0;
     player_name[0] = '\0';
     greeting_enabled = 1; greeting_last_day = 0;
+    weather_unit = 0; weather_style_idx = 0; weather_wallpaper_enabled = 0;
+    weather_screensaver_enabled = 0; weather_alert_mode = 1; weather_auto_ip = 1;
+    g_weather_str[0] = g_weather_place[0] = g_weather_condition[0] = '\0';
+    g_weather_feels[0] = g_weather_high[0] = g_weather_low[0] = '\0';
+    g_weather_precip[0] = g_weather_wind[0] = g_weather_humidity[0] = '\0';
+    g_weather_alert_level = 0; g_weather_alert[0] = '\0';
     favorites_view_idx = 0;
     grid_cols = 1; grid_rows = 1;
     for (int i = 0; i < PLATFORM_COUNT; i++) platform_bg_choice[i][0] = '\0';
@@ -13959,10 +15519,52 @@ void restore_display_group(int which) {
         screen_saver_duration_idx = SCREEN_SAVER_DURATION_DEFAULT;
         sys_volume_pct = 80; sys_volume_apply(sys_volume_pct);
         game_aspect_idx = 0; game_rotation_idx = 0;
-        reduce_motion = 0; show_fps = 0;   // the perf overlay restores with Device
+        reduce_motion = 0; show_fps = 1;   // the perf overlay restores with Device
+        aquarium_wallpaper_enabled = 0;
     }
     apply_brightness();
     settings_dirty = 1;
+}
+
+void restore_current_settings_tab(SettingsTab tab);
+void restore_confirm_open(int kind, int arg) { restore_confirm_kind = kind; restore_confirm_arg = arg; }
+/* What the question names, so "Are you sure?" says what would be lost. */
+static const char *restore_confirm_scope(void) {
+    if (restore_confirm_kind == RC_TAB) {
+        static const char *tab[TAB_COUNT] = { "all Sound settings", "all Display settings",
+            "all Game settings", "all Device settings", "all Online settings" };
+        return (restore_confirm_arg >= 0 && restore_confirm_arg < TAB_COUNT) ? tab[restore_confirm_arg] : "these settings";
+    }
+    switch (restore_confirm_arg) {
+        case ROW_DISP_RST_TEXT:   return "Theme & Text";
+        case ROW_DISP_RST_VIEW:   return "Presentation";
+        case ROW_DISP_RST_HUD:    return "the Status Bar";
+        case ROW_DISP_RST_BG:     return "every background";
+        case ROW_DISP_RST_SCREEN: return "Screen & Power";
+    }
+    return "these settings";
+}
+void restore_confirm_accept(void) {
+    if (restore_confirm_kind == RC_TAB) restore_current_settings_tab((SettingsTab)restore_confirm_arg);
+    else if (restore_confirm_kind == RC_DISP_GROUP) restore_display_group(restore_confirm_arg);
+    restore_confirm_kind = RC_NONE;
+}
+static void draw_restore_confirm(SDL_Renderer *ren, Theme *th) {
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 205);
+    SDL_RenderFillRect(ren, &(SDL_Rect){ 30, WIN_H / 2 - 78, WIN_W - 60, 156 });
+    char msg[120];
+    snprintf(msg, sizeof msg, "This resets %s to their defaults.", restore_confirm_scope());
+    SDL_Color modal_text = { 222, 222, 228, 255 };
+    SDL_Texture *t1 = render_text(ren, font_small, "Are you sure?", modal_text);
+    SDL_Texture *t2 = render_text_fit(ren, font_small, msg, modal_text, WIN_W - 100);
+    SDL_Texture *t3 = render_text_fit(ren, font_label, "A: Restore Defaults     B: Cancel", th->accent2, WIN_W - 100);
+    int w1, h1, w2, h2, w3, h3;
+    SDL_QueryTexture(t1, NULL, NULL, &w1, &h1); SDL_QueryTexture(t2, NULL, NULL, &w2, &h2);
+    SDL_QueryTexture(t3, NULL, NULL, &w3, &h3);
+    SDL_RenderCopy(ren, t1, NULL, &(SDL_Rect){ (WIN_W - w1) / 2, WIN_H / 2 - 52, w1, h1 });
+    SDL_RenderCopy(ren, t2, NULL, &(SDL_Rect){ (WIN_W - w2) / 2, WIN_H / 2 - 46 + h1, w2, h2 });
+    SDL_RenderCopy(ren, t3, NULL, &(SDL_Rect){ (WIN_W - w3) / 2, WIN_H / 2 + 28, w3, h3 });
 }
 
 void restore_current_settings_tab(SettingsTab tab) {
@@ -13985,13 +15587,16 @@ void restore_current_settings_tab(SettingsTab tab) {
         launch_fullscreen = 1; reduce_motion = 0;
         sys_volume_pct = 80; sys_volume_apply(sys_volume_pct);
         game_aspect_idx = 0; game_rotation_idx = 0;
-        show_fps = 0;   // the perf overlay restores with Device
+        show_fps = 1;   // the perf overlay restores with Device
         home_widget_idx = 1; home_widget2_idx = 7; home_stats_expanded = 0;
-        app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
-        surprise_me_enabled = 0; weather_unit = 0; home_view_idx = 0; home_icon_pack_idx = 0;
+        app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0; app_widget_calc_active = 0;
+        surprise_me_enabled = 0; weather_unit = 0; weather_style_idx = 0;
+        weather_wallpaper_enabled = 0; weather_screensaver_enabled = 0;
+        weather_alert_mode = 1; weather_auto_ip = 1; home_view_idx = 0; home_icon_pack_idx = 0;
         stats_mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5);
         for (int i = 0; i < STAT_GRP_COUNT; i++) stat_grp_open[i] = 0;
-        home_apps_mask = (1 << APP_COUNT) - 1;
+        home_apps_mask = APP_PINNED_DEFAULT;
+        for (int i = 0; i < APP_COUNT; i++) home_app_order[i] = i;
         for (int i = 0; i < HOME_ORDER_COUNT; i++) home_tile_order[i] = i;
         bg_dropdown_open = 0; disp_grp_home_open = 0; disp_grp_text_open = 0;
         disp_grp_hud_open = 0; disp_grp_screen_open = 0; disp_grp_stats_open = 0; disp_grp_apps_open = 0; disp_grp_widgets_open = 0;
@@ -14046,6 +15651,1237 @@ void draw_dock_logo(SDL_Renderer *ren, TTF_Font *font) {
     else                            SDL_RenderCopy(ren, logo, NULL, &dst);
 }
 
+static void weather_current_parts(char *temp,size_t temp_n,char *cond,size_t cond_n){
+    snprintf(temp,temp_n,"--");
+    snprintf(cond,cond_n,"%s",weather_empty_message());
+    if(g_weather_str[0]){
+        const char *sp=strchr(g_weather_str,' ');
+        snprintf(temp,temp_n,"%.*s",sp?(int)(sp-g_weather_str):(int)strlen(g_weather_str),g_weather_str);
+        if(g_weather_condition[0])snprintf(cond,cond_n,"%s",g_weather_condition);
+        else snprintf(cond,cond_n,"%s",(sp&&sp[1])?sp+1:"Current conditions");
+    }else if(g_weather_condition[0]){
+        snprintf(cond,cond_n,"%s",g_weather_condition);
+    }
+}
+
+static int weather_current_kind(void){
+    char temp[32],cond[96];weather_current_parts(temp,sizeof temp,cond,sizeof cond);
+    int kind=weather_icon_kind(cond);
+    if(kind==WX_SUN&&weather_is_night())kind=WX_CLEARNIGHT;
+    return kind;
+}
+
+static void weather_force_refresh(void){
+    g_weather_kicked=0;
+    g_weather_refresh_msg_until=SDL_GetTicks()+4000;
+    weather_ticker_started=SDL_GetTicks();
+    weather_kick(1);
+}
+
+static void weather_cycle_unit(void){
+    weather_unit=weather_unit?0:1;
+    weather_convert_cached(weather_unit);
+    if(widget_places_loaded){
+        WidgetPlace *p=&widget_places[1][widget_place_sel[1]];
+        p->unit=weather_unit;p->mtime=0;p->kicked=0;p->failed=0;
+        snprintf(p->weather,sizeof p->weather,"%s",g_weather_str);
+    }
+}
+
+#define WEATHER_FOCUS_CURRENT  0
+#define WEATHER_FOCUS_HOURLY   1
+#define WEATHER_FOCUS_SETTINGS 2
+#define WEATHER_FOCUS_COUNT    3
+
+typedef struct {
+    int unit,style,wallpaper,screensaver,alerts,auto_ip;
+    int place_count,place_sel;
+    WidgetPlace places[WIDGET_PLACE_MAX];
+} WeatherSettingsSnapshot;
+static WeatherSettingsSnapshot weather_settings_original;
+
+static void weather_settings_capture(void){
+    widget_places_init();
+    // Sleep Screen Weather and Settings > Screen & Power > Sleep Screen are two
+    // views of ONE choice. Read it back from the real setting on the way in, so
+    // picking a different sleep screen elsewhere shows here as OFF.
+    weather_screensaver_enabled = (screen_saver_idx == SCREEN_SAVER_WEATHER);
+    weather_settings_original.unit=weather_unit;
+    weather_settings_original.style=weather_style_idx;
+    weather_settings_original.wallpaper=weather_wallpaper_enabled;
+    weather_settings_original.screensaver=weather_screensaver_enabled;
+    weather_settings_original.alerts=weather_alert_mode;
+    weather_settings_original.auto_ip=weather_auto_ip;
+    weather_settings_original.place_count=widget_place_count[1];
+    weather_settings_original.place_sel=widget_place_sel[1];
+    memcpy(weather_settings_original.places,widget_places[1],sizeof weather_settings_original.places);
+    weather_settings_dirty=0;
+    weather_settings_confirm_pending=0;
+    weather_settings_confirm_sel=0;
+}
+
+static int weather_place_settings_changed(void){
+    if(widget_place_count[1]!=weather_settings_original.place_count||
+       widget_place_sel[1]!=weather_settings_original.place_sel)return 1;
+    for(int i=0;i<widget_place_count[1];i++){
+        WidgetPlace *a=&widget_places[1][i],*b=&weather_settings_original.places[i];
+        if(strcmp(a->name,b->name)||strcmp(a->zone,b->zone)||strcmp(a->query,b->query))return 1;
+    }
+    return 0;
+}
+
+static void weather_settings_sync_dirty(void){
+    weather_settings_dirty=
+        weather_unit!=weather_settings_original.unit||
+        weather_style_idx!=weather_settings_original.style||
+        weather_wallpaper_enabled!=weather_settings_original.wallpaper||
+        weather_screensaver_enabled!=weather_settings_original.screensaver||
+        weather_alert_mode!=weather_settings_original.alerts||
+        weather_auto_ip!=weather_settings_original.auto_ip||
+        weather_place_settings_changed();
+}
+
+static void weather_settings_begin(void){
+    weather_settings_sel=0;
+    weather_settings_capture();
+}
+
+static void weather_settings_finish(AppState target,AppState *state){
+    if(target==STATE_SETTINGS){
+        settings_return_state=STATE_WEATHER;
+        current_tab=TAB_SOUND;
+        settings_selected=0;settings_scroll_offset=0;
+        settings_page=SETTINGS_PAGE_ROOT;
+        settings_close_all_groups();
+    }
+    *state=target;
+}
+
+static void weather_settings_commit(AppState *state){
+    // ... and write it back to that one choice on the way out. Turning it on
+    // remembers whatever sleep screen was selected before, so turning it off
+    // again restores that rather than dropping the user on a default.
+    if(weather_screensaver_enabled){
+        if(screen_saver_idx!=SCREEN_SAVER_WEATHER)screen_saver_prev_idx=screen_saver_idx;
+        screen_saver_idx=SCREEN_SAVER_WEATHER;
+    }else if(screen_saver_idx==SCREEN_SAVER_WEATHER){
+        screen_saver_idx=(screen_saver_prev_idx>=0&&screen_saver_prev_idx<SCREEN_SAVER_COUNT
+                          &&screen_saver_prev_idx!=SCREEN_SAVER_WEATHER)
+                         ?screen_saver_prev_idx:SCREEN_SAVER_BOUNCE;
+    }
+    save_settings();
+    widget_places_save();
+    weather_settings_capture();
+    weather_settings_finish(weather_settings_leave_state,state);
+}
+
+static void weather_settings_discard(AppState *state){
+    weather_unit=weather_settings_original.unit;
+    weather_style_idx=weather_settings_original.style;
+    weather_wallpaper_enabled=weather_settings_original.wallpaper;
+    weather_screensaver_enabled=weather_settings_original.screensaver;
+    weather_alert_mode=weather_settings_original.alerts;
+    weather_auto_ip=weather_settings_original.auto_ip;
+    memcpy(widget_places[1],weather_settings_original.places,sizeof weather_settings_original.places);
+    widget_place_count[1]=weather_settings_original.place_count;
+    widget_place_sel[1]=weather_settings_original.place_sel;
+    widget_places_save();
+    widget_weather_restore();weather_read();
+    weather_settings_capture();
+    weather_settings_finish(weather_settings_leave_state,state);
+}
+
+static void weather_settings_request_leave(AppState target,AppState *state){
+    weather_settings_sync_dirty();
+    if(!weather_settings_dirty){weather_settings_finish(target,state);return;}
+    weather_settings_leave_state=target;
+    weather_settings_confirm_sel=0;
+    weather_settings_confirm_pending=1;
+}
+
+static void weather_app_enter(AppState from){
+    weather_return_state=from;
+    weather_app_sel=WEATHER_FOCUS_CURRENT;
+    weather_hourly_sel=0;
+    weather_settings_sel=0;
+    weather_ticker_started=SDL_GetTicks();
+    weather_read();
+    weather_kick(0);
+}
+
+static void weather_switch_location(int dir){
+    widget_places_init();
+    if(widget_place_count[1]>1){
+        widget_place_cycle(1,dir);
+        weather_ticker_started=SDL_GetTicks();
+        weather_read();
+    }
+}
+
+/* L1/R1 switch the forecast strip between hourly, daily and by-week. The
+   cursor is an index into whichever mode is showing, so it has to come back
+   into range -- two weeks is a much shorter list than eighteen hours. */
+static void weather_fc_switch(int dir){
+    int next=weather_fc_next(g_weather_fc_mode,dir);
+    if(next==g_weather_fc_mode)return;
+    g_weather_fc_mode=next;
+    int n=weather_fc_count(next);
+    if(weather_hourly_sel>=n)weather_hourly_sel=n>0?n-1:0;
+    play_click();
+}
+
+static void weather_app_key(SDL_Keycode k,AppState *state){
+    if(k==SDLK_ESCAPE){widget_places_save();*state=weather_return_state;play_click();return;}
+    if(k==SDLK_s){weather_force_refresh();play_click();return;}
+    if(k==SDLK_q||k==SDLK_e){weather_fc_switch(k==SDLK_e?1:-1);return;}
+    if(k==SDLK_UP||k==SDLK_DOWN){
+        weather_app_sel=(weather_app_sel+(k==SDLK_DOWN?1:WEATHER_FOCUS_COUNT-1))%WEATHER_FOCUS_COUNT;
+        play_click();return;
+    }
+    if(k==SDLK_LEFT||k==SDLK_RIGHT){
+        int dir=k==SDLK_RIGHT?1:-1;
+        if(weather_app_sel==WEATHER_FOCUS_CURRENT){weather_switch_location(dir);weather_hourly_sel=0;play_click();}
+        else if(weather_app_sel==WEATHER_FOCUS_HOURLY&&weather_fc_count(g_weather_fc_mode)>0){
+            int n=weather_fc_count(g_weather_fc_mode);
+            weather_hourly_sel=(weather_hourly_sel+dir+n)%n;play_click();
+        }
+        return;
+    }
+    if(k==SDLK_RETURN){
+        if(weather_app_sel==WEATHER_FOCUS_SETTINGS){weather_settings_begin();*state=STATE_WEATHER_SETTINGS;play_click();}
+        // The hourly strip is selectable, so A on it has to do something: open
+        // the full run of hours the provider gave us on its own screen.
+        else if(weather_app_sel==WEATHER_FOCUS_HOURLY&&weather_fc_count(g_weather_fc_mode)>0){
+            *state=STATE_WEATHER_HOURLY;play_click();
+        }
+    }
+}
+
+// The full hourly screen: every hour the forecast reached for, laid out as
+// rows. The compact strip on the main screen only ever shows the first five.
+static void weather_hourly_key(SDL_Keycode k,AppState *state){
+    if(k==SDLK_ESCAPE){*state=STATE_WEATHER;play_click();return;}
+    if(k==SDLK_s){weather_force_refresh();play_click();return;}
+    if(k==SDLK_q||k==SDLK_e){weather_fc_switch(k==SDLK_e?1:-1);return;}
+    int n=weather_fc_count(g_weather_fc_mode);
+    if(!n)return;
+    if(k==SDLK_LEFT||k==SDLK_UP){weather_hourly_sel=(weather_hourly_sel+n-1)%n;play_click();}
+    else if(k==SDLK_RIGHT||k==SDLK_DOWN){weather_hourly_sel=(weather_hourly_sel+1)%n;play_click();}
+}
+
+static void weather_settings_key(SDL_Keycode k,AppState *state){
+    const int rows=7;
+    if(weather_settings_confirm_pending){
+        if(k==SDLK_LEFT||k==SDLK_RIGHT){weather_settings_confirm_sel=!weather_settings_confirm_sel;play_click();}
+        else if(k==SDLK_RETURN){if(weather_settings_confirm_sel)weather_settings_discard(state);else weather_settings_commit(state);play_click();}
+        else if(k==SDLK_ESCAPE){weather_settings_confirm_pending=0;play_click();}
+        return;
+    }
+    if(k==SDLK_ESCAPE){weather_settings_request_leave(STATE_WEATHER,state);play_click();return;}
+    if(k==SDLK_UP){weather_settings_sel=(weather_settings_sel+rows-1)%rows;return;}
+    if(k==SDLK_DOWN){weather_settings_sel=(weather_settings_sel+1)%rows;return;}
+    if(k!=SDLK_RETURN&&k!=SDLK_LEFT&&k!=SDLK_RIGHT)return;
+    int dir=k==SDLK_LEFT?-1:1;
+    if(weather_settings_sel==0){
+        if(k==SDLK_RETURN){widget_places_open_for(1,STATE_WEATHER_SETTINGS);*state=STATE_WIDGET_PLACES;}
+        else weather_switch_location(dir);
+    }else if(weather_settings_sel==1)weather_cycle_unit();
+    else if(weather_settings_sel==2)weather_style_idx=(weather_style_current()+dir+WEATHER_STYLE_COUNT)%WEATHER_STYLE_COUNT;
+    else if(weather_settings_sel==3)weather_wallpaper_enabled=!weather_wallpaper_enabled;
+    else if(weather_settings_sel==4)weather_screensaver_enabled=!weather_screensaver_enabled;
+    else if(weather_settings_sel==5)weather_alert_mode=(weather_alert_mode+dir+WEATHER_ALERT_MODE_COUNT)%WEATHER_ALERT_MODE_COUNT;
+    else if(weather_settings_sel==6)weather_auto_ip=!weather_auto_ip;
+    weather_settings_sync_dirty();
+    play_click();
+}
+
+static void weather_gradient(SDL_Renderer *ren,SDL_Color top,SDL_Color bot){
+    SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+    for(int y=0;y<WIN_H;y+=3){
+        float f=(float)y/(float)(WIN_H>1?WIN_H-1:1);
+        Uint8 r=(Uint8)(top.r+(bot.r-top.r)*f);
+        Uint8 g=(Uint8)(top.g+(bot.g-top.g)*f);
+        Uint8 b=(Uint8)(top.b+(bot.b-top.b)*f);
+        SDL_SetRenderDrawColor(ren,r,g,b,255);
+        SDL_RenderFillRect(ren,&(SDL_Rect){0,y,WIN_W,3});
+    }
+}
+
+static void weather_style_background(SDL_Renderer *ren,Theme *th,int saver){
+    int style=weather_style_current();
+    if(style==WEATHER_STYLE_CHANNEL){
+        weather_gradient(ren,(SDL_Color){18,65,142,255},(SDL_Color){78,34,116,255});
+        SDL_SetRenderDrawColor(ren,18,26,62,190);SDL_RenderFillRect(ren,&(SDL_Rect){0,0,WIN_W,HUD_BAR_H+18});
+        SDL_SetRenderDrawColor(ren,230,154,42,210);SDL_RenderFillRect(ren,&(SDL_Rect){0,HUD_BAR_H+16,WIN_W,4});
+        if(saver){SDL_SetRenderDrawColor(ren,11,18,44,210);SDL_RenderFillRect(ren,&(SDL_Rect){0,WIN_H-54,WIN_W,54});}
+    }else{
+        SDL_SetRenderDrawColor(ren,th->bg.r,th->bg.g,th->bg.b,255);SDL_RenderClear(ren);
+    }
+}
+
+static void weather_draw_panel(SDL_Renderer *ren,SDL_Rect r,SDL_Color bg,SDL_Color edge,int selected){
+    fill_rounded(ren,r,8,bg.r,bg.g,bg.b,selected?238:210);
+    SDL_SetRenderDrawColor(ren,edge.r,edge.g,edge.b,selected?255:145);
+    SDL_RenderDrawRect(ren,&r);
+    if(selected&&r.w>4&&r.h>4){SDL_Rect inner={r.x+2,r.y+2,r.w-4,r.h-4};SDL_RenderDrawRect(ren,&inner);}
+}
+
+// The one save-or-discard prompt for the whole frontend. The Weather app got
+// this treatment first -- a dimmed screen, a titled card and two buttons you
+// steer with left/right -- and 1.3.1 moves the older text-only prompts (main
+// Settings, Hotkeys) onto it so leaving any page with unsaved changes looks the
+// same. `sel` is 0 for Save, 1 for Don't Save.
+static void draw_save_discard_modal(SDL_Renderer *ren,Theme *th,const char *title,int sel){
+    SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren,0,0,0,190);SDL_RenderFillRect(ren,NULL);
+    int mw=WIN_W<690?500:540;if(mw>WIN_W-40)mw=WIN_W-40;
+    SDL_Rect modal={WIN_W/2-mw/2,WIN_H/2-78,mw,156};
+    weather_draw_panel(ren,modal,th->bg,th->accent2,0);
+    // Titles are short by design, but never let one get silently ellipsised:
+    // step down to the label face before render_text_fit starts cutting.
+    TTF_Font *title_font=font_small?font_small:font_label;
+    int probe=0;TTF_SizeUTF8(title_font,title,&probe,NULL);
+    if(probe>mw-48&&font_label)title_font=font_label;
+    SDL_Texture *tt=render_text_fit(ren,title_font,title,g_ui_text,mw-48);
+    int tw,thh;SDL_QueryTexture(tt,NULL,NULL,&tw,&thh);
+    SDL_RenderCopy(ren,tt,NULL,&(SDL_Rect){WIN_W/2-tw/2,modal.y+18,tw,thh});
+    int gap=18,bw=(mw-72-gap)/2,by=modal.y+72;
+    SDL_Rect save={modal.x+27,by,bw,38},discard={modal.x+27+bw+gap,by,bw,38};
+    weather_draw_panel(ren,save,th->select_bg,th->accent2,sel==0);
+    weather_draw_panel(ren,discard,th->select_bg,th->accent2,sel==1);
+    TTF_Font *bf=font_label_bold?font_label_bold:font_label;
+    SDL_Texture *st=render_text_fit(ren,bf,"Save",g_ui_text,bw-16);
+    SDL_Texture *dt=render_text_fit(ren,bf,"Don't Save",g_ui_text,bw-16);
+    int sw,sh,dw,dh;SDL_QueryTexture(st,NULL,NULL,&sw,&sh);SDL_QueryTexture(dt,NULL,NULL,&dw,&dh);
+    SDL_RenderCopy(ren,st,NULL,&(SDL_Rect){save.x+save.w/2-sw/2,save.y+save.h/2-sh/2,sw,sh});
+    SDL_RenderCopy(ren,dt,NULL,&(SDL_Rect){discard.x+discard.w/2-dw/2,discard.y+discard.h/2-dh/2,dw,dh});
+    SDL_Texture *hint=render_text_fit(ren,font_label,"D-Pad Choose   A Confirm   B Cancel",th->accent2,mw-48);
+    int hw2,hh2;SDL_QueryTexture(hint,NULL,NULL,&hw2,&hh2);
+    SDL_RenderCopy(ren,hint,NULL,&(SDL_Rect){WIN_W/2-hw2/2,modal.y+modal.h-hh2-12,hw2,hh2});
+}
+
+// A face opened at whatever pixel height the caller needs, for the big
+// temperature readouts. The three shared font slots are fixed sizes chosen for
+// body text, so drawing a 90px number meant stretching a ~44px raster -- the
+// pixelation Nick saw. Small cache: the app asks for at most a handful of
+// sizes, and it is thrown away whenever reload_fonts() runs, since these are
+// the same face and must follow the Font Style setting.
+#define WEATHER_FONT_SLOTS 6
+static struct { int pt; TTF_Font *font; } weather_font_cache[WEATHER_FONT_SLOTS];
+static int weather_font_slots_used = 0;
+static unsigned weather_font_cache_gen = 0;
+
+static void weather_font_cache_clear(void){
+    if(!weather_font_slots_used)return;
+    // The text cache is keyed on TTF_Font*, and TTF_OpenFont can reuse a
+    // pointer we are about to close -- a stale entry would then look like a hit
+    // and render with the wrong face.
+    text_cache_clear();
+    for(int i=0;i<weather_font_slots_used;i++)
+        if(weather_font_cache[i].font)TTF_CloseFont(weather_font_cache[i].font);
+    memset(weather_font_cache,0,sizeof weather_font_cache);
+    weather_font_slots_used=0;
+}
+
+static TTF_Font *weather_temp_font(int px){
+    if(px<14)px=14;
+    if(px>150)px=150;
+    // TTF point sizes and rendered pixel heights are close enough for a display
+    // number; quantise so small layout jitter does not open a new face.
+    int pt=(px/2)*2;
+    if(weather_font_cache_gen!=g_font_gen){weather_font_cache_clear();weather_font_cache_gen=g_font_gen;}
+    for(int i=0;i<weather_font_slots_used;i++)
+        if(weather_font_cache[i].pt==pt)return weather_font_cache[i].font;
+    if(weather_font_slots_used>=WEATHER_FONT_SLOTS)weather_font_cache_clear();
+    char *path=font_choice_path(font_choice_idx);
+    TTF_Font *f=TTF_OpenFont(path,pt);
+    if(!f){
+        char fb[600];snprintf(fb,sizeof fb,"%s/assets/fonts/VT323-Regular.ttf",sn_data_root());
+        f=TTF_OpenFont(fb,pt);
+    }
+    if(!f)return NULL;
+    TTF_SetFontHinting(f,TTF_HINTING_LIGHT);
+    weather_font_cache[weather_font_slots_used].pt=pt;
+    weather_font_cache[weather_font_slots_used].font=f;
+    weather_font_slots_used++;
+    return f;
+}
+
+/* How long ago the reading landed, in the shortest honest form. One phrasing
+   everywhere -- the app, all three styles, and the home card -- so "how fresh is
+   this?" is answered the same way wherever you look. Returns "" when nothing has
+   ever been fetched, so callers can simply skip drawing it. */
+static const char *weather_age_text(void){
+    static char text[24];
+    if(weather_refreshing()||SDL_GetTicks()<g_weather_refresh_msg_until)
+        return "Refreshing...";
+    if(!g_weather_at)return "";
+    long secs=(long)(time(NULL)-g_weather_at);
+    if(secs<0)secs=0;
+    if(secs<90)                 snprintf(text,sizeof text,"Just now");
+    else if(secs<3600)          snprintf(text,sizeof text,"%ldm ago",secs/60);
+    else if(secs<24*3600)       snprintf(text,sizeof text,"%ldh ago",secs/3600);
+    else                        snprintf(text,sizeof text,"%ldd ago",secs/86400);
+    return text;
+}
+
+static const char *weather_place_title(void){
+    return g_weather_place[0]?g_weather_place:widget_place_name_full(1);
+}
+
+/* The freshness line, drawn small and dim with its LEFT edge at (x,y). Says
+   "Refreshing..." while a fetch is in flight, which is why there is no longer a
+   separate refresh label anywhere. Returns the width it used, so a caller that
+   is centring something can account for it. */
+static int weather_draw_age(SDL_Renderer *ren,SDL_Color color,int x,int y,int max_w){
+    const char *age=weather_age_text();
+    if(!age[0]||max_w<20)return 0;
+    SDL_Texture *a=render_text_fit(ren,font_label,age,color,max_w);
+    if(!a)return 0;
+    int aw,ah;SDL_QueryTexture(a,NULL,NULL,&aw,&ah);
+    SDL_SetTextureAlphaMod(a,170);
+    SDL_RenderCopy(ren,a,NULL,&(SDL_Rect){x,y,aw,ah});
+    SDL_SetTextureAlphaMod(a,255);
+    return aw;
+}
+/* The place name. `age_beside` puts the freshness on the right of it, at the
+   same baseline -- that is where Modern has the room. It used to sit centred
+   directly underneath, where on both layouts it collided with what came next. */
+static void weather_draw_location_header(SDL_Renderer *ren,SDL_Color color,int y,int age_beside){
+    char text[160];snprintf(text,sizeof text,"%s",weather_place_title());
+    const char *age=weather_age_text();
+    int gap=10,age_w=0,age_h=0;
+    if(age_beside&&age[0]){
+        SDL_Texture *probe=render_text_fit(ren,font_label,age,color,WIN_W/3);
+        if(probe)SDL_QueryTexture(probe,NULL,NULL,&age_w,&age_h);
+    }
+    int room=WIN_W-100-(age_w?age_w+gap:0);
+    SDL_Texture *t=render_text_fit(ren,font_label_bold?font_label_bold:font_label,text,color,room);
+    int w,h;SDL_QueryTexture(t,NULL,NULL,&w,&h);
+    // Name and freshness are centred as one cluster, so the name does not shift
+    // sideways every time the reading ticks over a minute.
+    int total=w+(age_w?age_w+gap:0),x=WIN_W/2-total/2;
+    SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){x,y,w,h});
+    if(age_w)weather_draw_age(ren,color,x+w+gap,y+(h-age_h)+1,age_w);
+}
+
+static void weather_hourly_parts(const char *source,char *label,size_t label_n,char *temp,size_t temp_n,char *rain,size_t rain_n){
+    char text[64],*part[10],*save=NULL;int count=0;
+    snprintf(text,sizeof text,"%s",source?source:"");
+    for(char *p=strtok_r(text," ",&save);p&&count<10;p=strtok_r(NULL," ",&save))part[count++]=p;
+    snprintf(label,label_n,"--");snprintf(temp,temp_n,"--");snprintf(rain,rain_n,"--");
+    if(!count)return;
+    snprintf(label,label_n,"%s",part[0]);
+    int value=1;
+    if(count>2&&(!strcasecmp(part[1],"AM")||!strcasecmp(part[1],"PM"))){snprintf(label,label_n,"%s %s",part[0],part[1]);value=2;}
+    if(value<count)snprintf(temp,temp_n,"%s",part[value]);
+    if(count>value+1&&strchr(part[count-1],'%'))snprintf(rain,rain_n,"%s",part[count-1]);
+}
+
+static void weather_draw_hourly(SDL_Renderer *ren,SDL_Rect box,Theme *th,int panel,int max_items,int selected){
+    if(panel)weather_draw_panel(ren,box,th->select_bg,th->accent2,selected);
+    else if(selected){
+        SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,255);
+        SDL_RenderDrawRect(ren,&box);SDL_Rect inner={box.x+2,box.y+2,box.w-4,box.h-4};SDL_RenderDrawRect(ren,&inner);
+    }
+    // Centred, not jammed against the left edge.
+    SDL_Texture *title=render_text(ren,font_label_bold?font_label_bold:font_label,weather_fc_title(g_weather_fc_mode),th->accent2);
+    int tw,thh;SDL_QueryTexture(title,NULL,NULL,&tw,&thh);
+    SDL_RenderCopy(ren,title,NULL,&(SDL_Rect){box.x+box.w/2-tw/2,box.y+4,tw,thh});
+    // A window onto the list rather than its first few entries: fourteen days
+    // and a cursor that can reach all of them need the strip to follow, and
+    // it keeps the selection off the edge where there is room to.
+    int total=weather_fc_count(g_weather_fc_mode);
+    int count=total>max_items?max_items:total;
+    int first=0;
+    if(total>count){
+        first=weather_hourly_sel-count/2;
+        if(first<0)first=0;
+        if(first>total-count)first=total-count;
+    }
+    if(count<=0){
+        SDL_Texture *empty=render_text_fit(ren,font_label,"Forecast unavailable",g_ui_dim,box.w-20);
+        int ew,eh;SDL_QueryTexture(empty,NULL,NULL,&ew,&eh);
+        SDL_RenderCopy(ren,empty,NULL,&(SDL_Rect){box.x+box.w/2-ew/2,box.y+box.h/2-eh/2+thh/2,ew,eh});return;
+    }
+    int left=box.x+8,top=box.y+thh+7,slot=(box.w-16)/count;
+    int bottom=box.y+box.h-6,content=bottom-top;
+    // Three stacked rows -- hour, temperature, rain chance -- instead of one
+    // cramped line in the fixed 14px face, which was unreadable on a 640x480
+    // panel. The temperature gets the height it has room for.
+    // Size the temperature to whatever actually leaves room for all three rows,
+    // rather than to a guessed fraction of the box: the three layouts and the
+    // two device fonts give this strip quite different heights, and picking a
+    // number that "usually" fits is how the rain chance kept vanishing.
+    TTF_Font *small_font=font_label;
+    int label_h=TTF_FontHeight(small_font);
+    int room=content-2*label_h-6;               // what is left for the number
+    int temp_px=room;if(temp_px<16)temp_px=16;if(temp_px>30)temp_px=30;
+    TTF_Font *temp_font=weather_temp_font(temp_px);
+    if(!temp_font)temp_font=font_small?font_small:font_label;
+    // Step down until the stack genuinely fits, then give up and drop the rain
+    // row -- the hour and the temperature are what the strip is for.
+    while(temp_px>16&&temp_font&&2*label_h+TTF_FontHeight(temp_font)+6>content){
+        temp_px-=2;
+        TTF_Font *smaller=weather_temp_font(temp_px);
+        if(!smaller)break;
+        temp_font=smaller;
+    }
+    for(int i=0;i<count;i++){
+        int item=first+i;
+        char row[64],label[20],temp[24],rain[20];
+        weather_fc_row(g_weather_fc_mode,item,row,sizeof row);
+        weather_hourly_parts(row,label,sizeof label,temp,sizeof temp,rain,sizeof rain);
+        if(selected&&item==weather_hourly_sel){
+            SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,42);
+            SDL_RenderFillRect(ren,&(SDL_Rect){left+i*slot+2,top-3,slot-4,bottom-top+6});
+        }
+        if(i){SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,70);SDL_RenderDrawLine(ren,left+i*slot,top,left+i*slot,bottom);}
+        int cx=left+i*slot+slot/2,fitw=slot-10;
+        SDL_Texture *lt=render_text_fit(ren,small_font,label,g_ui_dim,fitw);
+        SDL_Texture *vt=render_text_fit(ren,temp_font,temp,g_ui_text,fitw);
+        SDL_Texture *rt=render_text_fit(ren,small_font,rain,th->accent2,fitw);
+        int lw,lh,vw,vh,rw,rh;
+        SDL_QueryTexture(lt,NULL,NULL,&lw,&lh);SDL_QueryTexture(vt,NULL,NULL,&vw,&vh);SDL_QueryTexture(rt,NULL,NULL,&rw,&rh);
+        // If the three rows do not fit, the rain chance is the one to drop --
+        // the hour and the temperature are what the strip is for.
+        int stack=lh+vh+rh+6,show_rain=stack<=content;
+        if(!show_rain)stack=lh+vh+3;
+        int y=top+(content-stack)/2;if(y<top)y=top;
+        SDL_RenderCopy(ren,lt,NULL,&(SDL_Rect){cx-lw/2,y,lw,lh});
+        SDL_RenderCopy(ren,vt,NULL,&(SDL_Rect){cx-vw/2,y+lh+3,vw,vh});
+        if(show_rain)SDL_RenderCopy(ren,rt,NULL,&(SDL_Rect){cx-rw/2,y+lh+vh+6,rw,rh});
+    }
+}
+
+// A live weather scene sized to one panel, rather than the static glyph that
+// used to sit there. Same vocabulary as the wallpaper -- drifting cloud art,
+// falling rain and snow, a storm flash, a slow sun or moon -- but scaled into
+// `box` and clipped to it, and everything is drawn at a low enough alpha (with
+// a scrim over the top) that the readout stays legible on top of it.
+// Where the scene starts fading out, as a percentage of the panel width. A hard
+// clip here drew a visible vertical edge -- a box appearing behind the text and
+// cutting across whatever was moving past. Instead the scene runs the full width
+// and is dissolved into the panel colour over this band, so a cloud or the sun
+// slides partly behind the readout and fades away rather than being sliced.
+#define WEATHER_BOX_FADE_START_PCT 46
+
+static void weather_box_scene(SDL_Renderer *ren,SDL_Rect box,int kind,SDL_Color scrim){
+    if(box.w<24||box.h<24||kind==WX_NONE)return;
+    Uint32 now=SDL_GetTicks();
+    SDL_Rect old_clip;SDL_bool had_clip=SDL_RenderIsClipEnabled(ren);
+    SDL_RenderGetClipRect(ren,&old_clip);
+    // Everything below lays out against the full panel; the clip is what keeps
+    // it on the left, so a cloud can drift partly under the text and stop.
+    SDL_Rect full=box;
+    SDL_RenderSetClipRect(ren,&full);
+    SDL_BlendMode ob;SDL_GetRenderDrawBlendMode(ren,&ob);
+    SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+
+    if(kind==WX_SUN||kind==WX_CLEARNIGHT){
+        // Drifts slowly along the panel the way the wallpaper body crosses the
+        // screen, so the box is never quite static.
+        int size=box.h*13/10;
+        float drift=0.5f+0.42f*sinf(now*.00013f);
+        int cx=box.x+(int)(drift*box.w),cy=box.y+box.h/2;
+        if(kind==WX_SUN)weather_art_draw(ren,WEATHER_ART_SUN,cx-size/2,cy-size/2,size,(SDL_Color){255,220,140,120});
+        else{
+            weather_art_draw(ren,WEATHER_ART_MOON,cx-size/2,cy-size/2,size,(SDL_Color){212,226,255,130});
+            for(int i=0;i<14;i++){
+                int x=box.x+(i*67+23)%box.w,y=box.y+(i*41+11)%box.h;
+                float t=sinf(now*.0012f+i*1.9f);
+                SDL_SetRenderDrawColor(ren,220,232,255,(Uint8)(46+(int)(t*t*54.0f)));
+                SDL_RenderDrawPoint(ren,x,y);
+            }
+        }
+    }else{
+        // Everything else is cloud-led. Two clouds crossing at different speeds
+        // read as weather without ever becoming busy.
+        SDL_Color tint=(kind==WX_STORM)?(SDL_Color){150,160,182,88}:(SDL_Color){236,242,250,76};
+        for(int i=0;i<2;i++){
+            int cw=box.w*(i?52:68)/100;
+            int span=box.w+cw;
+            int x=box.x+(int)((now/(i?150u:96u)+i*197u)%(Uint32)span)-cw;
+            int y=box.y+(i?box.h/2-box.h/8:box.h/8);
+            weather_art_draw(ren,WEATHER_ART_CLOUD,x,y,cw,tint);
+        }
+        if(kind==WX_RAIN||kind==WX_STORM){
+            SDL_SetRenderDrawColor(ren,120,190,240,kind==WX_STORM?150:118);
+            for(int i=0;i<26;i++){
+                int x=box.x+(i*53+(int)(now/9))%box.w;
+                int y=box.y+(i*37+(int)(now/5))%box.h;
+                SDL_RenderDrawLine(ren,x,y,x-5,y+11);
+            }
+            if(kind==WX_STORM&&((now/900)%9)==0){
+                SDL_SetRenderDrawColor(ren,255,255,255,60);SDL_RenderFillRect(ren,&box);
+            }
+        }else if(kind==WX_SNOW){
+            SDL_SetRenderDrawColor(ren,236,246,255,140);
+            for(int i=0;i<20;i++){
+                int x=box.x+(i*71+(int)(now/40))%box.w;
+                int y=box.y+(i*47+(int)(now/22))%box.h;
+                SDL_RenderDrawPoint(ren,x,y);SDL_RenderDrawPoint(ren,x+1,y);
+            }
+        }else if(kind==WX_FOG||kind==WX_WIND){
+            SDL_SetRenderDrawColor(ren,206,218,232,kind==WX_FOG?70:86);
+            for(int i=0;i<4;i++){
+                int y=box.y+box.h/6+i*box.h/6+(int)(sinf(now*.0009f+i)*4);
+                int x=kind==WX_WIND?box.x+(int)((now/22u+i*83)%(Uint32)(box.w+120))-120:box.x;
+                SDL_RenderDrawLine(ren,x,y,x+(kind==WX_WIND?110:box.w),y);
+            }
+        }
+    }
+    // No flat scrim over the whole panel: laying an even tone across it is what
+    // made a second, darker rectangle appear inside the card. The scene is drawn
+    // faint enough to sit under the readout on its own, exactly the way the
+    // wallpaper does behind the home screen.
+    //
+    // The only thing left is a gentle ramp toward the text, and it deliberately
+    // tops out well short of opaque -- the weather keeps shining through, just
+    // dimmer, rather than being covered by a block.
+    {
+        int fade_x=full.x+full.w*WEATHER_BOX_FADE_START_PCT/100;
+        int fade_w=full.x+full.w-fade_x;
+        int peak=scrim.a?scrim.a:96;         /* how dim it gets at the far edge */
+        if(fade_w>0&&peak>0){
+            const int steps=20;
+            for(int i=0;i<steps;i++){
+                int sx=fade_x+fade_w*i/steps,sw=fade_x+fade_w*(i+1)/steps-sx;
+                if(sw<1)sw=1;
+                float f=(float)(i+1)/(float)steps;
+                int a=(int)(peak*f*f);       /* eases in, never reaches solid */
+                if(a<=0)continue;
+                SDL_SetRenderDrawColor(ren,scrim.r,scrim.g,scrim.b,(Uint8)a);
+                SDL_RenderFillRect(ren,&(SDL_Rect){sx,full.y,sw,full.h});
+            }
+        }
+    }
+    SDL_SetRenderDrawBlendMode(ren,ob);
+    if(had_clip)SDL_RenderSetClipRect(ren,&old_clip);
+    else SDL_RenderSetClipRect(ren,NULL);
+}
+
+static void weather_draw_settings_button(SDL_Renderer *ren,Theme *th,int x,int y,int w){
+    SDL_Rect button={x,y,w,38};weather_draw_panel(ren,button,th->select_bg,th->accent2,weather_app_sel==WEATHER_FOCUS_SETTINGS);
+    SDL_Texture *t=render_text_fit(ren,font_label_bold?font_label_bold:font_label,"Weather Settings",g_ui_text,w-32);
+    int tw,thh;SDL_QueryTexture(t,NULL,NULL,&tw,&thh);SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){x+w/2-tw/2,y+button.h/2-thh/2,tw,thh});
+}
+
+static void weather_draw_footer(SDL_Renderer *ren,SDL_Color color){
+    SDL_Texture *t=render_text_fit(ren,font_label,"D-Pad Navigate   A Select   L1/R1 View   X Refresh   B Back",color,WIN_W-48);
+    int w,h;SDL_QueryTexture(t,NULL,NULL,&w,&h);SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){WIN_W/2-w/2,WIN_H-h-7,w,h});
+}
+
+static void weather_draw_metric_row(SDL_Renderer *ren,int x,int y,int w,const char *label,const char *value,SDL_Color label_color,SDL_Color value_color){
+    const int gap=8;
+    TTF_Font *label_font=font_fixed?font_fixed:font_label,*value_font=font_label;
+    int natural_label=0,natural_value=0;
+    TTF_SizeUTF8(label_font,label,&natural_label,NULL);
+    TTF_SizeUTF8(value_font,value,&natural_value,NULL);
+    if(natural_label+gap+natural_value>w&&font_fixed)value_font=font_fixed;
+    SDL_Texture *lt=render_text_fit(ren,label_font,label,label_color,w-gap);
+    int lw,lh;SDL_QueryTexture(lt,NULL,NULL,&lw,&lh);
+    SDL_Texture *vt=render_text_fit(ren,value_font,value,value_color,w-lw-gap);
+    int vw,vh;SDL_QueryTexture(vt,NULL,NULL,&vw,&vh);
+    SDL_RenderCopy(ren,lt,NULL,&(SDL_Rect){x,y+(vh-lh)/2,lw,lh});
+    SDL_RenderCopy(ren,vt,NULL,&(SDL_Rect){x+w-vw,y,vw,vh});
+}
+
+// The big temperature used to be rendered once at font_big and then stretched
+// to fill its box, which is exactly why the number looked soft and pixelated
+// next to the crisp text around it. Rasterize it at the size it is actually
+// drawn instead. `align`: -1 left, 0 centre, 1 right.
+static void weather_draw_large_temp_aligned(SDL_Renderer *ren,const char *temp,SDL_Color color,
+                                            SDL_Rect box,int target_h,int align){
+    TTF_Font *f=weather_temp_font(target_h);
+    if(!f)f=font_big;
+    SDL_Texture *t=render_text_fit(ren,f,temp,color,box.w);
+    if(!t)return;
+    int w,h;SDL_QueryTexture(t,NULL,NULL,&w,&h);
+    // Only ever scale DOWN, and only if the box is genuinely too small: an
+    // upscale is what produced the soft edges in the first place.
+    int dw=w,dh=h;
+    if(dh>box.h){dh=box.h;dw=h?w*box.h/h:w;}
+    if(dw>box.w){dw=box.w;dh=w?h*box.w/w:h;}
+    int x=align<0?box.x:align>0?box.x+box.w-dw:box.x+box.w/2-dw/2;
+    SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){x,box.y+box.h/2-dh/2,dw,dh});
+}
+
+static void weather_draw_large_temp(SDL_Renderer *ren,const char *temp,SDL_Color color,SDL_Rect box,int target_h){
+    weather_draw_large_temp_aligned(ren,temp,color,box,target_h,0);
+}
+
+static void weather_render_modern(SDL_Renderer *ren,Theme *th,const char *temp,const char *cond,int kind){
+    weather_draw_location_header(ren,th->accent2,56,1);
+    const int margin=24;
+    // The current panel gives up a little height so the hourly strip can take
+    // it: that strip is what was too small to read on a 640x480 panel.
+    SDL_Rect current={margin,90,WIN_W-margin*2,130};weather_draw_panel(ren,current,th->select_bg,th->accent2,weather_app_sel==WEATHER_FOCUS_CURRENT);
+    const int visual_w=current.w*56/100,temp_x=current.x+108,temp_w=visual_w-118;
+    draw_weather_icon(ren,current.x+16,current.y+22,78,kind,g_ui_text,th->select_bg);
+    weather_draw_large_temp(ren,temp,g_ui_text,(SDL_Rect){temp_x,current.y+8,temp_w,74},62);
+    SDL_Texture *ct=render_text_fit(ren,font_small,cond,th->accent2,temp_w);int cw,ch;SDL_QueryTexture(ct,NULL,NULL,&cw,&ch);
+    SDL_RenderCopy(ren,ct,NULL,&(SDL_Rect){temp_x+temp_w/2-cw/2,current.y+current.h-ch-10,cw,ch});
+    int mx=current.x+visual_w+16,mw=current.w-visual_w-28;
+    SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,90);SDL_RenderDrawLine(ren,mx-12,current.y+16,mx-12,current.y+current.h-16);
+    char highlow[48];snprintf(highlow,sizeof highlow,"%s / %s",g_weather_high[0]?g_weather_high:"--",g_weather_low[0]?g_weather_low:"--");
+    weather_draw_metric_row(ren,mx,current.y+18,mw,"FEELS LIKE",g_weather_feels[0]?g_weather_feels:"--",g_ui_dim,g_ui_text);
+    weather_draw_metric_row(ren,mx,current.y+52,mw,"HIGH / LOW",highlow,g_ui_dim,g_ui_text);
+    weather_draw_metric_row(ren,mx,current.y+86,mw,"RAIN CHANCE",g_weather_precip[0]?g_weather_precip:"--",g_ui_dim,g_ui_text);
+    weather_draw_hourly(ren,(SDL_Rect){margin,232,WIN_W-margin*2,132},th,1,5,weather_app_sel==WEATHER_FOCUS_HOURLY);
+    int button_w=WIN_W>=700?360:336;weather_draw_settings_button(ren,th,WIN_W/2-button_w/2,378,button_w);
+    weather_draw_footer(ren,th->accent2);
+}
+
+static void weather_render_minimal(SDL_Renderer *ren,Theme *th,const char *temp,const char *cond,int kind){
+    weather_draw_location_header(ren,g_ui_dim,54,0);
+    // Minimal is laid out by measuring, not by fixed coordinates: the icon and
+    // the number sit on one baseline as a single centred cluster, the condition
+    // reads directly under them rather than floating far below, and the focus
+    // ring is drawn around what is actually there instead of a big empty box.
+    // Deliberately smaller than it could be: the hourly strip below needs the
+    // height more than the number does, and at this size it is still the
+    // biggest thing on the screen.
+    const int temp_px=60;
+    TTF_Font *tf=weather_temp_font(temp_px);if(!tf)tf=font_big;
+    int tw=0,thh=0;TTF_SizeUTF8(tf,temp,&tw,&thh);
+    int icon=54,gap=14;
+    int avail=WIN_W-96;
+    if(tw>avail-icon-gap)tw=avail-icon-gap;
+    // The freshness rides to the right of the number -- under the place name
+    // it had nowhere to go on this layout without touching the icon.
+    const char *age_text=weather_age_text();
+    int age_gap=12,age_w=0,age_h=0;
+    if(age_text[0]){
+        SDL_Texture *probe=render_text_fit(ren,font_label,age_text,g_ui_dim,avail/3);
+        if(probe)SDL_QueryTexture(probe,NULL,NULL,&age_w,&age_h);
+        if(icon+gap+tw+age_gap+age_w>avail)age_w=0;   /* the number comes first */
+    }
+    int cluster_w=icon+gap+tw+(age_w?age_gap+age_w:0);
+    int cluster_x=WIN_W/2-cluster_w/2,cluster_y=88;
+    int cluster_h=thh>icon?thh:icon;
+
+    SDL_Texture *ct=render_text_fit(ren,font_small,cond,th->accent2,avail);
+    int cw,ch;SDL_QueryTexture(ct,NULL,NULL,&cw,&ch);
+    char info[180];snprintf(info,sizeof info,"Feels %s     High / Low %s / %s     Rain %s",
+                            g_weather_feels[0]?g_weather_feels:"--",g_weather_high[0]?g_weather_high:"--",
+                            g_weather_low[0]?g_weather_low:"--",g_weather_precip[0]?g_weather_precip:"--");
+    SDL_Texture *it=render_text_fit(ren,font_label,info,g_ui_dim,avail);
+    int iw,ih;SDL_QueryTexture(it,NULL,NULL,&iw,&ih);
+
+    int cond_y=cluster_y+cluster_h+2,info_y=cond_y+ch+6;
+    // Focus ring hugging the real content: the widest of the three rows.
+    if(weather_app_sel==WEATHER_FOCUS_CURRENT){
+        int widest=cluster_w;if(cw>widest)widest=cw;if(iw>widest)widest=iw;
+        SDL_Rect focus={WIN_W/2-widest/2-20,cluster_y-12,widest+40,info_y+ih+10-(cluster_y-12)};
+        SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,220);
+        SDL_RenderDrawRect(ren,&focus);
+        SDL_Rect inner={focus.x+2,focus.y+2,focus.w-4,focus.h-4};
+        SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,110);
+        SDL_RenderDrawRect(ren,&inner);
+    }
+    draw_weather_icon(ren,cluster_x,cluster_y+(cluster_h-icon)/2,icon,kind,g_ui_text,th->bg);
+    weather_draw_large_temp_aligned(ren,temp,g_ui_text,
+        (SDL_Rect){cluster_x+icon+gap,cluster_y,tw,cluster_h},temp_px,-1);
+    // Sat on the number's baseline, not its middle, so it reads as a footnote
+    // to the temperature rather than a second value.
+    if(age_w)weather_draw_age(ren,g_ui_dim,cluster_x+icon+gap+tw+age_gap,
+                              cluster_y+(cluster_h+thh)/2-age_h,age_w);
+    SDL_RenderCopy(ren,ct,NULL,&(SDL_Rect){WIN_W/2-cw/2,cond_y,cw,ch});
+    SDL_RenderCopy(ren,it,NULL,&(SDL_Rect){WIN_W/2-iw/2,info_y,iw,ih});
+
+    int hourly_y=info_y+ih+16;
+    weather_draw_hourly(ren,(SDL_Rect){44,hourly_y,WIN_W-88,374-hourly_y},th,0,5,weather_app_sel==WEATHER_FOCUS_HOURLY);
+    int button_w=WIN_W>=700?360:336;weather_draw_settings_button(ren,th,WIN_W/2-button_w/2,378,button_w);
+    weather_draw_footer(ren,th->accent2);
+}
+
+// How far left the ticker line has crawled, `elapsed` ms after the app opened
+// or the location changed. Zero (parked) for the first WEATHER_TICKER_HOLD_MS
+// so the city at the head of the line can actually be read; after that it
+// crawls at the old rate and wraps every text width + 90px gap. `*moving` says
+// whether the render loop still needs to hold the frame rate up.
+static int weather_ticker_offset(Uint32 elapsed,int text_w,int *moving){
+    if(moving)*moving=0;
+    if(elapsed<=WEATHER_TICKER_HOLD_MS)return 0;
+    if(text_w<1)text_w=1;
+    if(moving)*moving=1;
+    return -(int)(((elapsed-WEATHER_TICKER_HOLD_MS)/35u)%(Uint32)(text_w+90));
+}
+
+static void weather_draw_channel_ticker(SDL_Renderer *ren,const char *temp,const char *cond){
+    SDL_Color ink={18,26,62,255};
+    SDL_SetRenderDrawColor(ren,230,154,42,255);SDL_RenderFillRect(ren,&(SDL_Rect){0,54,WIN_W,38});
+    SDL_Texture *head=render_text(ren,font_label_bold?font_label_bold:font_label,"LOCAL WEATHER",ink);
+    int hw,hh;SDL_QueryTexture(head,NULL,NULL,&hw,&hh);SDL_RenderCopy(ren,head,NULL,&(SDL_Rect){18,73-hh/2,hw,hh});
+    char line[420];
+    if(weather_refreshing())snprintf(line,sizeof line,"Refreshing %s...",weather_place_title());
+    else if(g_weather_alert[0])snprintf(line,sizeof line,"WEATHER ALERT: %s",g_weather_alert);
+    else snprintf(line,sizeof line,"%s  /  %s %s  /  Feels %s  /  High %s  Low %s  /  Rain %s  /  Updated %s",
+                  weather_place_title(),temp,cond,g_weather_feels[0]?g_weather_feels:"--",
+                  g_weather_high[0]?g_weather_high:"--",g_weather_low[0]?g_weather_low:"--",
+                  g_weather_precip[0]?g_weather_precip:"--",g_weather_updated[0]?g_weather_updated:"recently");
+    SDL_Rect area={hw+38,54,WIN_W-hw-50,38};
+    SDL_Texture *ticker=render_text(ren,font_label,line,ink);int tw,thh;SDL_QueryTexture(ticker,NULL,NULL,&tw,&thh);
+    int x=area.x,moving=0;
+    if(tw>area.w){x=area.x+weather_ticker_offset(SDL_GetTicks()-weather_ticker_started,tw,&moving);g_text_scrolling|=moving;}
+    SDL_RenderSetClipRect(ren,&area);SDL_RenderCopy(ren,ticker,NULL,&(SDL_Rect){x,73-thh/2,tw,thh});SDL_RenderSetClipRect(ren,NULL);
+}
+
+static void weather_render_channel(SDL_Renderer *ren,Theme *th,const char *temp,const char *cond,int kind){
+    weather_draw_channel_ticker(ren,temp,cond);
+    const int margin=24,gap=14,total=WIN_W-margin*2-gap,left_w=total*60/100,right_w=total-left_w;
+    SDL_Rect current={margin,104,left_w,142};weather_draw_panel(ren,current,(SDL_Color){18,39,88,255},(SDL_Color){220,231,247,255},weather_app_sel==WEATHER_FOCUS_CURRENT);
+    // The static glyph is gone: this panel now runs the same weather animation
+    // the wallpaper does, scaled into the box and clipped to it, with a scrim
+    // holding the contrast so the readout on top stays legible.
+    SDL_Rect scene={current.x+3,current.y+3,current.w-6,current.h-6};
+    // The alpha here is how dim the scene gets nearest the readout, not a
+    // blanket cover: the weather stays visible right up to the text.
+    weather_box_scene(ren,scene,kind,(SDL_Color){18,39,88,110});
+    // Temperature and condition are smaller and pulled together, right-aligned
+    // against the edge of the panel instead of drifting apart across it.
+    SDL_Color channel_ink={245,248,252,255};
+    const int temp_px=54;
+    SDL_Rect temp_box={current.x+16,current.y+16,current.w-32,64};
+    weather_draw_large_temp_aligned(ren,temp,channel_ink,temp_box,temp_px,1);
+    SDL_Texture *ct=render_text_fit(ren,font_small,cond,(SDL_Color){244,190,72,255},temp_box.w);
+    int cw,ch;SDL_QueryTexture(ct,NULL,NULL,&cw,&ch);
+    SDL_RenderCopy(ren,ct,NULL,&(SDL_Rect){temp_box.x+temp_box.w-cw,temp_box.y+temp_box.h+4,cw,ch});
+    SDL_Rect today={current.x+current.w+gap,current.y,right_w,current.h};weather_draw_panel(ren,today,(SDL_Color){236,239,226,255},(SDL_Color){18,39,88,255},weather_app_sel==WEATHER_FOCUS_CURRENT);
+    SDL_Color ink={18,39,88,255},muted={70,82,104,255};SDL_Texture *td=render_text_fit(ren,font_label_bold?font_label_bold:font_label,"CURRENT",ink,today.w-24);int dw,dh;SDL_QueryTexture(td,NULL,NULL,&dw,&dh);SDL_RenderCopy(ren,td,NULL,&(SDL_Rect){today.x+12,today.y+8,dw,dh});
+    // How fresh the reading is, top-right of the CURRENT box.
+    {
+        const char *age=weather_age_text();
+        if(age[0]){
+            SDL_Texture *at=render_text_fit(ren,font_label,age,muted,today.w/2);
+            int aw,ah;SDL_QueryTexture(at,NULL,NULL,&aw,&ah);
+            SDL_RenderCopy(ren,at,NULL,&(SDL_Rect){today.x+today.w-aw-12,today.y+9,aw,ah});
+        }
+    }
+    char highlow[48];snprintf(highlow,sizeof highlow,"%s / %s",g_weather_high[0]?g_weather_high:"--",g_weather_low[0]?g_weather_low:"--");
+    weather_draw_metric_row(ren,today.x+12,today.y+42,today.w-24,"FEELS",g_weather_feels[0]?g_weather_feels:"--",muted,ink);
+    weather_draw_metric_row(ren,today.x+12,today.y+74,today.w-24,"HIGH / LOW",highlow,muted,ink);
+    weather_draw_metric_row(ren,today.x+12,today.y+106,today.w-24,"RAIN",g_weather_precip[0]?g_weather_precip:"--",muted,ink);
+    weather_draw_hourly(ren,(SDL_Rect){margin,254,WIN_W-margin*2,126},th,1,5,weather_app_sel==WEATHER_FOCUS_HOURLY);
+    int button_w=WIN_W>=700?380:350;weather_draw_settings_button(ren,th,margin,386,button_w);
+    weather_draw_footer(ren,(SDL_Color){238,242,250,255});
+}
+
+// Every hour the provider gave us, on its own screen: two columns of rows on a
+// 640-wide panel, each row an hour with its temperature, condition and rain
+// chance. Reached with A on the hourly strip.
+/* This screen's own footer, higher off the bottom edge than the shared one --
+   the list panel gives back the room, and the line was reading as if it had
+   slipped off the screen. */
+static void weather_hourly_footer(SDL_Renderer *ren,SDL_Color color){
+    SDL_Texture *t=render_text_fit(ren,font_label,"D-Pad Browse   L1/R1 View   X Refresh   B Back",color,WIN_W-48);
+    if(!t)return;
+    int w,h;SDL_QueryTexture(t,NULL,NULL,&w,&h);
+    SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){WIN_W/2-w/2,WIN_H-h-20,w,h});
+}
+static void weather_hourly_render(SDL_Renderer *ren){
+    weather_read();weather_kick(0);
+    Theme *th=&themes[theme_idx];
+    weather_style_background(ren,th,0);draw_dock_logo(ren,font_small);
+    SDL_Color head_ink=weather_style_current()==WEATHER_STYLE_CHANNEL?(SDL_Color){238,242,250,255}:th->accent2;
+    char title[200];snprintf(title,sizeof title,"%s  -  %s",weather_fc_title(g_weather_fc_mode),weather_place_title());
+    SDL_Texture *ht=render_text_fit(ren,font_small_bold?font_small_bold:font_small,title,head_ink,WIN_W-56);
+    int hw,hh;SDL_QueryTexture(ht,NULL,NULL,&hw,&hh);SDL_RenderCopy(ren,ht,NULL,&(SDL_Rect){WIN_W/2-hw/2,54,hw,hh});
+
+    SDL_Rect panel={28,94,WIN_W-56,WIN_H-94-56};
+    weather_draw_panel(ren,panel,th->select_bg,th->accent2,0);
+    int count=weather_fc_count(g_weather_fc_mode);
+    if(count<=0){
+        SDL_Texture *e=render_text_fit(ren,font_small,"Forecast unavailable",g_ui_dim,panel.w-40);
+        int ew,eh;SDL_QueryTexture(e,NULL,NULL,&ew,&eh);
+        SDL_RenderCopy(ren,e,NULL,&(SDL_Rect){WIN_W/2-ew/2,panel.y+panel.h/2-eh/2,ew,eh});
+        weather_hourly_footer(ren,head_ink);return;
+    }
+    // Two columns keep the row height readable; one column if that is all the
+    // hours we have.
+    int cols=count>7?2:1,rows=(count+cols-1)/cols;
+    int colw=(panel.w-24)/cols,rowh=(panel.h-16)/rows;
+    if(rowh<20)rowh=20;
+    // A short list -- two week averages, say -- must not stretch two rows over
+    // the whole panel; cap the row height and centre what there is instead.
+    if(rowh>46)rowh=46;
+    int list_top=panel.y+8+((panel.h-16)-rows*rowh)/2;
+    if(list_top<panel.y+8)list_top=panel.y+8;
+    for(int i=0;i<count;i++){
+        int c=i/rows,r=i%rows;
+        if(c>=cols)break;
+        SDL_Rect cell={panel.x+12+c*colw,list_top+r*rowh,colw-8,rowh-2};
+        if(i==weather_hourly_sel){
+            SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,54);
+            SDL_RenderFillRect(ren,&cell);
+            SDL_SetRenderDrawColor(ren,th->accent2.r,th->accent2.g,th->accent2.b,210);
+            SDL_RenderDrawRect(ren,&cell);
+        }
+        char row[64],label[20],temp[24],rain[20];
+        weather_fc_row(g_weather_fc_mode,i,row,sizeof row);
+        weather_hourly_parts(row,label,sizeof label,temp,sizeof temp,rain,sizeof rain);
+        // Hour on the left, temperature next to it, rain chance on the right.
+        SDL_Texture *lt=render_text_fit(ren,font_label,label,g_ui_dim,colw*40/100);
+        SDL_Texture *tt=render_text_fit(ren,font_label_bold?font_label_bold:font_label,temp,g_ui_text,colw*34/100);
+        SDL_Texture *rt=render_text_fit(ren,font_label,rain,th->accent2,colw*26/100);
+        int lw,lh,tw2,th2,rw,rh;
+        SDL_QueryTexture(lt,NULL,NULL,&lw,&lh);SDL_QueryTexture(tt,NULL,NULL,&tw2,&th2);SDL_QueryTexture(rt,NULL,NULL,&rw,&rh);
+        SDL_RenderCopy(ren,lt,NULL,&(SDL_Rect){cell.x+8,cell.y+cell.h/2-lh/2,lw,lh});
+        SDL_RenderCopy(ren,tt,NULL,&(SDL_Rect){cell.x+cell.w*46/100,cell.y+cell.h/2-th2/2,tw2,th2});
+        SDL_RenderCopy(ren,rt,NULL,&(SDL_Rect){cell.x+cell.w-rw-8,cell.y+cell.h/2-rh/2,rw,rh});
+    }
+    weather_hourly_footer(ren,head_ink);
+}
+
+static void weather_app_render(SDL_Renderer *ren){
+    weather_read();weather_kick(0);
+    Theme *th=&themes[theme_idx];weather_style_background(ren,th,0);draw_dock_logo(ren,font_small);
+    char temp[32],cond[96];weather_current_parts(temp,sizeof temp,cond,sizeof cond);
+    int kind=weather_current_kind();if(kind==WX_NONE)kind=WX_PARTLY;
+    int style=weather_style_current();
+    if(style==WEATHER_STYLE_MINIMAL)weather_render_minimal(ren,th,temp,cond,kind);
+    else if(style==WEATHER_STYLE_CHANNEL)weather_render_channel(ren,th,temp,cond,kind);
+    else weather_render_modern(ren,th,temp,cond,kind);
+}
+
+static void weather_settings_render(SDL_Renderer *ren){
+    weather_settings_sync_dirty();
+    Theme *th=&themes[theme_idx];SDL_SetRenderDrawColor(ren,th->bg.r,th->bg.g,th->bg.b,255);SDL_RenderClear(ren);draw_dock_logo(ren,font_small);
+    SDL_Texture *head=render_text(ren,font_small_bold?font_small_bold:font_small,"WEATHER SETTINGS",th->accent2);int hw,hh;SDL_QueryTexture(head,NULL,NULL,&hw,&hh);SDL_RenderCopy(ren,head,NULL,&(SDL_Rect){44,58,hw,hh});
+    const char *labels[7]={"Location on Home","Units","Style","Wallpaper Weather","Sleep Screen Weather","Alerts","Auto Location"};
+    const char *values[7];char location[176];snprintf(location,sizeof location,"%s",widget_place_name_full(1));
+    int style=weather_style_current();
+    int alert=(weather_alert_mode>=0&&weather_alert_mode<WEATHER_ALERT_MODE_COUNT)?weather_alert_mode:0;
+    values[0]=location;values[1]=weather_unit?"Celsius":"Fahrenheit";values[2]=weather_style_names[style];
+    values[3]=weather_wallpaper_enabled?"ON":"OFF";values[4]=weather_screensaver_enabled?"ON":"OFF";
+    values[5]=weather_alert_mode_names[alert];values[6]=weather_auto_ip?"ON":"OFF";
+    SDL_Rect panel={44,94,WIN_W-88,302};weather_draw_panel(ren,panel,th->bg,th->accent2,0);
+    int rowh=41;
+    for(int i=0;i<7;i++){
+        int y=panel.y+8+i*rowh,selected=i==weather_settings_sel;
+        if(selected){SDL_SetRenderDrawColor(ren,th->select_bg.r,th->select_bg.g,th->select_bg.b,255);SDL_RenderFillRect(ren,&(SDL_Rect){panel.x+8,y-3,panel.w-16,rowh-2});}
+        SDL_Texture *vt=render_text_fit(ren,font_label,values[i],selected?th->accent2:g_ui_text,235);int vw,vh;SDL_QueryTexture(vt,NULL,NULL,&vw,&vh);SDL_RenderCopy(ren,vt,NULL,&(SDL_Rect){panel.x+panel.w-vw-18,y+7,vw,vh});
+        int label_max=panel.w-vw-58;if(label_max<150)label_max=150;
+        SDL_Texture *lt=render_text_fit(ren,font_label_bold?font_label_bold:font_label,labels[i],selected?g_ui_text:g_ui_dim,label_max);int lw,lh;SDL_QueryTexture(lt,NULL,NULL,&lw,&lh);SDL_RenderCopy(ren,lt,NULL,&(SDL_Rect){panel.x+18,y+7,lw,lh});
+    }
+    // Sleep Screen Weather and Settings > Screen & Power > Sleep Screen are the
+    // same choice. Say so on the row rather than silently reaching across.
+    if(weather_settings_sel==4){
+        const char *note=weather_screensaver_enabled
+            ? "Also sets Sleep Screen to Weather."
+            : "Sleep Screen returns to your previous choice.";
+        SDL_Texture *nt=render_text_fit(ren,font_label,note,g_ui_dim,WIN_W-96);
+        int nw,nh;SDL_QueryTexture(nt,NULL,NULL,&nw,&nh);
+        SDL_RenderCopy(ren,nt,NULL,&(SDL_Rect){WIN_W/2-nw/2,panel.y+panel.h+6,nw,nh});
+    }
+    SDL_Texture *hint=render_text_fit(ren,font_label,"D-Pad Change   A Select   B Back   START Main",th->accent2,WIN_W-48);int w,h;SDL_QueryTexture(hint,NULL,NULL,&w,&h);SDL_RenderCopy(ren,hint,NULL,&(SDL_Rect){WIN_W/2-w/2,WIN_H-h-9,w,h});
+    if(weather_settings_confirm_pending)
+        draw_save_discard_modal(ren,th,"Save Weather Settings?",weather_settings_confirm_sel);
+}
+
+// Defined below, next to the rest of the wallpaper art.
+static void weather_ambient_render(SDL_Renderer *ren,int kind,int saver);
+static float weather_arc_phase(int night);
+static void weather_arc_position(float phase,int size,int *cx,int *cy);
+static void weather_wallpaper_sun(SDL_Renderer *ren,int cx,int cy,int size,int alpha);
+static void weather_wallpaper_moon(SDL_Renderer *ren,int cx,int cy,int size,int alpha);
+
+// Perceived brightness of the surface the sleep screen is drawn on, so its text
+// can pick a colour that is legible against it. The sleep screen must stay
+// readable whatever theme the user picked -- a dark theme's dim grey text on a
+// dark sky is exactly what it must not do.
+static int weather_saver_backdrop_is_light(Theme *th){
+    SDL_Color c = weather_style_current()==WEATHER_STYLE_CHANNEL
+                ? (SDL_Color){40,50,110,255}   // the Channel gradient is always dark
+                : th->bg;
+    return (c.r*30 + c.g*59 + c.b*11) / 100 > 128;
+}
+
+static void draw_weather_screensaver(SDL_Renderer *ren){
+    weather_read();weather_kick(0);
+    Theme *th=&themes[theme_idx];
+    weather_style_background(ren,th,1);
+    char temp[32],cond[96];weather_current_parts(temp,sizeof temp,cond,sizeof cond);
+    int kind=weather_current_kind();if(kind==WX_NONE)kind=WX_PARTLY;
+    // The sleep screen gets the same ambient scene as the wallpaper -- drifting
+    // clouds, rain, stars -- rather than a bare backdrop behind the readout.
+    weather_ambient_render(ren,kind,1);
+
+    // Fixed ink, chosen from the background rather than from the theme.
+    int light=weather_saver_backdrop_is_light(th);
+    SDL_Color ink   = light ? (SDL_Color){22,26,34,255}    : (SDL_Color){246,248,252,255};
+    SDL_Color faint = light ? (SDL_Color){70,78,92,255}    : (SDL_Color){206,214,230,255};
+    SDL_Color warm  = light ? (SDL_Color){150,96,20,255}   : (SDL_Color){250,214,140,255};
+
+    // The sun and moon sit where they actually are in the sky, the same arc the
+    // wallpaper walks, so a sleep screen left up for a while shows them travel.
+    // Clear skies draw the body on the arc instead of a glyph in the middle.
+    int isz=150,x=WIN_W/2-isz/2,y=62;
+    if(kind==WX_SUN||kind==WX_CLEARNIGHT){
+        int size=kind==WX_SUN?300:170,cx,cy;
+        weather_arc_position(weather_arc_phase(kind==WX_CLEARNIGHT),size,&cx,&cy);
+        if(kind==WX_SUN){
+            // A little more shine than the wallpaper's: this screen is the
+            // subject rather than a backdrop.
+            Uint32 now=SDL_GetTicks();
+            int shimmer=190+(int)(sinf(now*.00052f)*20.0f);
+            weather_wallpaper_sun(ren,cx,cy,size,shimmer);
+            weather_wallpaper_sun(ren,cx,cy,size*7/10,90);   // brighter core
+        }else{
+            weather_wallpaper_moon(ren,cx,cy,size,215);
+        }
+    }else{
+        draw_weather_icon(ren,x,y,isz,kind,ink,th->bg);
+    }
+
+    SDL_Texture *tt=render_text_fit(ren,font_big,temp,ink,WIN_W-80);
+    int tw,thh;SDL_QueryTexture(tt,NULL,NULL,&tw,&thh);
+    SDL_RenderCopy(ren,tt,NULL,&(SDL_Rect){WIN_W/2-tw/2,y+isz+8,tw,thh});
+    SDL_Texture *ct=render_text_fit(ren,font_small,cond,warm,WIN_W-80);
+    int cw,ch;SDL_QueryTexture(ct,NULL,NULL,&cw,&ch);
+    SDL_RenderCopy(ren,ct,NULL,&(SDL_Rect){WIN_W/2-cw/2,y+isz+thh+16,cw,ch});
+    const char *place=g_weather_place[0]?g_weather_place:widget_place_name_full(1);
+    SDL_Texture *pt=render_text_fit(ren,font_label,place,faint,WIN_W-80);
+    int pw,ph;SDL_QueryTexture(pt,NULL,NULL,&pw,&ph);
+    SDL_RenderCopy(ren,pt,NULL,&(SDL_Rect){WIN_W/2-pw/2,y+isz+thh+ch+24,pw,ph});
+    if(g_weather_hourly_count){
+        int idx=(SDL_GetTicks()/2200)%g_weather_hourly_count;
+        SDL_Texture *ht=render_text_fit(ren,font_label,g_weather_hourly[idx],ink,WIN_W-80);
+        int hw2,hh2;SDL_QueryTexture(ht,NULL,NULL,&hw2,&hh2);
+        SDL_RenderCopy(ren,ht,NULL,&(SDL_Rect){WIN_W/2-hw2/2,WIN_H-hh2-28,hw2,hh2});
+    }
+}
+
+static int weather_wallpaper_allowed(AppState state){
+    if(!weather_wallpaper_enabled||state==STATE_BOOT||state==STATE_FLASHLIGHT)return 0;
+    /* An animated shower is decoration that redraws the whole screen every
+       frame. Power Save turns it off along with everything else the device
+       does not need to run. */
+    if(power_save_mode)return 0;
+    if(state==STATE_MENU||state==STATE_BOOK||state==STATE_PLATFORM)return 0;
+    if(state==STATE_MINIGAME||state==STATE_MINIGAMES||state==STATE_LINK)return 0;
+    return 1;
+}
+
+static SDL_Texture *weather_art(SDL_Renderer *ren,int which){
+    if(which<0||which>=WEATHER_ART_COUNT)return NULL;
+    if(weather_art_epoch!=renderer_epoch){
+        for(int i=0;i<WEATHER_ART_COUNT;i++){weather_art_texture[i]=NULL;weather_art_tried[i]=0;}
+        weather_art_epoch=renderer_epoch;
+    }
+    if(!weather_art_tried[which]){
+        char path[768];snprintf(path,sizeof path,"%s/assets/weather/%s",sn_data_root(),weather_art_files[which]);
+        weather_art_texture[which]=load_scaled_texture(ren,path,512);
+        weather_art_tried[which]=1;
+    }
+    return weather_art_texture[which];
+}
+
+// Draw one piece of art `width` px wide, centred on nothing in particular --
+// (x,y) is its top-left, matching the cloud call sites. The art is white, so
+// `color` both tints it and sets its overall opacity.
+static void weather_art_draw(SDL_Renderer *ren,int which,int x,int y,int width,SDL_Color color){
+    SDL_Texture *t=weather_art(ren,which);if(!t)return;
+    int tw=1,th=1;SDL_QueryTexture(t,NULL,NULL,&tw,&th);
+    int height=tw>0?width*th/tw:width/2;if(height<1)height=1;
+    SDL_SetTextureBlendMode(t,SDL_BLENDMODE_BLEND);
+    SDL_SetTextureColorMod(t,color.r,color.g,color.b);
+    SDL_SetTextureAlphaMod(t,color.a);
+    SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){x,y,width,height});
+    SDL_SetTextureColorMod(t,255,255,255);
+    SDL_SetTextureAlphaMod(t,255);
+}
+
+static void weather_wallpaper_cloud(SDL_Renderer *ren,int x,int y,int width,SDL_Color color){
+    weather_art_draw(ren,WEATHER_ART_CLOUD,x,y,width,color);
+}
+
+// The sun art bakes its own corona and rays into the alpha channel and fades to
+// nothing at the edge of the image, so a single stretched copy is the whole
+// effect -- no primitive rays, and one draw call instead of thousands of lines.
+static void weather_wallpaper_sun(SDL_Renderer *ren,int cx,int cy,int size,int alpha){
+    weather_art_draw(ren,WEATHER_ART_SUN,cx-size/2,cy-size/2,size,
+                     (SDL_Color){255,226,150,(Uint8)alpha});
+}
+
+// How far through its arc the sun (or, at night, the moon) is right now: 0.0 at
+// rise, 1.0 at set. Uses the real sunrise/sunset the forecast reported for the
+// selected location, in that location's own timezone. Falls back to a
+// conventional 6am-7pm day when we have no sun times yet, so the sun still
+// tracks the clock on a cold boot instead of sitting in a corner. Clamped, so
+// the body parks at the horizon rather than sliding off during the other half
+// of the cycle.
+static float weather_arc_phase(int night){
+    time_t now=time(NULL);
+    struct tm lt=widget_place_time(1,now);
+    int minute=lt.tm_hour*60+lt.tm_min;
+    int fresh=g_sun_times_at>0&&now>=g_sun_times_at&&now-g_sun_times_at<48*60*60;
+    int rise=(fresh&&g_sunrise_minute>=0)?g_sunrise_minute:6*60;
+    int set =(fresh&&g_sunset_minute >=0)?g_sunset_minute :19*60;
+    // A location can report a set before its rise near the poles; a day with no
+    // length has no arc to walk.
+    if(set<=rise){rise=6*60;set=19*60;}
+    float phase;
+    if(!night){
+        phase=(float)(minute-rise)/(float)(set-rise);
+    }else{
+        // Night wraps midnight: measure from sunset round to the next sunrise.
+        int span=1440-(set-rise);
+        int elapsed=minute>=set?minute-set:minute+1440-set;
+        phase=span>0?(float)elapsed/(float)span:0.5f;
+    }
+    if(phase<0.0f)phase=0.0f;
+    if(phase>1.0f)phase=1.0f;
+    return phase;
+}
+
+// Where along the top of the screen that phase puts the body. A shallow arc:
+// low at both horizons, highest at the midpoint, and starting/ending far enough
+// off-screen that it rises and sets rather than popping in at the edge.
+static void weather_arc_position(float phase,int size,int *cx,int *cy){
+    *cx=(int)(-size*0.34f+phase*(WIN_W+size*0.68f));
+    *cy=HUD_BAR_H+8+(int)(52.0f*(1.0f-sinf(phase*3.14159265f)));
+}
+
+static void weather_wallpaper_moon(SDL_Renderer *ren,int cx,int cy,int size,int alpha){
+    weather_art_draw(ren,WEATHER_ART_MOON,cx-size/2,cy-size/2,size,
+                     (SDL_Color){222,233,255,(Uint8)alpha});
+}
+
+// The ambient weather layer, shared by the wallpaper (drawn under the whole UI)
+// and the Sleep Screen Weather saver, which used to have no scene at all.
+static void weather_ambient_render(SDL_Renderer *ren,int kind,int saver){
+    if(kind==WX_NONE)return;
+    Uint32 now=SDL_GetTicks();
+    SDL_BlendMode old;SDL_GetRenderDrawBlendMode(ren,&old);
+    SDL_SetRenderDrawBlendMode(ren,SDL_BLENDMODE_BLEND);
+    if(kind==WX_RAIN||kind==WX_STORM){
+        if(kind==WX_STORM)weather_wallpaper_cloud(ren,WIN_W/2-170,54,340,(SDL_Color){112,122,142,120});
+        // A real shower, not one uniform slant: three bands of drops falling at
+        // different angles and speeds, with the whole shower leaning slowly back
+        // and forth as if the wind were shifting. Near drops are longer, faster
+        // and brighter than far ones, which is what gives it depth.
+        float gust=sinf(now*.00018f)*5.0f;
+        /* At the deep-idle step the screen only updates about ten times a
+           second, so every drop jumps a long way between frames and a full
+           shower reads as stutter. Thinning it out keeps the motion legible;
+           the battery saving is worth more than the extra drops. */
+        int per_band=g_frame_target_ms>=60?9:30;
+        for(int band=0;band<3;band++){
+            float lean=gust+(band-1)*3.5f;      // each band leans differently
+            int len=9+band*5;                   // and the near band streaks more
+            int speed=10-band*3;                // ... and falls faster
+            int alpha=(kind==WX_STORM?150:112)-band*24;
+            int thick=band==2?2:1;
+            SDL_SetRenderDrawColor(ren,92,168,230,(Uint8)(alpha<40?40:alpha));
+            for(int i=0;i<per_band;i++){
+                int seed=i*79+band*911;
+                int x=(seed+(int)(now/(Uint32)(14-band*3)))%(WIN_W+120)-60;
+                int y=(i*43+band*277+(int)(now/(Uint32)speed))%(WIN_H+60)-30;
+                for(int t=0;t<thick;t++)
+                    SDL_RenderDrawLine(ren,x+t,y,x+t+(int)lean,y+len);
+            }
+        }
+        if(kind==WX_STORM&&((now/900)%9)==0){SDL_SetRenderDrawColor(ren,255,255,255,78);SDL_RenderFillRect(ren,&(SDL_Rect){0,0,WIN_W,WIN_H});}
+    }else if(kind==WX_SNOW){
+        SDL_SetRenderDrawColor(ren,235,246,255,132);
+        for(int i=0;i<62;i++){
+            int x=(i*97+(int)(now/34))%WIN_W;
+            int y=(i*59+(int)(now/18))%WIN_H;
+            int r=1+i%3;SDL_RenderDrawLine(ren,x-r,y,x+r,y);SDL_RenderDrawLine(ren,x,y-r,x,y+r);
+        }
+    }else if(kind==WX_SUN){
+        // One sun, breathing very slowly, walking the real solar arc across the
+        // top of the screen -- off the left edge at sunrise, off the right at
+        // sunset, highest around midday. Its corona and rays are painted into
+        // the art's alpha, so they fade out on their own long before they reach
+        // the middle of the screen where the text is.
+        // The saver draws its own big sun in the middle, so skip the arc one.
+        if(!saver){
+            // Fixed size. It used to breathe by +/-10px, which at this scale
+            // read as a jiggle rather than a glow. The only movement now is the
+            // arc itself -- minutes per pixel -- plus a slow shimmer in the
+            // alpha, which costs nothing extra: it is the same single draw.
+            const int size=392;
+            int cx,cy;
+            weather_arc_position(weather_arc_phase(0),size,&cx,&cy);
+            int shimmer=150+(int)(sinf(now*.00052f)*16.0f);
+            weather_wallpaper_sun(ren,cx,cy,size,shimmer);
+        }
+    }else if(kind==WX_CLEARNIGHT){
+        // The moon walks the same arc across the night, over a twinkling sky.
+        if(!saver){
+            int size=196,cx,cy;
+            weather_arc_position(weather_arc_phase(1),size,&cx,&cy);
+            weather_wallpaper_moon(ren,cx,cy,size,170);
+        }
+        for(int i=0;i<28;i++){
+            int x=(i*83+17)%WIN_W,y=70+(i*47)%(WIN_H-90);
+            // Each star runs its own phase so they never blink in unison.
+            float t=sinf(now*.0011f+i*1.7f);
+            int a=74+(int)(t*t*72.0f);
+            SDL_SetRenderDrawColor(ren,214,228,255,(Uint8)a);
+            SDL_RenderDrawPoint(ren,x,y);
+            if(i%4==0){
+                SDL_SetRenderDrawColor(ren,214,228,255,(Uint8)(a/2));
+                SDL_RenderDrawLine(ren,x-2,y,x+2,y);SDL_RenderDrawLine(ren,x,y-2,x,y+2);
+            }
+        }
+    }else if(kind==WX_CLOUD||kind==WX_PARTLY){
+        // Partly cloudy keeps a sun, just smaller and further into the corner so
+        // the clouds drifting past it are the thing you notice.
+        if(kind==WX_PARTLY&&!saver)weather_wallpaper_sun(ren,10,HUD_BAR_H,300,120);
+        SDL_Color cloud={255,255,255,92};
+        for(int i=0;i<5;i++){
+            int size=128+(i%3)*24;
+            int x=(int)((i*181+now/75u)%(Uint32)(WIN_W+size*2))-size;
+            int y=64+(i*79)%(WIN_H-150);
+            weather_wallpaper_cloud(ren,x,y,size,cloud);
+        }
+    }else if(kind==WX_FOG){
+        SDL_SetRenderDrawColor(ren,190,205,212,76);
+        for(int i=0;i<7;i++){
+            int y=70+i*58+(int)(sinf(now*.0007f+i)*10);
+            SDL_RenderFillRect(ren,&(SDL_Rect){0,y,WIN_W,12});
+        }
+    }else if(kind==WX_WIND){
+        SDL_SetRenderDrawColor(ren,175,210,224,100);
+        for(int i=0;i<12;i++){
+            int x=(int)((now/18u+i*103)%(Uint32)(WIN_W+180))-180,y=62+(i*37)%(WIN_H-82);
+            SDL_RenderDrawLine(ren,x,y,x+150,y);SDL_RenderDrawLine(ren,x+28,y+3,x+120,y+3);
+        }
+    }
+    SDL_SetRenderDrawBlendMode(ren,old);
+}
+
+static void weather_wallpaper_render(SDL_Renderer *ren,AppState state){
+    if(!weather_wallpaper_allowed(state))return;
+    weather_ambient_render(ren,weather_current_kind(),0);
+}
+
+static int weather_alert_should_show(AppState state){
+    (void)state;
+    if(weather_alert_mode==0||!g_weather_alert[0]||g_weather_alert_level<=0)return 0;
+    return g_weather_alert_level>=(weather_alert_mode==1?2:1);
+}
+
+static void weather_alert_render(SDL_Renderer *ren,AppState state){
+    if(!weather_alert_should_show(state))return;
+    Theme *th=&themes[theme_idx];
+    char msg[240];snprintf(msg,sizeof msg,"!! WEATHER ALERT !! %s !!",g_weather_alert);
+    SDL_Texture *t=render_text_fit(ren,font_label,msg,(SDL_Color){255,235,235,255},WIN_W-28);
+    int tw,thh;SDL_QueryTexture(t,NULL,NULL,&tw,&thh);
+    int bh=thh+12,by=state==STATE_MINIGAME?10:HUD_BAR_H+4;
+    SDL_SetRenderDrawColor(ren,116,18,24,235);SDL_RenderFillRect(ren,&(SDL_Rect){10,by,WIN_W-20,bh});
+    SDL_SetRenderDrawColor(ren,255,86,86,255);SDL_RenderDrawRect(ren,&(SDL_Rect){10,by,WIN_W-20,bh});
+    SDL_RenderCopy(ren,t,NULL,&(SDL_Rect){WIN_W/2-tw/2,by+6,tw,thh});
+    (void)th;
+}
+
 static void screen_saver_scene_init(Uint32 now) {
     if (screen_saver_runtime == SCREEN_SAVER_STARFIELD) {
         for (int i = 0; i < SAVER_STAR_COUNT; i++) {
@@ -14075,6 +16911,21 @@ static void screen_saver_scene_init(Uint32 now) {
             f->size = (unsigned char)(7 + saver_irand(7));
             f->color = (unsigned char)saver_irand(6);
             f->kind = (unsigned char)saver_irand(7);
+            f->rare = 0;
+        }
+        /* Your rare fish first, so a full reef is never crowded out by the
+           ordinary residents. They swim a little larger and a little
+           slower -- you are meant to notice them. */
+        {
+            int mask = saver_tank_rares(), slot = 0;
+            for (int r = 0; r < MGX_RARE_COUNT && slot < SAVER_FISH_COUNT; r++) {
+                if (!mgx_rare_owned(mask, r)) continue;
+                SaverFish *f = &saver_fish[slot++];
+                f->rare = (unsigned char)(r + 1);
+                f->size = (unsigned char)(13 + (r & 1));
+                f->vx = (11.0f + (float)saver_irand(9)) * (saver_irand(2) ? 1.0f : -1.0f);
+                f->kind = 0;
+            }
         }
         for (int i = 0; i < SAVER_BUBBLE_COUNT; i++) {
             saver_bubbles[i].x = (float)saver_irand(WIN_W > 1 ? WIN_W : 1);
@@ -14099,8 +16950,11 @@ static void screen_saver_begin(void) {
     screen_saver_vx = 43.0f;
     screen_saver_vy = 29.0f;
     screen_saver_color = 0;
+    // No override here any more: screen_saver_idx IS the choice, and the
+    // Weather toggle sets it. Two settings fighting over the same slot meant
+    // whichever was touched last silently won.
     screen_saver_runtime = screen_saver_idx == SCREEN_SAVER_RANDOM
-                         ? SCREEN_SAVER_BOUNCE + saver_irand(4)
+                         ? SCREEN_SAVER_BOUNCE + saver_irand(SCREEN_SAVER_WEATHER)
                          : screen_saver_idx;
     screen_saver_scene_init(now);
 }
@@ -14113,6 +16967,10 @@ static void screen_saver_wake(void) {
 }
 
 static int screen_saver_should_sleep(Uint32 now) {
+    // "Keep Sleep Screen On" holds the panel up past its duration, but only
+    // while the handheld is on wall power. Unplug it and the ordinary timeout
+    // takes over again, so a forgotten setting can never flatten the battery.
+    if (screen_saver_always_on && power_is_plugged_in()) return 0;
     return screen_saver_active && now - screen_saver_started >= screen_saver_duration_ms();
 }
 
@@ -14275,20 +17133,25 @@ static void draw_screen_saver_starfield(SDL_Renderer *ren) {
     SDL_SetRenderDrawBlendMode(ren, old_blend);
 }
 
+/* How solid the sleep-screen fish are drawn. The sleep screen wants them
+   opaque; the wallpaper wants them faint enough to read the interface
+   through. One scale beats a second copy of the drawing code. */
+static int saver_fish_alpha = 255;
+#define SAV_A(a) ((Uint8)((a) * saver_fish_alpha / 255))
 static void saver_draw_fish(SDL_Renderer *ren, const SaverFish *f, Uint32 now) {
     const SDL_Color palette[6] = {
         {255,151,67,255}, {251,218,88,255}, {109,221,214,255},
         {238,116,179,255}, {142,172,255,255}, {189,132,237,255}
     };
-    SDL_Color c = palette[f->color % 6];
+    SDL_Color c = f->rare ? mgx_rare_color(f->rare - 1, now) : palette[f->color % 6];
     int dir = f->vx >= 0.0f ? 1 : -1;
     int s = f->size, x = (int)f->x;
     int y = (int)(f->y + sinf(now / (720.0f + f->kind * 95.0f) + f->color) * 2.0f);
     SDL_Color fin = { (Uint8)(c.r/2), (Uint8)(c.g/2), (Uint8)(c.b/2), 255 };
 
     if (f->kind == 5) { /* jellyfish */
-        fill_rounded(ren, (SDL_Rect){x-s, y-s/2, s*2, s}, s/2, c.r,c.g,c.b,220);
-        SDL_SetRenderDrawColor(ren, c.r,c.g,c.b,190);
+        fill_rounded(ren, (SDL_Rect){x-s, y-s/2, s*2, s}, s/2, c.r,c.g,c.b,SAV_A(220));
+        SDL_SetRenderDrawColor(ren, c.r,c.g,c.b,SAV_A(190));
         for (int n=-1;n<=1;n++) {
             int tx=x+n*s/2;
             SDL_RenderDrawLine(ren,tx,y+s/3,tx+(n&1?2:-2),y+s+5);
@@ -14296,20 +17159,20 @@ static void saver_draw_fish(SDL_Renderer *ren, const SaverFish *f, Uint32 now) {
         return;
     }
     if (f->kind == 6) { /* seahorse */
-        fill_rounded(ren,(SDL_Rect){x-s/2,y-s, s, s+7},s/2,c.r,c.g,c.b,255);
-        fill_rounded(ren,(SDL_Rect){x-dir*s/2,y-s-4,s,7},3,c.r,c.g,c.b,255);
-        SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,255);
+        fill_rounded(ren,(SDL_Rect){x-s/2,y-s, s, s+7},s/2,c.r,c.g,c.b,SAV_A(255));
+        fill_rounded(ren,(SDL_Rect){x-dir*s/2,y-s-4,s,7},3,c.r,c.g,c.b,SAV_A(255));
+        SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,SAV_A(255));
         SDL_RenderDrawLine(ren,x,y+6,x-dir*6,y+13);
         SDL_RenderDrawLine(ren,x-dir*6,y+13,x-dir*1,y+17);
     } else {
         int bw=s*(f->kind==4?4:f->kind==2?2:2);
         int bh=f->kind==2?s*2:f->kind==3?s+s/2:s;
-        fill_rounded(ren,(SDL_Rect){x-bw/2,y-bh/2,bw,bh},bh/2,c.r,c.g,c.b,255);
+        fill_rounded(ren,(SDL_Rect){x-bw/2,y-bh/2,bw,bh},bh/2,c.r,c.g,c.b,SAV_A(255));
         int tail_x=dir>0?x-bw/2-s/2:x+bw/2;
-        SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,255);
+        SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,SAV_A(255));
         SDL_RenderFillRect(ren,&(SDL_Rect){tail_x,y-s/2,s/2+1,s});
         SDL_RenderFillRect(ren,&(SDL_Rect){tail_x-dir*2,y-s/3,s/2+1,(s*2)/3+1});
-        SDL_SetRenderDrawColor(ren,fin.r,fin.g,fin.b,255);
+        SDL_SetRenderDrawColor(ren,fin.r,fin.g,fin.b,SAV_A(255));
         if(f->kind==2){ /* angelfish fins */
             SDL_RenderDrawLine(ren,x,y-bh/2,x-dir*s/2,y-bh/2-s/2);
             SDL_RenderDrawLine(ren,x,y+bh/2,x-dir*s/2,y+bh/2+s/2);
@@ -14329,10 +17192,92 @@ static void saver_draw_fish(SDL_Renderer *ren, const SaverFish *f, Uint32 now) {
         }
     }
     int eye_x=dir>0?x+s-4:x-s+2;
-    SDL_SetRenderDrawColor(ren,245,249,255,255);
+    SDL_SetRenderDrawColor(ren,245,249,255,SAV_A(255));
     SDL_RenderFillRect(ren,&(SDL_Rect){eye_x,y-s/4,2,2});
-    SDL_SetRenderDrawColor(ren,12,24,42,255);
+    SDL_SetRenderDrawColor(ren,12,24,42,SAV_A(255));
     SDL_RenderDrawPoint(ren,eye_x+(dir>0),y-s/4);
+}
+
+/* --- Aquarium wallpaper ---------------------------------------------------
+   The tank, drifting behind the interface. Not the sleep screen's opaque water
+   -- that would bury the UI -- but the same residents, translucent, with the
+   rare fish you bought among them. It is the answer to "what is the point of
+   owning a rare fish": you see it while you are using the device, not only
+   while you are playing.
+
+   It keeps its own small school rather than borrowing the sleep screen's, so
+   the two can be on screen in the same session without fighting over state. */
+#define TANK_WALL_COUNT 7
+static SaverFish tank_wall_fish[TANK_WALL_COUNT];
+static int tank_wall_ready = 0, tank_wall_rares = -1;
+static Uint32 tank_wall_last = 0;
+
+static void tank_wallpaper_stock(Uint32 now) {
+    int mask = saver_tank_rares(), slot = 0;
+    /* Your rares take the front of the school; the rest are ordinary fish. */
+    for (int r = 0; r < MGX_RARE_COUNT && slot < TANK_WALL_COUNT; r++) {
+        if (!mgx_rare_owned(mask, r)) continue;
+        SaverFish *f = &tank_wall_fish[slot++];
+        f->rare = (unsigned char)(r + 1); f->kind = 0;
+        f->size = (unsigned char)(12 + (r & 1));
+        f->vx = (9.0f + (float)saver_irand(7)) * (saver_irand(2) ? 1.0f : -1.0f);
+    }
+    for (; slot < TANK_WALL_COUNT; slot++) {
+        SaverFish *f = &tank_wall_fish[slot];
+        f->rare = 0; f->kind = (unsigned char)saver_irand(5);
+        f->size = (unsigned char)(7 + saver_irand(5));
+        f->color = (unsigned char)saver_irand(6);
+        f->vx = (12.0f + (float)saver_irand(14)) * (saver_irand(2) ? 1.0f : -1.0f);
+    }
+    for (int i = 0; i < TANK_WALL_COUNT; i++) {
+        tank_wall_fish[i].x = (float)saver_irand(WIN_W > 1 ? WIN_W : 1);
+        tank_wall_fish[i].y = (float)(HUD_BAR_H + 24 + saver_irand(WIN_H > 160 ? WIN_H - 160 : 1));
+        tank_wall_fish[i].next_change = now + 5000u + (Uint32)saver_irand(9000);
+    }
+    tank_wall_rares = mask; tank_wall_ready = 1; tank_wall_last = now;
+}
+
+static int tank_wallpaper_allowed(AppState state) {
+    if (!aquarium_wallpaper_enabled || state == STATE_BOOT || state == STATE_FLASHLIGHT) return 0;
+    if (power_save_mode) return 0;      /* decoration, and it animates every frame */
+    /* Never over a game, a book, or the mini-games -- including the aquarium
+       itself, which already has a tank. */
+    if (state == STATE_MENU || state == STATE_BOOK || state == STATE_PLATFORM) return 0;
+    if (state == STATE_MINIGAME || state == STATE_MINIGAMES || state == STATE_LINK) return 0;
+    return 1;
+}
+
+static void tank_wallpaper_render(SDL_Renderer *ren, AppState state) {
+    if (!tank_wallpaper_allowed(state)) { tank_wall_ready = 0; return; }
+    Uint32 now = SDL_GetTicks();
+    /* Re-stock when it first appears, and whenever the reef has changed --
+       buying a fish and backing out to Home shows it straight away. */
+    if (!tank_wall_ready || tank_wall_rares != saver_tank_rares()) tank_wallpaper_stock(now);
+    float dt = (float)(now - tank_wall_last) / 1000.0f;
+    if (dt < 0 || dt > 0.25f) dt = 0.016f;
+    tank_wall_last = now;
+
+    SDL_BlendMode old; SDL_GetRenderDrawBlendMode(ren, &old);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    /* Faint enough to read the interface through -- it is a wallpaper, not a
+       layer of fish over the top of everything. */
+    saver_fish_alpha = 92;
+    for (int i = 0; i < TANK_WALL_COUNT; i++) {
+        SaverFish *f = &tank_wall_fish[i];
+        if (SDL_TICKS_PASSED(now, f->next_change)) {
+            if (saver_irand(2)) f->vx = -f->vx;
+            else f->y += (float)(saver_irand(41) - 20);
+            f->y = fmaxf((float)(HUD_BAR_H + 18), fminf((float)WIN_H - 56.0f, f->y));
+            f->next_change = now + 6000u + (Uint32)saver_irand(11000);
+        }
+        f->x += f->vx * dt;
+        int margin = 40;
+        if (f->vx > 0.0f && f->x > WIN_W + margin) f->x = (float)-margin;
+        else if (f->vx < 0.0f && f->x < -margin) f->x = (float)(WIN_W + margin);
+        saver_draw_fish(ren, f, now);
+    }
+    saver_fish_alpha = 255;
+    SDL_SetRenderDrawBlendMode(ren, old);
 }
 
 static void draw_screen_saver_aquarium(SDL_Renderer *ren) {
@@ -14601,9 +17546,48 @@ static void draw_screen_saver(SDL_Renderer *ren) {
         case SCREEN_SAVER_STARFIELD: draw_screen_saver_starfield(ren); break;
         case SCREEN_SAVER_AQUARIUM: draw_screen_saver_aquarium(ren); break;
         case SCREEN_SAVER_SYSTEM_DREAM: draw_screen_saver_system_dream(ren); break;
+        case SCREEN_SAVER_WEATHER: draw_weather_screensaver(ren); break;
         case SCREEN_SAVER_BOUNCE:
         default: draw_screen_saver_bounce(ren); break;
     }
+}
+
+/* A small solid arrow, tip toward `dir`. Drawn rather than typed: the "<" and ">"
+   glyphs sat on the text baseline and read as punctuation, not as a control. */
+static void settings_cycle_arrow(SDL_Renderer *ren, int x, int cy, int dir, SDL_Color c) {
+    SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 255);
+    for (int k = 0; k <= 4; k++) {
+        int xx = dir < 0 ? x + k : x + 4 - k;
+        SDL_RenderDrawLine(ren, xx, cy - k, xx, cy + k);
+    }
+}
+/* Draw a settings row's label. With `arrows`, the value after "Name: " is set
+   between two arrows -- the sign that Left and Right change it. Only the row
+   under the cursor gets them; on every row they were noise. */
+static void settings_draw_label(SDL_Renderer *ren, const char *text, int x, int y,
+                                SDL_Color c, int max_w, int arrows) {
+    const char *colon = arrows ? strstr(text, ": ") : NULL;
+    if (!colon) {
+        SDL_Texture *t = render_text_fit(ren, font_label, text, c, max_w);
+        int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+        SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ x, y, w, h });
+        return;
+    }
+    char name[128];
+    size_t nl = (size_t)(colon - text) + 2;
+    if (nl >= sizeof name) nl = sizeof name - 1;
+    memcpy(name, text, nl); name[nl] = 0;
+    SDL_Texture *nt = render_text_fit(ren, font_label, name, c, max_w);
+    int nw, nh; SDL_QueryTexture(nt, NULL, NULL, &nw, &nh);
+    SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ x, y, nw, nh });
+    int cy = y + nh / 2, ax = x + nw + 2, vx = ax + 11;
+    settings_cycle_arrow(ren, ax, cy, -1, c);
+    int room = max_w - (vx - x) - 11;
+    if (room < 24) room = 24;
+    SDL_Texture *vt = render_text_fit(ren, font_label, colon + 2, c, room);
+    int vw, vh; SDL_QueryTexture(vt, NULL, NULL, &vw, &vh);
+    SDL_RenderCopy(ren, vt, NULL, &(SDL_Rect){ vx, y, vw, vh });
+    settings_cycle_arrow(ren, vx + vw + 6, cy, 1, c);
 }
 
 static void draw_screen_power_page(SDL_Renderer *ren, Theme *th) {
@@ -14629,6 +17613,15 @@ static void draw_screen_power_page(SDL_Renderer *ren, Theme *th) {
             case SP_ROW_TIMEOUT: snprintf(row, sizeof row, "Screen Timeout: %s", auto_sleep_labels[auto_sleep_idx]); break;
             case SP_ROW_SAVER: snprintf(row, sizeof row, "Sleep Screen: %s", screen_saver_names[screen_saver_idx]); break;
             case SP_ROW_SAVER_DURATION: snprintf(row, sizeof row, "Sleep Screen Duration: %s", screen_saver_duration_labels[screen_saver_duration_valid(screen_saver_duration_idx)]); break;
+            // Only offered on wall power: holding the panel on indefinitely off a
+            // battery is a flat handheld. Shown to everyone so the option is
+            // discoverable, greyed with the reason attached.
+            case SP_ROW_SAVER_ALWAYS:
+                snprintf(row, sizeof row, "Keep Sleep Screen On: %s%s",
+                         screen_saver_always_on ? "ON" : "OFF",
+                         power_is_plugged_in() ? "" : "   (A/C Only)");
+                break;
+            case SP_ROW_TANK_WALLPAPER: snprintf(row, sizeof row, "Aquarium Wallpaper: %s", aquarium_wallpaper_enabled ? "ON" : "OFF"); break;
             case SP_ROW_ASPECT: snprintf(row, sizeof row, "Aspect Ratio: %s", game_aspect_names[game_aspect_idx]); break;
             case SP_ROW_ROTATION: snprintf(row, sizeof row, "Game Rotation: %s", game_rotation_names[game_rotation_idx]); break;
             case SP_ROW_REDUCE_MOTION: snprintf(row, sizeof row, "Reduce Motion: %s", reduce_motion ? "ON" : "OFF"); break;
@@ -14639,9 +17632,9 @@ static void draw_screen_power_page(SDL_Renderer *ren, Theme *th) {
             SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
             SDL_RenderFillRect(ren, &(SDL_Rect){ x-8, y-4, WIN_W-2*x+16, pitch-4 });
         }
-        SDL_Texture *t = render_text_fit(ren, font_label, row, i == screenpower_sel ? g_ui_text : g_ui_dim, WIN_W - 2*x);
-        SDL_QueryTexture(t, NULL, NULL, &w, &h);
-        SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ x, y, w, h }); y += pitch;
+        settings_draw_label(ren, row, x, y, i == screenpower_sel ? g_ui_text : g_ui_dim, WIN_W - 2*x,
+                            i == screenpower_sel && i != SP_ROW_RESTORE);
+        y += pitch;
     }
     SDL_Texture *t = render_text_fit(ren, font_label, "D-Pad  Choose/Change    A  Change    B / Start  Back", th->accent2, WIN_W - 72);
     SDL_QueryTexture(t, NULL, NULL, &w, &h);
@@ -14670,12 +17663,28 @@ static void pad_push_key(SDL_Keycode sym) {
 // RG34XX-SP (Knulli / Batocera 42). Buttons 0-3, 7 (L1), 8 (R1), 12, 15 are
 // left unmapped -- reserved for future actions.
 // --- System volume + on-screen level overlay ------------------------------
+/* Setting the volume means forking a shell to run knulli-audio, which on the
+   H700 is tens of milliseconds. Held on the volume key that is one fork per
+   step, and the slider visibly lagged the button.
+   Coalesce instead: remember the wanted level and push only the LAST one once
+   the user stops moving. The OSD still tracks every press instantly -- it reads
+   the variable, not the mixer -- so it feels immediate while the hardware is
+   set once. */
+#define SYS_VOLUME_SETTLE_MS 110u
+static int    sys_volume_pending = -1;
+static Uint32 sys_volume_pending_at = 0;
+static int    sys_volume_last_sent = -1;
+
 #ifdef SNAPOS_TARGET_KNULLI
-static void sys_volume_apply(int pct) {
+static void sys_volume_send(int pct) {
     char cmd[160];
     snprintf(cmd, sizeof cmd,
              "XDG_RUNTIME_DIR=/var/run /usr/bin/knulli-audio setSystemVolume %d >/dev/null 2>&1 &", pct);
     system(cmd);
+}
+static void sys_volume_apply(int pct) {
+    sys_volume_pending = pct;
+    sys_volume_pending_at = SDL_GetTicks();
 }
 static int sys_volume_read(void) {
     FILE *p = popen("XDG_RUNTIME_DIR=/var/run /usr/bin/knulli-audio getSystemVolume 2>/dev/null", "r");
@@ -14688,9 +17697,21 @@ static int sys_volume_read(void) {
     return (v >= 0 && v <= 100) ? v : -1;
 }
 #else
-static void sys_volume_apply(int pct) { (void)pct; }
+static void sys_volume_send(int pct) { (void)pct; }
+static void sys_volume_apply(int pct) { sys_volume_pending = pct; sys_volume_pending_at = SDL_GetTicks(); }
 static int sys_volume_read(void) { return sys_volume_pct; }
 #endif
+
+/* Called once a frame: push the level once the user has stopped moving it. */
+static void sys_volume_tick(void) {
+    if (sys_volume_pending < 0) return;
+    if (SDL_GetTicks() - sys_volume_pending_at < SYS_VOLUME_SETTLE_MS) return;
+    int want = sys_volume_pending;
+    sys_volume_pending = -1;
+    if (want == sys_volume_last_sent) return;   /* already there */
+    sys_volume_last_sent = want;
+    sys_volume_send(want);
+}
 
 static void osd_show(int kind, int value) {
     osd_kind = kind;
@@ -15133,8 +18154,16 @@ static int draw_battery_glyph(SDL_Renderer *ren, int x, int y, int h, int pct, S
     if (pct > 100) pct = 100;
     int inner_w = body_w - 4;
     int fill_w = (inner_w * pct + 50) / 100;
-    if (fill_w > 0)
+    if (fill_w > 0) {
+        /* Power Save colours the juice amber. It is the one indication that
+           does not depend on the theme -- Midnight going away on a theme change
+           used to be the only sign, which made the mode look self-cancelling.
+           Amber rather than plain yellow so it still separates from the yellow
+           themes' own accent. */
+        if (power_save_mode) SDL_SetRenderDrawColor(ren, 238, 156, 20, 255);
         SDL_RenderFillRect(ren, &(SDL_Rect){ x + 2, y + 2, fill_w, h - 4 });
+        SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 235);
+    }
     if (is_battery_charging()) {
         // A slim green direction marker at the leading edge of the fill.
         int ax = x + 2 + (fill_w > 2 ? fill_w - 2 : 1);
@@ -15577,6 +18606,10 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
             break;
         case KB_PURPOSE_PLAYER_NAME:
             snprintf(player_name, sizeof player_name, "%.31s", kb_buffer);
+            save_settings();
+            break;
+        case KB_PURPOSE_MESSAGE:
+            if (kb_buffer[0]) sm_send_text(kb_buffer);
             break;
         case KB_PURPOSE_BT_PASSKEY:    bt_agent_answer_code(kb_buffer); break;
         case KB_PURPOSE_RADIO_SEARCH:  if (kb_buffer[0]) radio_refresh(kb_buffer); break;
@@ -15626,15 +18659,15 @@ static void kb_commit(SDL_Renderer *ren, TTF_Font *font_label, int *psel) {
 #define HOME_GRID_ROWS 2
 #define HOME_GRID_PAGE_SIZE (HOME_GRID_COLS * HOME_GRID_ROWS)
 static const char *HGRID_SLUGS[] =
-    { "consoles","library","favorites","radio","music","retroarch","link","settings","surprise","game-default","flashlight","minigames","achievements","calculator" };
+    { "consoles","library","favorites","radio","music","retroarch","link","settings","surprise","game-default","flashlight","minigames","achievements","calculator","weather","apps","messages","wildkins" };
 #define HGRID_SLUG_N ((int)(sizeof(HGRID_SLUGS)/sizeof(HGRID_SLUGS[0])))
 static SDL_Texture *hgrid_icon_cache[HGRID_SLUG_N] = { 0 };
 static int          hgrid_icon_tried[HGRID_SLUG_N] = { 0 };
 
-static SDL_Texture *hgrid_icon(SDL_Renderer *ren, const char *slug) {
+static SDL_Texture *hgrid_icon_from(SDL_Renderer *ren, const char *slug, int pack) {
     static unsigned icon_epoch = 0;
     static int cached_pack = -1;
-    int pack = (home_icon_pack_idx >= 0 && home_icon_pack_idx < HOME_ICON_PACK_COUNT) ? home_icon_pack_idx : 0;
+
     if (icon_epoch != renderer_epoch || cached_pack != pack) {
         if (icon_epoch == renderer_epoch)
             for (int i = 0; i < HGRID_SLUG_N; i++)
@@ -15665,6 +18698,39 @@ static SDL_Texture *hgrid_icon(SDL_Renderer *ren, const char *slug) {
             }
         }
         return hgrid_icon_cache[i];
+    }
+    return NULL;
+}
+
+static SDL_Texture *hgrid_icon(SDL_Renderer *ren, const char *slug) {
+    return hgrid_icon_from(ren, slug,
+        (home_icon_pack_idx >= 0 && home_icon_pack_idx < HOME_ICON_PACK_COUNT) ? home_icon_pack_idx : 0);
+}
+/* The Apps page always draws the stock set. The icon pack setting is there for
+   the App Focused home, whose tiles are sized for it; the same art in this
+   grid's smaller cells does not fit, so the choice does not reach here. */
+static SDL_Texture *apps_page_icon(SDL_Renderer *ren, const char *slug) {
+    static SDL_Texture *cache[HGRID_SLUG_N];
+    static int tried[HGRID_SLUG_N];
+    static unsigned epoch = 0;
+    if (epoch != renderer_epoch) {
+        memset(cache, 0, sizeof cache);   /* the old textures went with the old renderer */
+        memset(tried, 0, sizeof tried);
+        epoch = renderer_epoch;
+    }
+    for (int i = 0; i < HGRID_SLUG_N; i++) if (strcmp(HGRID_SLUGS[i], slug) == 0) {
+        if (!tried[i]) {
+            tried[i] = 1;
+            char stem[600];
+            snprintf(stem, sizeof stem, "%s/assets/icons/home/%s/%s",
+                     sn_data_root(), home_icon_pack_dirs[0], slug);
+            cache[i] = try_load_img(ren, stem, 512);
+            if (!cache[i]) {
+                snprintf(stem, sizeof stem, "%s/assets/icons/home/%s", sn_data_root(), slug);
+                cache[i] = try_load_img(ren, stem, 512);
+            }
+        }
+        return cache[i];
     }
     return NULL;
 }
@@ -15817,7 +18883,72 @@ static int hgrid_nav_layout(int *rt, int rcount, int current, SDL_Keycode key) {
 
 static int home_widget_focusable(int kind, int recent_count) {
     return widget_place_kind(kind) || kind == HOME_WIDGET_CALENDAR ||
-           kind == HOME_WIDGET_RADIO || (kind == HOME_WIDGET_RECENT && recent_count > 0);
+           // Music joins Radio: A on either opens its full app, so the widget
+           // is a shortcut and neither app has to be pinned to Home.
+           kind == HOME_WIDGET_RADIO || kind == HOME_WIDGET_MUSIC ||
+           // Now Playing is focusable only when there is something to play.
+           (kind == HOME_WIDGET_NOWPLAY && most_recently_played_index() >= 0) ||
+           (kind == HOME_WIDGET_RECENT && recent_count > 0);
+}
+
+/* Some cards hold their own list. Up/Down belongs to that list first, and only
+   steps to the neighbouring card once the list is already at that end -- so
+   Recently Played scrolls through its games instead of jumping straight to the
+   other widget, and running off the end still gets you out. Returns 1 when the
+   card consumed the key. `dir` is -1 for up, +1 for down. */
+static int home_widget_list_move(int kind, int dir, int recent_count) {
+    if (kind == HOME_WIDGET_RECENT) {
+        if (recent_count <= 0) return 0;
+        int at = home_recent_widget_sel < 0 ? 0
+               : home_recent_widget_sel > recent_count - 1 ? recent_count - 1
+               : home_recent_widget_sel;
+        if (dir < 0 && at > 0)                 { home_recent_widget_sel = at - 1; return 1; }
+        if (dir > 0 && at < recent_count - 1)  { home_recent_widget_sel = at + 1; return 1; }
+        return 0;
+    }
+    if (kind == HOME_WIDGET_RADIO) {
+        if (radio_count <= 0) return 0;
+        int at = radio_sel < 0 ? 0 : radio_sel > radio_count - 1 ? radio_count - 1 : radio_sel;
+        if (dir < 0 && at > 0)                { radio_sel = at - 1; }
+        else if (dir > 0 && at < radio_count - 1) { radio_sel = at + 1; }
+        else return 0;
+        if (radio_pid > 0) radio_play(radio_sel);   // live re-tune, like a dial
+        return 1;
+    }
+    return 0;
+}
+/* Arriving on a card from a direction: land at the end you came in from, so a
+   list entered from below starts at its bottom rather than its top. */
+static void home_widget_list_enter(int kind, int dir, int recent_count) {
+    if (kind == HOME_WIDGET_RECENT && recent_count > 0)
+        home_recent_widget_sel = dir < 0 ? recent_count - 1 : 0;
+    else if (kind == HOME_WIDGET_RADIO && radio_count > 0)
+        radio_sel = radio_sel < 0 ? 0 : radio_sel > radio_count - 1 ? radio_count - 1 : radio_sel;
+}
+
+/* Which informational slot Right should focus, or 0 when neither card can take
+   focus. Pulled out of the event loop so the "Right focuses a card, then A opens
+   what owns it" path is testable end to end -- it was only ever exercised by
+   hand before.
+
+   `from_y` is where the cursor already was in the left-hand column, so Right
+   crosses to the card the user was physically nearest rather than always to the
+   top one. Pass -1 when that is unknown. */
+static int home_info_focus_target_near(int kind1, int kind2, int recent_count, int from_y) {
+    int ok1 = home_widget_focusable(kind1, recent_count);
+    int ok2 = home_widget_focusable(kind2, recent_count);
+    if (!ok1 && !ok2) return 0;
+    if (ok1 != ok2) return ok1 ? 1 : 2;
+    if (from_y < 0) return 1;
+    /* home_widget_draw_top[] is where each card was actually drawn this frame,
+       so "nearest" means nearest on screen rather than nearest in the list. */
+    int top1 = home_widget_draw_top[0], top2 = home_widget_draw_top[1];
+    int d1 = from_y - top1; if (d1 < 0) d1 = -d1;
+    int d2 = from_y - top2; if (d2 < 0) d2 = -d2;
+    return d2 < d1 ? 2 : 1;
+}
+static int home_info_focus_target(int kind1, int kind2, int recent_count) {
+    return home_info_focus_target_near(kind1, kind2, recent_count, -1);
 }
 
 /* Shoulders change one informational slot without moving selection in the
@@ -15839,7 +18970,11 @@ static int home_info_widget_cycle_key(SDL_Keycode key) {
         else if (*changed == HOME_WIDGET_RECENT && (home_recent_widget_sel < 0 || home_recent_widget_sel >= count))
             home_recent_widget_sel = 0;
     }
-    if (*changed == HOME_WIDGET_WEATHER || *changed == HOME_WIDGET_DATEWX) weather_kick(1);
+    // No forced fetch here. Flicking L1/R1 through the widget list used to
+    // trigger a network request every time a weather card scrolled past, which
+    // is a lot of radio time for a card you may not even stop on. The card's
+    // own render calls weather_kick(0), which respects the refresh period, and
+    // Y still forces one on demand.
     save_settings(); play_click();
     return 1;
 }
@@ -15855,14 +18990,26 @@ static int home_place_widget_key(int kind, int app_view, SDL_Keycode key, AppSta
         if (!widget_place_kind(kind)) return 0;
         group = widget_place_family(kind);
     }
-    if ((app_view && (key == SDLK_PAGEUP || key == SDLK_PAGEDOWN)) ||
-        (!app_view && (key == SDLK_UP || key == SDLK_DOWN))) {
-        widget_place_cycle(group, key == SDLK_PAGEDOWN || key == SDLK_DOWN ? 1 : -1);
+    /* Up/Down no longer cycle saved places on the Informational home. Two
+       focusable cards share those keys with everything else on that screen, and
+       the Weather app is now the place to choose which location a card shows --
+       so the widget stopped competing for them. App Focused keeps L2/R2, which
+       nothing else there wants. */
+    if (app_view && (key == SDLK_PAGEUP || key == SDLK_PAGEDOWN)) {
+        widget_place_cycle(group, key == SDLK_PAGEDOWN ? 1 : -1);
         return 1;
     }
     if (key == SDLK_RETURN) {
-        widget_places_open(group);
-        *state = STATE_WIDGET_PLACES;
+        if (group) {
+            /* Weather owns location management for the weather cards. */
+            weather_app_enter(STATE_HOME);
+            *state = STATE_WEATHER;
+        } else {
+            /* A clock card has no weather to show, so it goes straight to the
+               shared Saved Locations list instead. */
+            widget_places_open_for(0, STATE_HOME);
+            *state = STATE_WIDGET_PLACES;
+        }
         return 1;
     }
     return 0;
@@ -15927,6 +19074,9 @@ static void draw_simple_home_icon(SDL_Renderer *ren, SDL_Rect box, const char *s
     else if (!strcmp(slug,"surprise")) mark="?"; else if (!strcmp(slug,"flashlight")) mark="FL";
     else if (!strcmp(slug,"minigames")) mark="MG"; else if (!strcmp(slug,"achievements")) mark="A";
     else if (!strcmp(slug,"calculator")) mark="123";
+    else if (!strcmp(slug,"weather")) mark="W";
+    else if (!strcmp(slug,"apps")) mark="APP";
+    else if (!strcmp(slug,"wildkins")) mark="WK";
     else if (!strcmp(slug,"game-default")) mark="--";
     SDL_Texture *mt = render_text(ren, font_fixed ? font_fixed : font_label, mark, ink);
     if (mt) { int mw,mh; SDL_QueryTexture(mt,NULL,NULL,&mw,&mh); SDL_RenderCopy(ren,mt,NULL,&(SDL_Rect){badge.x+badge.w/2-mw/2,badge.y+badge.h/2-mh/2,mw,mh}); }
@@ -16015,6 +19165,12 @@ static void draw_app_grid_widget(SDL_Renderer *ren, Theme *th, SDL_Rect box, int
         SDL_Texture *st = render_text_fit(ren,font_label,sub,g_ui_dim,w);
         int sw,sh; SDL_QueryTexture(st,NULL,NULL,&sw,&sh);
         SDL_RenderCopy(ren,st,NULL,&(SDL_Rect){x,y,sw,sh});
+    } else if (app_widget_kind == APP_WIDGET_CALC) {
+        // Two grid cells is tight, so the keypad takes everything below the
+        // title and the readout; draw_calculator_widget falls back to the
+        // readout alone if even that is not enough room.
+        draw_calculator_widget(ren, th, (SDL_Rect){ x, y, w, box.y + box.h - y - 7 },
+                               selected && app_widget_calc_active);
     } else if (app_widget_kind == APP_WIDGET_CALENDAR) {
         char range[72]; calendar_week_range_short(range, sizeof range);
         SDL_Texture *mt = render_text_fit(ren, font_label, range, g_ui_dim, w);
@@ -16030,9 +19186,13 @@ static void draw_app_grid_widget(SDL_Renderer *ren, Theme *th, SDL_Rect box, int
     }
     SDL_RenderSetClipRect(ren, NULL);
     if (selected && !home_grid_reorder && !app_widget_moving &&
-        (app_widget_kind == APP_WIDGET_CLOCK || app_widget_kind == APP_WIDGET_WEATHER)) {
+        (app_widget_kind == APP_WIDGET_CLOCK || app_widget_kind == APP_WIDGET_WEATHER ||
+         app_widget_kind == APP_WIDGET_CALC)) {
         TTF_Font *hint_font = font_fixed ? font_fixed : font_label;
-        SDL_Texture *hint = render_text_fit(ren, hint_font, "A  Locations   L2/R2  Zones", th->accent2, box.w + 8);
+        const char *hint_text = app_widget_kind == APP_WIDGET_CALC
+            ? (app_widget_calc_active ? "A  Press   X  Clear   Y  Delete   B  Done" : "A  Use Calculator")
+            : "A  Locations   L2/R2  Zones";
+        SDL_Texture *hint = render_text_fit(ren, hint_font, hint_text, th->accent2, box.w + 8);
         int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
         SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){box.x + (box.w - hw)/2, box.y + box.h + 5, hw, hh});
     }
@@ -16128,7 +19288,13 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         else if (trt == ROW_H_QUICK_MINIGAMES)  { slug = "minigames"; snprintf(label, sizeof label, "Mini Games"); }
         else if (trt == ROW_H_QUICK_ACHIEVEMENTS) { slug = "achievements"; snprintf(label, sizeof label, "Achievements"); }
         else if (trt == ROW_H_QUICK_CALCULATOR) { slug = "calculator"; snprintf(label, sizeof label, "Calculator"); }
+        else if (trt == ROW_H_QUICK_WEATHER)    { slug = "weather";    snprintf(label, sizeof label, "Weather"); }
+        else if (trt == ROW_H_QUICK_WILDKINS)   { slug = "wildkins";  snprintf(label, sizeof label, "Wildkins"); }
+        else if (trt == ROW_H_QUICK_MESSAGES)   { slug = "messages";  int u = sm_unread_total();
+                                                              if (u) snprintf(label, sizeof label, "Messages (%d)", u);
+                                                              else   snprintf(label, sizeof label, "Messages"); }
         else if (trt == ROW_H_SURPRISE)         { slug = "surprise";  snprintf(label, sizeof label, "Surprise Me"); }
+        else if (trt == ROW_H_QUICK_APPS)       { slug = "apps";      snprintf(label, sizeof label, "Apps"); }
         if (art) {
             if (is_sel)
                 fill_rounded(ren, (SDL_Rect){ box.x - 4, box.y - 4, box.w + 8, box.h + 8 }, 14,
@@ -16212,7 +19378,8 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
         SDL_RenderFillRect(ren, &(SDL_Rect){0,0,WIN_W,WIN_H});
         int existing = app_widget_kind != APP_WIDGET_NONE;
-        int count = existing ? 5 : 4;
+        int choices = APP_WIDGET_COUNT - 1;
+        int count = existing ? choices + 1 : choices;
         int bw = WIN_W > 680 ? 420 : WIN_W - 100;
         int pitch = TTF_FontHeight(font_label) + 9;
         int bh = 62 + count * pitch + 34;
@@ -16225,7 +19392,7 @@ static void render_home_grid(SDL_Renderer *ren, Theme *th, int *rt, int *rx, int
         SDL_RenderCopy(ren,pt,NULL,&(SDL_Rect){bx+20,by+16,pw,ph});
         int py=by+48;
         for(int j=0;j<count;j++) {
-            const char *name = j < 4 ? app_widget_names[j+1] : "Remove Widget";
+            const char *name = j < choices ? app_widget_names[j+1] : "Remove Widget";
             int sel = app_widget_picker_sel == j;
             if(sel) fill_rounded(ren,(SDL_Rect){bx+12,py-3,bw-24,pitch-1},8,
                                   th->select_bg.r,th->select_bg.g,th->select_bg.b,255);
@@ -16287,6 +19454,244 @@ static const char *mg_data_path(void) {
     snprintf(p, sizeof p, "%s/minigames.dat", sn_data_root());
     return p;
 }
+/* --- The Apps page ------------------------------------------------------- *
+ *  Every app as a grid, reached from the "Apps" row on the Informational home.
+ *  Y enters jiggle mode, a second Y picks the tile up, the D-pad moves it and A
+ *  puts it down -- the same two-stage arrangement the App Focused grid uses, so
+ *  there is only one thing to learn. X pins or unpins the highlighted app to
+ *  Home. Order and pins are saved on leaving.                                 */
+#define APPS_PAGE_COLS 3
+
+static const char *home_app_slug(int app_id) {
+    switch (app_id) {
+        case APP_RETROARCH:    return "retroarch";
+        case APP_RADIO:        return "radio";
+        case APP_MUSIC:        return "music";
+        case APP_MINIGAMES:    return "minigames";
+        case APP_LINK:         return "link";
+        case APP_FLASHLIGHT:   return "flashlight";
+        case APP_ACHIEVEMENTS: return "achievements";
+        case APP_CALCULATOR:   return "calculator";
+        case APP_WEATHER:      return "weather";
+        case APP_MESSAGES:     return "messages";
+        case APP_WILDKINS:     return "wildkins";
+    }
+    return "game-default";
+}
+
+static void apps_page_render(SDL_Renderer *ren) {
+    Theme *th = &themes[theme_idx];
+    draw_dock_logo(ren, font_small);
+    home_app_order_normalize();
+
+    SDL_Texture *head = render_text(ren, font_small_bold ? font_small_bold : font_small, "APPS", th->accent2);
+    int hw, hh; SDL_QueryTexture(head, NULL, NULL, &hw, &hh);
+    SDL_RenderCopy(ren, head, NULL, &(SDL_Rect){ 34, 54, hw, hh });
+
+    const int cols = APPS_PAGE_COLS, rows = (APP_COUNT + cols - 1) / cols;
+    const int margin = 34, gap = 12;
+    int cell_w = (WIN_W - margin * 2 - gap * (cols - 1)) / cols;
+    int top = 88, bottom = WIN_H - 44;
+    int cell_h = (bottom - top - gap * (rows - 1)) / rows;
+    if (cell_h < 48) cell_h = 48;
+    int icon = cell_h - TTF_FontHeight(font_label) - 16;
+    if (icon > cell_w - 24) icon = cell_w - 24;
+    if (icon < 20) icon = 20;
+
+    for (int i = 0; i < APP_COUNT; i++) {
+        int id = home_app_order[i];
+        int r = i / cols, c = i % cols;
+        SDL_Rect box = { margin + c * (cell_w + gap), top + r * (cell_h + gap), cell_w, cell_h };
+        int sel = i == apps_page_sel;
+        int carried = sel && apps_page_dragging;
+        if (carried) {
+            // Lift the tile a little so it is obvious it is the one moving.
+            box.y -= 3;
+            fill_rounded(ren, (SDL_Rect){ box.x - 5, box.y - 5, box.w + 10, box.h + 10 }, 14,
+                         th->accent3.r, th->accent3.g, th->accent3.b, 245);
+        } else if (sel) {
+            fill_rounded(ren, (SDL_Rect){ box.x - 4, box.y - 4, box.w + 8, box.h + 8 }, 14,
+                         th->accent2.r, th->accent2.g, th->accent2.b, 240);
+        }
+        fill_rounded(ren, box, 12, th->select_bg.r, th->select_bg.g, th->select_bg.b, sel ? 245 : 200);
+
+        SDL_Texture *ic = apps_page_icon(ren, home_app_slug(id));
+        int iy = box.y + 8;
+        if (ic) {
+            SDL_Rect d = fit_rect_for_texture(ic, (SDL_Rect){ box.x + box.w / 2 - icon / 2, iy, icon, icon });
+            SDL_RenderCopy(ren, ic, NULL, &d);
+        }
+        SDL_Texture *lt = render_text_fit(ren, font_label, home_app_names[id],
+                                          sel ? th->accent2 : g_ui_text, box.w - 10);
+        int lw, lh; SDL_QueryTexture(lt, NULL, NULL, &lw, &lh);
+        SDL_RenderCopy(ren, lt, NULL, &(SDL_Rect){ box.x + box.w / 2 - lw / 2, box.y + box.h - lh - 5, lw, lh });
+
+        // A star marks the apps that also sit directly on Home. It was a dot,
+        // which looked like an unread badge rather than a pin.
+        if (home_apps_mask & (1 << id)) {
+            SDL_SetRenderDrawColor(ren, th->accent3.r, th->accent3.g, th->accent3.b, 255);
+            fill_star(ren, box.x + box.w - 12, box.y + 12, 6.5f);
+        }
+    }
+
+    const char *hint = apps_page_dragging ? "D-Pad Move   A Place   B Cancel"
+                     : apps_page_reorder  ? "Y Pick Up   D-Pad Choose   B Done"
+                                          : "A Open   X Pin to Home   Y Rearrange   B Back";
+    SDL_Texture *ht = render_text_fit(ren, font_label, hint, th->accent2, WIN_W - 48);
+    int tw, thh; SDL_QueryTexture(ht, NULL, NULL, &tw, &thh);
+    SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ WIN_W / 2 - tw / 2, WIN_H - thh - 9, tw, thh });
+}
+
+/* The Single Card system panel. Lifted out of the render switch so it can be
+   drawn -- and screenshotted -- without standing up the whole platform screen. */
+static void single_card_info_panel(SDL_Renderer *ren, Theme *th) {
+            /* This panel used to be a full-height 300px slab down one side
+               of the screen -- most of a 640x480 panel, covering the very
+               background it was sitting on. It is measured first now and
+               drawn only as large as its own text needs, centred on the
+               screen's middle. Simple trims it to the two things you
+               actually navigate by; Informational keeps the full record. */
+            const int pad = 16, gap = 4;
+            const int wrap_w = 268;
+            int simple = single_card_info_idx == SINGLE_INFO_SIMPLE;
+            struct { SDL_Texture *t; int w, h, space; } line[16];
+            int n = 0, text_w = 0, total_h = 0;
+
+            #define PANEL_PUSH(TEXTURE, SCALE, SPACE) do { \
+                SDL_Texture *_t = (TEXTURE); \
+                if (_t && n < 16) { \
+                    int _w = 0, _h = 0; SDL_QueryTexture(_t, NULL, NULL, &_w, &_h); \
+                    _w = (int)(_w * (SCALE)); _h = (int)(_h * (SCALE)); \
+                    line[n].t = _t; line[n].w = _w; line[n].h = _h; line[n].space = (SPACE); \
+                    if (_w > text_w) text_w = _w; \
+                    total_h += _h + (SPACE); n++; \
+                } \
+            } while (0)
+
+            /* Single Card always needs a clear system identity, so the
+               name is here whichever mode is chosen. */
+            {
+                char name_lines[MAX_LINES][128];
+                int name_n = wrap_text(font_small, platform_panel_name(platform_selected), wrap_w, name_lines);
+                if (name_n > 2) name_n = 2;
+                for (int ni = 0; ni < name_n; ni++)
+                    PANEL_PUSH(render_text(ren, font_small, name_lines[ni], g_ui_text), 1.0f,
+                               ni + 1 < name_n ? 2 : 6);
+            }
+            if (!simple) {
+                PANEL_PUSH(render_text_fit(ren, font_label, platform_maker[platform_selected], g_ui_dim, wrap_w), 1.0f, 4);
+                char yeartype[48];
+                snprintf(yeartype, sizeof yeartype, "%s * %s",
+                         platform_year[platform_selected], platform_form[platform_selected]);
+                PANEL_PUSH(render_text_fit(ren, font_label, yeartype, g_ui_dim, wrap_w), 1.0f, 8);
+            }
+            {
+                char countstr[32];
+                int gc = platform_game_count_cache[platform_selected];
+                if (gc < 0) gc = 0;          /* not counted yet -- never print "-1 GAMES" */
+                snprintf(countstr, sizeof countstr, "%d GAME%s", gc, gc == 1 ? "" : "S");
+                PANEL_PUSH(render_text(ren, font_label, countstr, th->accent2), 1.0f, simple ? 0 : 8);
+            }
+            if (!simple) {
+                const float body_scale = 0.82f;
+                char blurb_lines[MAX_LINES][128];
+                int bn = wrap_text(font_label, platform_blurb[platform_selected],
+                                   (int)(wrap_w / body_scale), blurb_lines);
+                for (int bi = 0; bi < bn; bi++)
+                    PANEL_PUSH(render_text(ren, font_label, blurb_lines[bi], g_ui_dim), body_scale,
+                               bi + 1 < bn ? 3 : 0);
+            }
+            #undef PANEL_PUSH
+
+            int panel_w = text_w + pad * 2;
+            if (panel_w < 170) panel_w = 170;
+            if (panel_w > wrap_w + pad * 2) panel_w = wrap_w + pad * 2;
+            int panel_h = total_h + pad * 2;
+            int panel_y = WIN_H / 2 - panel_h / 2;
+            /* Centred, but never under the status bar or over the hint. */
+            if (panel_y < HUD_BAR_H + 8) panel_y = HUD_BAR_H + 8;
+            if (panel_y + panel_h > WIN_H - 42) panel_y = WIN_H - 42 - panel_h;
+            int align_right = single_card_title_side ? 1 : 0;
+            int panel_x = align_right ? WIN_W - panel_w - 18 : 18;
+
+            fill_rounded(ren, (SDL_Rect){ panel_x, panel_y, panel_w, panel_h }, 12,
+                         th->bg.r, th->bg.g, th->bg.b, platform_bg_tex ? 228 : 246);
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 120);
+            SDL_RenderDrawRect(ren, &(SDL_Rect){ panel_x, panel_y, panel_w, panel_h });
+
+            int cy = panel_y + pad;
+            for (int i = 0; i < n; i++) {
+                int tx = align_right ? panel_x + panel_w - pad - line[i].w : panel_x + pad;
+                SDL_RenderCopy(ren, line[i].t, NULL, &(SDL_Rect){ tx, cy, line[i].w, line[i].h });
+                cy += line[i].h + line[i].space;
+            }
+}
+
+/* Opening an app is the same work whether it was reached from a pinned Home row
+   or from the Apps page, so both go through here rather than keeping two copies
+   of the dispatch that could drift apart. `back` is where the app should return
+   to when the user backs out of it. */
+static void home_open_app(int app_id, SDL_Window **win, SDL_Renderer **ren,
+                          int *video_released, AppState *state, AppState back) {
+    play_click();
+    switch (app_id) {
+        case APP_RETROARCH:
+            launch_retroarch_menu(win, ren, video_released);
+            break;
+        case APP_LINK:
+            link_scan_games();
+            link_game_sel = 0; link_system_sel = 0;
+            link_my_game[0] = '\0'; link_my_sys[0] = '\0'; link_my_path[0] = '\0';
+            link_my_mode = LINK_MODE_GB;
+            link_phase = LP_SYSTEM;
+            *state = STATE_LINK;
+            break;
+        case APP_RADIO:
+            radio_sel = 0;
+            if (radio_count == 0 && !radio_loading) radio_refresh(NULL);
+            *state = STATE_RADIO;
+            break;
+        case APP_MUSIC:
+            if (!music_scanned) music_scan();
+            if (music_playing >= 0) music_sel = music_playing;
+            *state = STATE_MUSIC;
+            break;
+        case APP_FLASHLIGHT:
+            // Arming is answered on Home, so make sure that is where we are.
+            *state = STATE_HOME;
+            flashlight_pending = 1;   // needs a 2nd press to confirm
+            break;
+        case APP_MINIGAMES:
+            mg_menu_sel = 0;
+            *state = STATE_MINIGAMES;
+            break;
+        case APP_ACHIEVEMENTS:
+            ra_book_load(); ra_book_selected = 0;
+            ra_book_return_state = back;
+            *state = STATE_ACHIEVEMENTS;
+            break;
+        case APP_CALCULATOR:
+            calculator_selected = 0;
+            *state = STATE_CALCULATOR;
+            break;
+        case APP_WEATHER:
+            weather_app_enter(back);
+            *state = STATE_WEATHER;
+            break;
+        case APP_MESSAGES:
+            sm_enter(back);
+            *state = STATE_MESSAGES;
+            break;
+        case APP_WILDKINS:
+            // Full screen, as its own program: SNAP steps aside until it exits.
+            wildkins_launch(win, ren, video_released);
+            break;
+        default:
+            break;
+    }
+}
+
 static void minigames_save(void) {
     FILE *f = fopen(mg_data_path(), "w");
     if (!f) return;
@@ -16364,6 +19769,26 @@ static void mg_chrome(SDL_Renderer *ren, const char *name) {
     SDL_Texture *bk = render_text(ren, font_label, "B  Exit", g_ui_dim);
     int bw, bh; SDL_QueryTexture(bk, NULL, NULL, &bw, &bh);
     SDL_RenderCopy(ren, bk, NULL, &(SDL_Rect){ WIN_W - bw - 30, 56, bw, bh });
+}
+
+
+/* One stat line, in the same place in every game that has one. Each game used
+   to put its own wherever it had room, which ran Breakout's "Level 1/5 Score.."
+   straight through its own title and drew Flapping Bird's gold across the top
+   of the play area. The panel keeps it off whatever is behind it, and playfields
+   start below MG_STAT_BOTTOM. */
+#define MG_STAT_Y 80
+#define MG_STAT_BOTTOM 110
+static void mg_stat_line(SDL_Renderer *ren, const char *text) {
+    Theme *th = mg_theme();
+    SDL_Texture *t = render_text_fit(ren, font_label, text, g_ui_text, WIN_W - 108);
+    if (!t) return;
+    int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+    SDL_Rect box = { WIN_W/2 - w/2 - 12, MG_STAT_Y, w + 24, h + 6 };
+    fill_rounded(ren, box, 8, th->select_bg.r, th->select_bg.g, th->select_bg.b, 225);
+    SDL_SetRenderDrawColor(ren, th->dim.r, th->dim.g, th->dim.b, 190);
+    SDL_RenderDrawRect(ren, &box);
+    SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ box.x + 12, box.y + 3, w, h });
 }
 
 /* ----------------------------- Snake ----------------------------------- */
@@ -16624,7 +20049,7 @@ static void flap_newpipe(int i, float atx) {
     fb.ppass[i] = 0;
 }
 static void flap_reset(void) {
-    fb.top = 98; fb.bot = WIN_H - 46;
+    fb.top = MG_STAT_BOTTOM + 8; fb.bot = WIN_H - 46;
     fb.bx  = WIN_W / 3;
     fb.by  = (fb.top + fb.bot) / 2.0f; fb.bvy = 0;
     fb.gap = 128; fb.pw = 46; fb.speed = 3;
@@ -16724,7 +20149,7 @@ static void brk_fill_level(void) {
 }
 
 static void brk_reset(void) {
-    bo.top = 100; bo.bot = WIN_H - 40;
+    bo.top = MG_STAT_BOTTOM + 8; bo.bot = WIN_H - 40;
     bo.left = 40; bo.right = WIN_W - 40;
     bo.pw = 70; bo.ph = 9;
     bo.bw = (bo.right - bo.left) / BRK_COLS; bo.bh = 16;
@@ -16806,9 +20231,7 @@ static void brk_render(SDL_Renderer *ren) {
     Theme *th = mg_theme();
     mg_chrome(ren, "BREAKOUT");
     char hud[80]; snprintf(hud, sizeof hud, "Level %d/%d   Score %d   Lives %d   Best %d", bo.level, BRK_LEVELS, bo.score, bo.lives, mg_best[MG_BREAKOUT]);
-    SDL_Texture *ht = render_text_fit(ren, font_label, hud, g_ui_text,WIN_W-80);
-    int hw, hh; SDL_QueryTexture(ht, NULL, NULL, &hw, &hh);
-    SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ bo.left, bo.top - hh - 8, hw, hh });
+    mg_stat_line(ren, hud);
 
     SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 255);
     SDL_RenderDrawRect(ren, &(SDL_Rect){ bo.left - 4, bo.top - 4, bo.right - bo.left + 8, bo.bot - bo.top + 8 });
@@ -16848,6 +20271,7 @@ static void brk_render(SDL_Renderer *ren) {
 #define C4_COLS 7
 #define C4_ROWS 6
 static struct { int cell[C4_ROWS*C4_COLS], cur, turn, over, winner; Uint32 cpu_at; } tt;
+static int c4_cursor_player = 1;
 
 static int ttt_result(const int *c) {
     for (int r=0;r<C4_ROWS;r++) for (int x=0;x<C4_COLS;x++) {
@@ -16903,7 +20327,7 @@ static void ttt_render(SDL_Renderer *ren) {
     SDL_RenderDrawRect(ren,&(SDL_Rect){bx-3,by-3,gs*C4_COLS+6,gs*C4_ROWS+6});
     for (int i = 0; i < C4_ROWS*C4_COLS; i++) {
         int cx = bx + (i % C4_COLS) * gs, cy = by + (i / C4_COLS) * gs;
-        if ((i%C4_COLS) == tt.cur && !tt.over && tt.turn == 1) {
+        if ((i%C4_COLS) == tt.cur && !tt.over && tt.turn == c4_cursor_player) {
             SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
             SDL_RenderFillRect(ren, &(SDL_Rect){ cx + 2, cy + 2, gs - 4, gs - 4 });
         }
@@ -17129,12 +20553,14 @@ static void duck_render(SDL_Renderer *ren) {
 /* -------------------------- Mini-games picker ----------------------- */
 #include "mini_games_extra.h"
 #include "friends.h"
+#include "messages.h"
 
 static BatteryPromptGuard battery_prompt_guard;
 
 static int battery_prompt_frontend_allowed(AppState state) {
     if (game_running || lid_closed || is_sleeping || screen_saver_active ||
         sf.prompt || sf_offer >= 0 || calendar_reminder_popup || wifi_prompt_active ||
+        weather_settings_confirm_pending ||
         settings_confirm_pending || settings_autops_confirm || settings_night_theme_confirm ||
         aspect_preview_active || theme_editor_active() || flashlight_pending ||
         app_widget_picker || app_widget_moving || home_grid_reorder) return 0;
@@ -17152,6 +20578,20 @@ static int battery_prompt_choice_held(void) {
         SDL_Joystick *joy = SDL_JoystickFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
         if (joy && (SDL_JoystickGetButton(joy, pad_idx(PADK_A, 3)) ||
                     SDL_JoystickGetButton(joy, pad_idx(PADK_B, 4)))) return 1;
+    }
+    return 0;
+}
+
+/* The pad bridge turns a press into an instant keydown+keyup, so a "hold
+   this button" control cannot be assembled from events. Drawing in Messages
+   reads the button and the keyboard directly instead. */
+static int pad_button_held(int padk, int fallback_idx, SDL_Scancode key) {
+    const Uint8 *ks = SDL_GetKeyboardState(NULL);
+    if (ks && ks[key]) return 1;
+    int idx = pad_idx(padk, fallback_idx);
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        SDL_Joystick *joy = SDL_JoystickFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
+        if (joy && SDL_JoystickGetButton(joy, idx)) return 1;
     }
     return 0;
 }
@@ -17683,6 +21123,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Put the branded boot screen up the moment there is a window and a font to
+    // draw it with. Everything below -- mounting the second card, scanning ROMs,
+    // building indexes -- used to run BEFORE the first draw, so the panel sat
+    // black for several seconds and the handheld looked like it had failed to
+    // start. None of that work got faster; it is simply no longer invisible.
+    g_boot_sequence_started = SDL_GetTicks();
+    g_boot_quote_seed = promo_mode ? 0 : boot_quote_choose();
+    g_boot_loading_mode = 1;
+    play_chime();
+    g_boot_stage_base = 0.00f; g_boot_stage_span = 0.10f;
+    draw_progress(ren, "Starting up", 0.0f);
+
     // Resolve the pad's button numbering from the kernel. Must run after
     // load_settings(), so a binding saved on a handheld with more buttons can
     // be corrected for this one.
@@ -17692,22 +21144,19 @@ int main(int argc, char *argv[]) {
     // Knulli mounts one data partition as /userdata and leaves the other card
     // unmounted, so a two-card handheld shows one card's games and no sign the
     // other exists. Mount it ourselves before anything scans for ROMs.
+    draw_progress(ren, "Checking storage", 0.25f);
     storage_scan();
     if (storage_automount_all() > 0) storage_scan();   // pick up the new mount points
+    draw_progress(ren, "Checking storage", 0.75f);
     roms_autoadd_new();
 
     ensure_rom_folders();
     ensure_asset_folders();
     art_async_start();   // background cover-art decoder
 
-    // Use the branded boot sequence to do the first expensive work up front.
-    // The quote remains visible throughout and first visits to Consoles / Game
-    // Library can reuse the populated indexes and texture caches below.
-    g_boot_sequence_started = SDL_GetTicks();
-    g_boot_quote_seed = promo_mode ? 0 : boot_quote_choose();
-    g_boot_loading_mode = 1;
-    play_chime();
-    g_boot_stage_base = 0.00f; g_boot_stage_span = 0.38f;
+    // The rest of the first-run work, with the quote still on screen. First
+    // visits to Consoles / Game Library reuse the indexes and caches below.
+    g_boot_stage_base = 0.10f; g_boot_stage_span = 0.30f;
     draw_progress(ren, "Preparing systems", 0.0f);
     warm_console_assets(ren);
     g_boot_stage_base = 0.38f; g_boot_stage_span = 0.40f;
@@ -17767,16 +21216,38 @@ int main(int argc, char *argv[]) {
         {
             int scrolling = nav_cur || hat_nav || stick_nav ||
                             (SDL_GetTicks() - last_input_time) < 150;
-            art_decode_budget = (g_thermal_level >= 2) ? 1
-                              : scrolling ? 2
-                              : power_save_mode ? 3 : 6;
+            // Draining is cheap now -- the decode, the format conversion and
+            // the shadow blur all happen on the art thread, so all that is left
+            // here is two texture uploads. Keeping the budget up mid-scroll is
+            // what makes art arrive with the cursor instead of behind it.
+            // Three decode threads feed this now, and all that is left here is
+            // the texture upload, so the budget is what decides how fast art
+            // appears rather than how much the frame can afford.
+            art_decode_budget = (g_thermal_level >= 2) ? 2
+                              : scrolling ? (power_save_mode ? 4 : 8)
+                              : power_save_mode ? 6 : 12;
         }
         // `ren` is intentionally NULL for the whole RetroArch session. Never
         // try to upload decoded covers into a renderer that has been released.
         if (ren) art_drain(ren, art_decode_budget);
+        sys_volume_tick();   // push a settled volume level, at most once per move
+        // The bookshelf page asks for its screenshot during render; hand that
+        // request to the decode threads here, once a frame.
+        book_shot_pump();
         // Look-ahead: covers around the cursor so the next flip already has art.
-        if (game_count > 0 && (state == STATE_MENU || state == STATE_BOOK))
-            art_prefetch(selected, 6, 24);
+        if (game_count > 0 && (state == STATE_MENU || state == STATE_BOOK)) {
+            // Which way the cursor is travelling, so the look-ahead leads it.
+            static int art_last_selected = -1;
+            if (art_last_selected >= 0 && selected != art_last_selected)
+                art_cursor_dir = (selected > art_last_selected) ? 1 : -1;
+            art_last_selected = selected;
+            art_cursor = selected;
+
+            art_prefetch_scroll(selected, nav_cur || hat_nav || stick_nav ||
+                                          (SDL_GetTicks() - last_input_time) < 180);
+        } else {
+            art_cursor = -1;
+        }
 
         if (home_grid_reorder && (state != STATE_HOME || home_view_idx != HOME_VIEW_APPS)) {
             if (home_grid_dragging)
@@ -17789,6 +21260,7 @@ int main(int argc, char *argv[]) {
             app_widget_picker = 0;
             if (app_widget_moving) app_widget_slot = app_widget_slot_backup;
             app_widget_moving = 0;
+            app_widget_calc_active = 0;
         }
         if (state == STATE_HOME) calendar_reminder_check_today();
         SDL_Event e;
@@ -18009,7 +21481,19 @@ int main(int argc, char *argv[]) {
                     play_click();
                     continue;
                 }
+                if(e.key.keysym.sym==SDLK_F1&&state==STATE_WEATHER_SETTINGS){
+                    play_click();weather_settings_request_leave(STATE_SETTINGS,&state);continue;
+                }
                 // Start button -> jump straight to Settings (press again to leave).
+                // Crazy Fish owns START: inside the tank it is that game's own
+                // pause menu, not a door into the frontend's Settings. A live
+                // level should not be interrupted by a menu belonging to
+                // something else, and leaving has to pass the save prompt.
+                if (e.key.keysym.sym == SDLK_F1 && state == STATE_MINIGAME && mg_cur == MG_TIDEPOOL) {
+                    mgx_fish_key(SDLK_F1); play_click();
+                    if (mgx_fish.want_exit) { mgx_fish.want_exit = 0; mgx_net_close(); mgx_swap_close(); state = STATE_MINIGAMES; }
+                    continue;
+                }
                 if (e.key.keysym.sym == SDLK_F1 &&
                     state != STATE_BOOT && state != STATE_KEYBOARD && state != STATE_BG_PICKER && state != STATE_BG_ONLINE && state != STATE_BG_PREVIEW && state != STATE_BG_TARGET &&
                     state != STATE_FLASHLIGHT && state != STATE_HOTKEYS) {
@@ -18018,7 +21502,7 @@ int main(int argc, char *argv[]) {
                     if (state == STATE_LINK) link_net_close();
                     if (state == STATE_SETTINGS) {
                         if (settings_dirty) {
-                            settings_confirm_pending = 1;
+                            settings_confirm_pending = 1; settings_confirm_sel = 0;
                             settings_pending_state = settings_return_state;
                             settings_pending_tab = current_tab;
                         } else {
@@ -18078,6 +21562,20 @@ int main(int argc, char *argv[]) {
                     int recent_count;
                     int rcount = build_home_rows(row_type, row_extra, recent_indices, &recent_count);
 
+                    // The Calculator widget holds the d-pad once it is entered
+                    // with A, because in this view the d-pad otherwise walks
+                    // the app grid. B gives it back.
+                    if (home_view_idx == HOME_VIEW_APPS && app_widget_calc_active) {
+                        if (app_widget_kind != APP_WIDGET_CALC || home_grid_reorder ||
+                            app_widget_picker || app_widget_moving) {
+                            app_widget_calc_active = 0;
+                        } else if (e.key.keysym.sym == SDLK_ESCAPE) {
+                            app_widget_calc_active = 0; play_click(); continue;
+                        } else {
+                            if (calculator_widget_key(e.key.keysym.sym)) play_click();
+                            continue;
+                        }
+                    }
                     if (home_view_idx == HOME_VIEW_APPS && !home_grid_reorder && !app_widget_picker &&
                         !app_widget_moving && !wifi_prompt_active && home_selected >= 0 &&
                         home_selected < rcount && row_type[home_selected] == ROW_H_APP_WIDGET &&
@@ -18086,13 +21584,15 @@ int main(int argc, char *argv[]) {
                     // state with the two Informational widget slots.
                     if (home_view_idx == HOME_VIEW_APPS && app_widget_picker) {
                         SDL_Keycode pk = e.key.keysym.sym;
-                        int count = app_widget_kind == APP_WIDGET_NONE ? 4 : 5;
+                        // Every widget kind, plus a "Remove" entry once one is set.
+                        int choices = APP_WIDGET_COUNT - 1;
+                        int count = app_widget_kind == APP_WIDGET_NONE ? choices : choices + 1;
                         if (pk == SDLK_UP) app_widget_picker_sel = (app_widget_picker_sel - 1 + count) % count;
                         else if (pk == SDLK_DOWN) app_widget_picker_sel = (app_widget_picker_sel + 1) % count;
                         else if (pk == SDLK_ESCAPE || pk == SDLK_s) { app_widget_picker = 0; play_click(); }
                         else if (pk == SDLK_RETURN) {
                             play_click();
-                            if (app_widget_picker_sel < 4) {
+                            if (app_widget_picker_sel < choices) {
                                 int was_none = app_widget_kind == APP_WIDGET_NONE;
                                 app_widget_kind = app_widget_picker_sel + 1;
                                 if (was_none) {
@@ -18130,7 +21630,7 @@ int main(int argc, char *argv[]) {
                     }
                     if (home_view_idx == HOME_VIEW_APPS && !home_grid_reorder && e.key.keysym.sym == SDLK_s) {
                         app_widget_picker = 1;
-                        app_widget_picker_sel = (app_widget_kind >= APP_WIDGET_WEATHER && app_widget_kind <= APP_WIDGET_CALENDAR)
+                        app_widget_picker_sel = (app_widget_kind >= APP_WIDGET_WEATHER && app_widget_kind < APP_WIDGET_COUNT)
                                               ? app_widget_kind - 1 : 0;
                         play_click();
                         continue;
@@ -18208,7 +21708,11 @@ int main(int argc, char *argv[]) {
                         int focusable1 = home_widget_focusable(kind1, rn);
                         int focusable2 = home_widget_focusable(kind2, rn);
                         if (!home_recent_focus_slot && e.key.keysym.sym == SDLK_RIGHT && (focusable1 || focusable2)) {
-                            home_recent_focus_slot = focusable1 ? 1 : 2;
+                            // Cross to the card the cursor is physically nearest,
+                            // not always the top one: scrolled down among the
+                            // apps, Right should reach the lower widget.
+                            home_recent_focus_slot =
+                                home_info_focus_target_near(kind1, kind2, rn, home_selected_y);
                             if (rn > 0 && home_recent_widget_sel >= rn) home_recent_widget_sel = rn - 1;
                             play_click(); continue;
                         }
@@ -18217,14 +21721,82 @@ int main(int argc, char *argv[]) {
                             int focused_ok = home_widget_focusable(focused_kind, rn);
                             if (!focused_ok) {
                                 home_recent_focus_slot = 0;
+                            } else if (focused_kind == HOME_WIDGET_CALC) {
+                                // The keypad needs all four directions, so
+                                // Left cannot double as "leave the widget"
+                                // here. B is the only way out.
+                                if (e.key.keysym.sym == SDLK_ESCAPE) {
+                                    home_recent_focus_slot = 0; play_click(); continue;
+                                }
+                                if (calculator_widget_key(e.key.keysym.sym)) play_click();
+                                continue;
                             } else if (e.key.keysym.sym == SDLK_ESCAPE || e.key.keysym.sym == SDLK_LEFT) {
                                 home_recent_focus_slot = 0; play_click(); continue;
-                            } else if (e.key.keysym.sym == SDLK_RIGHT) {
-                                int other = home_recent_focus_slot == 1 ? 2 : 1;
-                                int other_ok = other == 1 ? focusable1 : focusable2;
-                                if (other_ok) home_recent_focus_slot = other;
+                            } else if (focused_kind == HOME_WIDGET_MUSIC &&
+                                       (e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT ||
+                                        e.key.keysym.sym == SDLK_RETURN)) {
+                                // The Music card is a transport: Left/Right pick
+                                // a button, A uses it. Left off the first button
+                                // hands focus back to the row list.
+                                if (e.key.keysym.sym == SDLK_LEFT) {
+                                    if (home_music_btn > 0) { home_music_btn--; play_click(); }
+                                    else { home_recent_focus_slot = 0; play_click(); }
+                                } else if (e.key.keysym.sym == SDLK_RIGHT) {
+                                    if (home_music_btn < MUSIC_BTN_COUNT - 1) { home_music_btn++; play_click(); }
+                                } else {
+                                    play_click();
+                                    if (!music_scanned) music_scan();
+                                    if (home_music_btn == MUSIC_BTN_PLAY) {
+                                        if (music_pid > 0) music_toggle_pause();
+                                        else if (music_count > 0) music_play(music_playing >= 0 ? music_playing : 0);
+                                    } else if (music_count > 0) {
+                                        int at = music_playing >= 0 ? music_playing : 0;
+                                        int to = home_music_btn == MUSIC_BTN_NEXT
+                                               ? (at + 1) % music_count
+                                               : (at - 1 + music_count) % music_count;
+                                        music_play(to); music_sel = to;
+                                    }
+                                }
+                                continue;
+                            } else if (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN ||
+                                       e.key.keysym.sym == SDLK_RIGHT) {
+                                // A card holding its own list gets Up/Down first
+                                // and only hands the key on once that list is at
+                                // its end -- otherwise Recently Played could not
+                                // be scrolled at all. The key is always consumed:
+                                // it used to fall through to the row list, which
+                                // scrolled the LEFT column while a right-hand
+                                // card was the thing highlighted.
+                                int dir = e.key.keysym.sym == SDLK_UP ? -1 :
+                                          e.key.keysym.sym == SDLK_DOWN ? 1 : 0;
+                                if (dir && home_widget_list_move(focused_kind, dir, rn)) {
+                                    play_click(); continue;
+                                }
+                                // Off the end of a list, or a card without one:
+                                // step to the neighbour in that direction. Up
+                                // reaches the top card, Down the bottom one.
+                                int want = dir < 0 ? 1 : dir > 0 ? 2
+                                         : (home_recent_focus_slot == 1 ? 2 : 1);
+                                int want_ok = want == 1 ? focusable1 : focusable2;
+                                if (want != home_recent_focus_slot && want_ok) {
+                                    home_recent_focus_slot = want;
+                                    home_widget_list_enter(want == 1 ? kind1 : kind2, dir, rn);
+                                    play_click();
+                                }
                                 continue;
                             } else if (home_place_widget_key(focused_kind, 0, e.key.keysym.sym, &state)) {
+                                continue;
+                            } else if (focused_kind == HOME_WIDGET_NOWPLAY && e.key.keysym.sym == SDLK_RETURN) {
+                                // A launches the game the card is showing, so
+                                // the widget is a one-press resume rather than
+                                // a read-only label.
+                                int npi = most_recently_played_index();
+                                if (npi >= 0) {
+                                    ActivityRecord *a = &activity_records[npi];
+                                    home_recent_focus_slot = 0;
+                                    play_click();
+                                    launch_game(&win, &ren, &game_video_released, a->path, a->title, a->platform_dir);
+                                }
                                 continue;
                             } else if (focused_kind == HOME_WIDGET_CALENDAR && e.key.keysym.sym == SDLK_RETURN) {
                                 calendar_set_today();
@@ -18240,7 +21812,18 @@ int main(int argc, char *argv[]) {
                                     if (radio_pid > 0) radio_play(radio_sel);   // live re-tune, like a dial
                                 }
                                 continue;
-                            } else if (focused_kind == HOME_WIDGET_RADIO && e.key.keysym.sym == SDLK_RETURN) {
+                            } else if ((focused_kind == HOME_WIDGET_RADIO ||
+                                        focused_kind == HOME_WIDGET_MUSIC) &&
+                                       e.key.keysym.sym == SDLK_RETURN) {
+                                // A opens the full app, so the widget doubles as
+                                // a shortcut and neither app has to stay pinned
+                                // to Home just to be reachable. Play/pause moved
+                                // to Select, alongside the other transport keys.
+                                int open_as = focused_kind == HOME_WIDGET_RADIO ? APP_RADIO : APP_MUSIC;
+                                home_recent_focus_slot = 0;
+                                home_open_app(open_as, &win, &ren, &game_video_released, &state, STATE_HOME);
+                                continue;
+                            } else if (focused_kind == HOME_WIDGET_RADIO && e.key.keysym.sym == SDLK_SLASH) {
                                 play_click();
                                 if (radio_pid > 0) radio_stop();
                                 else if (radio_count > 0) radio_play(radio_sel);
@@ -18325,12 +21908,18 @@ int main(int argc, char *argv[]) {
                         int rt = row_type[home_selected];
                         if (rt == ROW_H_APP_WIDGET) {
                             if (app_widget_kind == APP_WIDGET_WEATHER) {
-                                weather_kick(1);
-                                g_weather_refresh_msg_until = SDL_GetTicks() + 4000;
+                                weather_app_enter(STATE_HOME);
+                                state = STATE_WEATHER;
                                 play_click();
                             } else if (app_widget_kind == APP_WIDGET_CALENDAR) {
                                 calendar_set_today();
                                 state = STATE_CALENDAR;
+                                play_click();
+                            } else if (app_widget_kind == APP_WIDGET_CALC) {
+                                // Hand the d-pad to the keypad. In this view it
+                                // normally drives grid navigation, so the widget
+                                // has to be entered and left deliberately.
+                                app_widget_calc_active = 1;
                                 play_click();
                             }
                         } else if (rt == ROW_H_CONTINUE) {
@@ -18379,28 +21968,15 @@ int main(int argc, char *argv[]) {
                             scan_favorite_games(ren, font_label);
                             selected = 0;
                             state = STATE_MENU;
-                        } else if (rt == ROW_H_QUICK_RETROARCH) {
+                        } else if (rt == ROW_H_QUICK_APPS) {
                             play_click();
-                            launch_retroarch_menu(&win, &ren, &game_video_released);
-                        } else if (rt == ROW_H_QUICK_LINK) {
-                            play_click();
-                            link_scan_games();
-                            link_game_sel = 0;
-                            link_system_sel = 0;
-                            link_my_game[0] = '\0'; link_my_sys[0] = '\0'; link_my_path[0] = '\0';
-                            link_my_mode = LINK_MODE_GB;
-                            link_phase = LP_SYSTEM;
-                            state = STATE_LINK;
-                        } else if (rt == ROW_H_QUICK_RADIO) {
-                            play_click();
-                            radio_sel = 0;
-                            if (radio_count == 0 && !radio_loading) radio_refresh(NULL);
-                            state = STATE_RADIO;
-                        } else if (rt == ROW_H_QUICK_MUSIC) {
-                            play_click();
-                            if (!music_scanned) music_scan();
-                            if (music_playing >= 0) music_sel = music_playing;
-                            state = STATE_MUSIC;
+                            apps_page_return = STATE_HOME;
+                            apps_page_reorder = apps_page_dragging = 0;
+                            if (apps_page_sel < 0 || apps_page_sel >= APP_COUNT) apps_page_sel = 0;
+                            state = STATE_APPS;
+                        } else if (home_app_id_for_row(rt) >= 0) {
+                            home_open_app(home_app_id_for_row(rt), &win, &ren,
+                                          &game_video_released, &state, STATE_HOME);
                         } else if (rt == ROW_H_QUICK_SETTINGS) {
                             play_click();
                             settings_return_state = STATE_HOME;
@@ -18409,20 +21985,6 @@ int main(int argc, char *argv[]) {
                             settings_scroll_offset = 0;
                             settings_page = SETTINGS_PAGE_ROOT;
                             state = STATE_SETTINGS;
-                        } else if (rt == ROW_H_QUICK_FLASHLIGHT) {
-                            play_click();
-                            flashlight_pending = 1;   // arm; needs a 2nd press to confirm
-                        } else if (rt == ROW_H_QUICK_MINIGAMES) {
-                            play_click();
-                            mg_menu_sel = 0;
-                            state = STATE_MINIGAMES;
-                        } else if (rt == ROW_H_QUICK_ACHIEVEMENTS) {
-                            ra_book_load(); ra_book_selected = 0;
-                            ra_book_return_state = STATE_HOME;
-                            play_click(); state = STATE_ACHIEVEMENTS;
-                        } else if (rt == ROW_H_QUICK_CALCULATOR) {
-                            calculator_selected = 0;
-                            play_click(); state = STATE_CALCULATOR;
                         }
                     }
                     // --- Media widget transport (only in the Informational view) ---
@@ -18680,6 +22242,13 @@ int main(int argc, char *argv[]) {
                 }
                 else if (state == STATE_HOTKEYS) {
                     if (hk_confirm_pending) {
+                        if (e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT) {
+                            hk_confirm_sel = !hk_confirm_sel;
+                            play_click();
+                            continue;
+                        }
+                        if (e.key.keysym.sym == SDLK_RETURN && hk_confirm_sel)
+                            e.key.keysym.sym = SDLK_d;   // A on "Don't Save"
                         if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_s) {
                             save_settings();
                             hotkeys_begin_edit();
@@ -18702,7 +22271,7 @@ int main(int argc, char *argv[]) {
                             hk_capture = -1;   // cancel a pending rebind
                             play_click();
                         } else if (hk_edit_dirty) {
-                            hk_confirm_pending = 1;
+                            hk_confirm_pending = 1; hk_confirm_sel = 0;
                             play_click();
                         } else {
                             state = STATE_SETTINGS;
@@ -19005,12 +22574,47 @@ int main(int argc, char *argv[]) {
                     else if (e.key.keysym.sym == SDLK_RETURN) {
                         play_click();
                         bg_download_pending_index = bg_preview_index;
+                        bg_target_purpose = BG_TARGET_ONLINE;
                         bg_target_selected = bg_picker_platform;
                         state = STATE_BG_TARGET;
                     }
                 }
                 else if (state == STATE_BG_TARGET) {
-                    if (e.key.keysym.sym == SDLK_ESCAPE) { play_click(); state = STATE_BG_PREVIEW; }
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        play_click();
+                        state = bg_target_purpose == BG_TARGET_DRAWING ? STATE_MESSAGES : STATE_BG_PREVIEW;
+                    }
+                    else if (bg_target_purpose == BG_TARGET_DRAWING && e.key.keysym.sym == SDLK_RETURN) {
+                        // A drawing is already in memory, so this is a straight
+                        // write into the chosen system's wallpaper folder --
+                        // no network, no downloader, and it is selected right
+                        // away so the change is visible rather than merely
+                        // filed away somewhere.
+                        play_click();
+                        char dir[900], path[1024];
+                        const unsigned char *ink = sm_photo_ink();
+                        int ok = 0;
+                        if (ink && background_download_directory(bg_target_selected, dir, sizeof dir)) {
+                            char parent[900];
+                            snprintf(parent, sizeof parent, "%s/assets/backgrounds/%s",
+                                     sn_data_root(), background_aspect_folder());
+                            mkdir(parent, 0755);
+                            mkdir(dir, 0755);
+                            ok = sm_write_drawing(ink, dir, path, sizeof path);
+                        }
+                        if (ok) {
+                            const char *name = strrchr(path, '/');
+                            name = name ? name + 1 : path;
+                            snprintf(platform_bg_choice[bg_target_selected],
+                                     sizeof platform_bg_choice[bg_target_selected], "%s", name);
+                            settings_dirty = 1;
+                            invalidate_carousel_bg(bg_target_selected);
+                            if (bg_target_selected == platform_selected) platform_assets_loaded_for = -1;
+                            sm_note("Now the %.24s background", platform_names[bg_target_selected]);
+                        } else sm_note("Could not save that as a background");
+                        bg_target_purpose = BG_TARGET_ONLINE;
+                        state = STATE_MESSAGES;
+                    }
                     else if (e.key.keysym.sym == SDLK_DOWN) {
                         play_click(); bg_target_selected = (bg_target_selected + 1) % PLATFORM_COUNT;
                     } else if (e.key.keysym.sym == SDLK_UP) {
@@ -19227,10 +22831,6 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if (state == STATE_CALCULATOR) {
-                    static const char *calc_keys[16] = {
-                        "7", "8", "9", "/", "4", "5", "6", "*",
-                        "1", "2", "3", "-", "0", ".", "+", "="
-                    };
                     SDL_Keycode k = e.key.keysym.sym;
                     int row = calculator_selected / 4, col = calculator_selected % 4;
                     if (k == SDLK_ESCAPE) { play_click(); state = STATE_HOME; }
@@ -19242,10 +22842,89 @@ int main(int argc, char *argv[]) {
                     else if (k == SDLK_s) calculator_reset();
                     else if (k == SDLK_f) calculator_backspace();
                 }
+                else if (state == STATE_MESSAGES) {
+                    sm_key(e.key.keysym.sym, &state);
+                }
+                else if (state == STATE_APPS) {
+                    SDL_Keycode ak = e.key.keysym.sym;
+                    const int cols = APPS_PAGE_COLS;
+                    home_app_order_normalize();
+                    if (apps_page_sel < 0 || apps_page_sel >= APP_COUNT) apps_page_sel = 0;
+                    int moved = -1;
+                    if (ak == SDLK_LEFT)       moved = apps_page_sel - 1;
+                    else if (ak == SDLK_RIGHT) moved = apps_page_sel + 1;
+                    else if (ak == SDLK_UP)    moved = apps_page_sel - cols;
+                    else if (ak == SDLK_DOWN)  moved = apps_page_sel + cols;
+                    if (moved >= 0 && moved < APP_COUNT) {
+                        if (apps_page_dragging) {
+                            // Carry the tile with the cursor, shuffling the rest
+                            // along rather than swapping two distant apps.
+                            int carried = home_app_order[apps_page_sel];
+                            int step = moved > apps_page_sel ? 1 : -1;
+                            for (int i = apps_page_sel; i != moved; i += step)
+                                home_app_order[i] = home_app_order[i + step];
+                            home_app_order[moved] = carried;
+                        }
+                        apps_page_sel = moved;
+                        play_click();
+                    } else if (ak == SDLK_ESCAPE) {
+                        play_click();
+                        if (apps_page_dragging) apps_page_dragging = 0;
+                        else if (apps_page_reorder) apps_page_reorder = 0;
+                        else { save_settings(); state = apps_page_return; }
+                    } else if (ak == SDLK_f) {          // Y
+                        play_click();
+                        if (!apps_page_reorder) apps_page_reorder = 1;
+                        else apps_page_dragging = !apps_page_dragging;
+                    } else if (ak == SDLK_s) {          // X: pin / unpin
+                        int id = home_app_order[apps_page_sel];
+                        home_apps_mask ^= (1 << id);
+                        // Not saved per keypress: writing the whole settings
+                        // file on every pin toggle is an SD write inside the
+                        // frame, and pinning a few apps felt like the device
+                        // had stalled. B saves on the way out.
+                        play_click();
+                    } else if (ak == SDLK_RETURN) {
+                        if (apps_page_dragging) { apps_page_dragging = 0; save_settings(); play_click(); }
+                        else if (apps_page_reorder) { apps_page_dragging = 1; play_click(); }
+                        else home_open_app(home_app_order[apps_page_sel], &win, &ren,
+                                           &game_video_released, &state, STATE_APPS);
+                    }
+                }
+                else if (state == STATE_WEATHER) {
+                    weather_app_key(e.key.keysym.sym,&state);
+                }
+                else if (state == STATE_WEATHER_HOURLY) {
+                    weather_hourly_key(e.key.keysym.sym,&state);
+                }
+                else if (state == STATE_WEATHER_SETTINGS) {
+                    weather_settings_key(e.key.keysym.sym,&state);
+                }
                 else if (state == STATE_ACHIEVEMENTS) {
                     SDL_Keycode k = e.key.keysym.sym;
                     if (k == SDLK_ESCAPE) { play_click(); state = ra_book_return_state; }
                     if (k == SDLK_s) { play_click(); ra_book_refresh(); }
+                    // Y jumps straight to the RetroAchievements settings with the
+                    // group already open, rather than making the user go and
+                    // find them. B (or saving) comes back here, not to wherever
+                    // Settings was last left.
+                    if (k == SDLK_f) {
+                        play_click();
+                        settings_return_state = STATE_ACHIEVEMENTS;
+                        current_tab = TAB_ACCOUNT;
+                        ra_dropdown_open = 1;
+                        settings_selected = 0;
+                        settings_scroll_offset = 0;
+                        settings_page = SETTINGS_PAGE_ROOT;
+                        {   // Land on the RetroAchievements header itself.
+                            int at[MAX_ACCOUNT_ROWS], ax[MAX_ACCOUNT_ROWS];
+                            int n = build_account_rows(at, ax);
+                            for (int i = 0; i < n; i++)
+                                if (at[i] == ROW_RA_HEADER) { settings_selected = i; break; }
+                        }
+                        state = STATE_SETTINGS;
+                        continue;
+                    }
                     if (ra_achievement_count > 0) {
                         if (k == SDLK_DOWN) { ra_book_selected = (ra_book_selected + 1) % ra_achievement_count; play_click(); }
                         if (k == SDLK_UP) { ra_book_selected = (ra_book_selected - 1 + ra_achievement_count) % ra_achievement_count; play_click(); }
@@ -19338,7 +23017,7 @@ int main(int argc, char *argv[]) {
                             case MG_BLOXORZ:  block_reset(); break;
                             case MG_DUCKDASH: duck_reset();  break;
                             case MG_RUNNER: mgx_runner_reset(); break;
-                            case MG_ROAD: mgx_road_reset(); break;
+                            case MG_ROAD: mgx_road_choosing = 1; mgx_road_reset(); break;   // ask once per visit, not per retry
                             case MG_SWAP: mgx_swap_pick(ren); break;
                             case MG_REACTION: mgx_react_reset(); break;
                             case MG_TANK: mgx_tank_reset(); break;
@@ -19355,7 +23034,14 @@ int main(int argc, char *argv[]) {
                         else if(k==SDLK_ESCAPE)mgx_exit_confirm=0;
                         continue;
                     }
-                    if(k==SDLK_ESCAPE&&mg_cur==MG_TIDEPOOL&&mgx_fish.collection){mgx_fish_key(k);continue;}
+                    // Crazy Fish handles its own B: it closes whatever overlay
+                    // is up, and otherwise opens the pause menu so leaving a
+                    // campaign always passes an offer to save it.
+                    if(mg_cur==MG_TIDEPOOL&&k==SDLK_ESCAPE){
+                        mgx_fish_key(k);
+                        if(mgx_fish.want_exit){mgx_fish.want_exit=0;mgx_net_close();mgx_swap_close();play_click();state=STATE_MINIGAMES;}
+                        continue;
+                    }
                     if ((k == SDLK_ESCAPE && mg_cur != MG_REACTION) ||
                         (k == SDLK_SLASH && mg_cur == MG_REACTION)) {
                         if(mgx_net.role!=MGX_NET_OFF){mgx_exit_confirm=1;continue;}
@@ -19374,7 +23060,10 @@ int main(int argc, char *argv[]) {
                         case MG_SWAP: mgx_swap_key(ren,k); break;
                         case MG_REACTION: mgx_react_key(k); break;
                         case MG_TANK: mgx_tank_key(k); break;
-                        case MG_TIDEPOOL: mgx_fish_key(k); break;
+                        case MG_TIDEPOOL:
+                            mgx_fish_key(k);
+                            if(mgx_fish.want_exit){mgx_fish.want_exit=0;mgx_net_close();mgx_swap_close();state=STATE_MINIGAMES;}
+                            break;
                     }
                 }
                 else if (state == STATE_GAMEOPTS) {
@@ -19454,6 +23143,11 @@ int main(int argc, char *argv[]) {
                         }
                         continue;
                     }
+                    if (restore_confirm_kind) {
+                        if (e.key.keysym.sym == SDLK_RETURN) { restore_confirm_accept(); play_click(); }
+                        else if (e.key.keysym.sym == SDLK_ESCAPE) { restore_confirm_kind = RC_NONE; play_click(); }
+                        continue;
+                    }
                     if (settings_autops_confirm) {
                         if (e.key.keysym.sym == SDLK_RETURN) {
                             auto_ps_pct = settings_pending_autops;
@@ -19467,6 +23161,16 @@ int main(int argc, char *argv[]) {
                         continue;
                     }
                     if (settings_confirm_pending) {
+                        // The modal is steered like the Weather one: left/right
+                        // picks a button, A confirms it. X (save) and Y
+                        // (discard) still act directly for anyone used to them.
+                        if (e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT) {
+                            settings_confirm_sel = !settings_confirm_sel;
+                            play_click();
+                            continue;
+                        }
+                        if (e.key.keysym.sym == SDLK_RETURN && settings_confirm_sel)
+                            e.key.keysym.sym = SDLK_d;   // A on "Don't Save"
                         if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_s) {
                             AppState leave_to = settings_pending_state;
                             int return_to_parent_page =
@@ -19490,23 +23194,24 @@ int main(int argc, char *argv[]) {
                             if (!return_to_parent_page) settings_close_all_groups();
                             state = leave_to;
                         } else if (e.key.keysym.sym == SDLK_d || e.key.keysym.sym == SDLK_f) {
-                            AppState leave_to = settings_pending_state;
-                            int return_to_parent_page =
-                                settings_page == SETTINGS_PAGE_SCREEN_POWER &&
-                                leave_to == STATE_SETTINGS && settings_pending_tab == current_tab;
+                            // Don't Save is a cancel, not a way out. It used to
+                            // also navigate away and reset the tab, the selected
+                            // row and any open dropdown, so changing a theme and
+                            // then changing your mind dumped you at the top of
+                            // Settings with the theme list closed. Put the values
+                            // back and leave the user exactly where they were.
+                            int keep_tab = current_tab, keep_sel = settings_selected;
+                            int keep_scroll = settings_scroll_offset, keep_page = settings_page;
                             load_settings(); build_chime_sound(); build_theme_music(); reload_fonts();
                             apply_brightness(); // Discard must restore the real panel, not only the variable.
+                            // load_settings() rebuilds persisted state; the
+                            // cursor and any open group are screen state and
+                            // must survive it. (Group flags are not persisted,
+                            // so they are already untouched.)
+                            current_tab = keep_tab; settings_selected = keep_sel;
+                            settings_scroll_offset = keep_scroll; settings_page = keep_page;
                             settings_dirty = 0; settings_confirm_pending = 0;
-                            current_tab = settings_pending_tab;
-                            if (!return_to_parent_page) {
-                                settings_selected = 0; settings_scroll_offset = 0;
-                            }
-                            settings_page = SETTINGS_PAGE_ROOT;
-                            // Groups close whether we are leaving Settings or
-                            // just moving to another tab -- an open dropdown
-                            // should never greet you on a page you just opened.
-                            if (!return_to_parent_page) settings_close_all_groups();
-                            state = leave_to;
+                            play_click();
                         } else if (e.key.keysym.sym == SDLK_ESCAPE) {
                             settings_confirm_pending = 0;
                         }
@@ -19517,7 +23222,7 @@ int main(int argc, char *argv[]) {
                         SDL_Keycode sk = e.key.keysym.sym;
                         if (sk == SDLK_ESCAPE) {
                             if (settings_dirty) {
-                                settings_confirm_pending = 1;
+                                settings_confirm_pending = 1; settings_confirm_sel = 0;
                                 settings_pending_state = STATE_SETTINGS;
                                 settings_pending_tab = current_tab;
                             } else {
@@ -19551,6 +23256,11 @@ int main(int argc, char *argv[]) {
                             } else if (screenpower_sel == SP_ROW_SAVER_DURATION) {
                                 screen_saver_duration_idx = (screen_saver_duration_valid(screen_saver_duration_idx) + dir + SCREEN_SAVER_DURATION_COUNT) % SCREEN_SAVER_DURATION_COUNT;
                                 settings_dirty = 1;
+                            } else if (screenpower_sel == SP_ROW_SAVER_ALWAYS) {
+                                if (power_is_plugged_in()) { screen_saver_always_on = !screen_saver_always_on; settings_dirty = 1; }
+                            } else if (screenpower_sel == SP_ROW_TANK_WALLPAPER) {
+                                aquarium_wallpaper_enabled = !aquarium_wallpaper_enabled;
+                                save_settings(); play_click();
                             } else if (screenpower_sel == SP_ROW_ASPECT) {
                                 if (!aspect_preview_active) aspect_preview_prev = game_aspect_idx;
                                 game_aspect_idx = (game_aspect_idx + dir + GAME_ASPECT_COUNT) % GAME_ASPECT_COUNT;
@@ -19565,7 +23275,7 @@ int main(int argc, char *argv[]) {
                             } else if (screenpower_sel == SP_ROW_SHOW_FPS) {
                                 show_fps = !show_fps; settings_dirty = 1;
                             } else if (screenpower_sel == SP_ROW_RESTORE && sk == SDLK_RETURN) {
-                                restore_display_group(ROW_DISP_RST_SCREEN);
+                                restore_confirm_open(RC_DISP_GROUP, ROW_DISP_RST_SCREEN);
                             }
                             play_click();
                         }
@@ -19573,19 +23283,28 @@ int main(int argc, char *argv[]) {
                         // dedicated page; they cannot silently switch tabs.
                         continue;
                     }
+                    if (e.key.keysym.sym == SDLK_ESCAPE && sgp_depth > 0) {
+                        // Inside a group page B means "up one level", not
+                        // "leave Settings". Unsaved edits travel back to the
+                        // parent page and are still there to save on the way
+                        // out, so there is nothing to confirm here.
+                        settings_group_leave(current_tab, &settings_selected, &settings_scroll_offset);
+                        play_click();
+                        continue;
+                    }
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
-                        if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
+                        if (settings_dirty) { settings_confirm_pending = 1; settings_confirm_sel = 0; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
                         else {
                             settings_close_all_groups();
                             state = settings_return_state;
                         }
                     }
-                    if (e.key.keysym.sym == SDLK_e) {   // R1 -> next settings tab
-                        if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = STATE_SETTINGS; settings_pending_tab = (current_tab + 1) % TAB_COUNT; }
+                    if (e.key.keysym.sym == SDLK_e && sgp_depth == 0) {   // R1 -> next settings tab
+                        if (settings_dirty) { settings_confirm_pending = 1; settings_confirm_sel = 0; settings_pending_state = STATE_SETTINGS; settings_pending_tab = (current_tab + 1) % TAB_COUNT; }
                         else { settings_close_all_groups(); current_tab = (current_tab + 1) % TAB_COUNT; settings_selected = 0; settings_scroll_offset = 0; }
                     }
-                    if (e.key.keysym.sym == SDLK_q) {   // L1 -> previous settings tab
-                        if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = STATE_SETTINGS; settings_pending_tab = (current_tab - 1 + TAB_COUNT) % TAB_COUNT; }
+                    if (e.key.keysym.sym == SDLK_q && sgp_depth == 0) {   // L1 -> previous settings tab
+                        if (settings_dirty) { settings_confirm_pending = 1; settings_confirm_sel = 0; settings_pending_state = STATE_SETTINGS; settings_pending_tab = (current_tab - 1 + TAB_COUNT) % TAB_COUNT; }
                         else { settings_close_all_groups(); current_tab = (current_tab - 1 + TAB_COUNT) % TAB_COUNT; settings_selected = 0; settings_scroll_offset = 0; }
                     }
                     int sound_row_type[MAX_SOUND_ROWS], sound_row_extra[MAX_SOUND_ROWS];
@@ -19594,13 +23313,23 @@ int main(int argc, char *argv[]) {
                     int acct_row_type[MAX_ACCOUNT_ROWS], acct_row_extra[MAX_ACCOUNT_ROWS];
                     int game_row_type[MAX_GAME_ROWS], game_row_extra[MAX_GAME_ROWS];
                     int count = SOUND_COUNT;
-                    if (current_tab == TAB_SOUND) count = build_sound_rows(sound_row_type, sound_row_extra);
-                    else if (current_tab == TAB_DISPLAY) count = build_display_rows(disp_row_type, disp_row_extra);
-                    else if (current_tab == TAB_GAME) count = build_game_rows(game_row_type, game_row_extra);
-                    else if (current_tab == TAB_DEVICE) count = build_device_rows(dev_row_type, dev_row_extra);
-                    else if (current_tab == TAB_ACCOUNT) count = build_account_rows(acct_row_type, acct_row_extra);
+                    if (current_tab == TAB_SOUND) count = settings_build_rows(TAB_SOUND, sound_row_type, sound_row_extra);
+                    else if (current_tab == TAB_DISPLAY) count = settings_build_rows(TAB_DISPLAY, disp_row_type, disp_row_extra);
+                    else if (current_tab == TAB_GAME) count = settings_build_rows(TAB_GAME, game_row_type, game_row_extra);
+                    else if (current_tab == TAB_DEVICE) count = settings_build_rows(TAB_DEVICE, dev_row_type, dev_row_extra);
+                    else if (current_tab == TAB_ACCOUNT) count = settings_build_rows(TAB_ACCOUNT, acct_row_type, acct_row_extra);
+                    // A page whose last row just disappeared underneath it (a
+                    // value change that hid the rest of the group) would leave
+                    // nothing to select and nothing to press B on. Fall back to
+                    // the tab's own list rather than strand the cursor.
+                    if (count <= 0) { sgp_depth = 0; continue; }
+                    const int *cur_rt = current_tab == TAB_SOUND   ? sound_row_type :
+                                        current_tab == TAB_DISPLAY ? disp_row_type  :
+                                        current_tab == TAB_GAME    ? game_row_type  :
+                                        current_tab == TAB_DEVICE  ? dev_row_type   : acct_row_type;
+                    settings_skip_unselectable(current_tab, cur_rt, count, &settings_selected, 1);
 
-                    if ((e.key.keysym.sym == SDLK_s || (e.key.keysym.sym == SDLK_RETURN && current_tab == TAB_DISPLAY && disp_row_type[settings_selected] == ROW_DISP_CUSTOM_THEME && custom_theme_choice>=theme_count-THEME_COUNT)) && current_tab == TAB_DISPLAY &&
+                    if (e.key.keysym.sym == SDLK_RETURN && current_tab == TAB_DISPLAY &&
                         (disp_row_type[settings_selected] == ROW_DISP_THEME || disp_row_type[settings_selected] == ROW_DISP_CUSTOM_THEME)) {
                         theme_editor_open(disp_row_type[settings_selected]==ROW_DISP_CUSTOM_THEME && custom_theme_choice<theme_count-THEME_COUNT ? THEME_COUNT+custom_theme_choice : (theme_idx<THEME_COUNT?theme_idx:0));
                         menu_tap_count = 0; menu_double_due = 0;
@@ -19616,8 +23345,8 @@ int main(int argc, char *argv[]) {
                         continue;
                     }
 
-                    if (e.key.keysym.sym == SDLK_UP) { settings_selected = (settings_selected - 1 + count) % count; confirm_reset_pending = 0; confirm_es_pending = 0; confirm_account_restore = 0; }
-                    if (e.key.keysym.sym == SDLK_DOWN) { settings_selected = (settings_selected + 1) % count; confirm_reset_pending = 0; confirm_es_pending = 0; confirm_account_restore = 0; }
+                    if (e.key.keysym.sym == SDLK_UP) { settings_selected = (settings_selected - 1 + count) % count; settings_skip_unselectable(current_tab, cur_rt, count, &settings_selected, -1); confirm_reset_pending = 0; confirm_es_pending = 0; confirm_account_restore = 0; }
+                    if (e.key.keysym.sym == SDLK_DOWN) { settings_selected = (settings_selected + 1) % count; settings_skip_unselectable(current_tab, cur_rt, count, &settings_selected, 1); confirm_reset_pending = 0; confirm_es_pending = 0; confirm_account_restore = 0; }
                     // Keep the selected row inside the visible scroll window
                     int vis_rows = settings_visible_rows();
                     if (settings_selected < settings_scroll_offset) settings_scroll_offset = settings_selected;
@@ -19628,7 +23357,9 @@ int main(int argc, char *argv[]) {
                                       disp_row_is_value(disp_row_type[settings_selected]));
                     if (e.key.keysym.sym == SDLK_LEFT || e.key.keysym.sym == SDLK_RIGHT || a_as_right) {
                         int dirty_before = settings_dirty;
-                        settings_dirty = 1;
+                        // Only a row whose value Left/Right steps through can
+                        // have changed anything; on a page opener it did nothing.
+                        settings_dirty = settings_row_cycles(current_tab, cur_rt[settings_selected]) ? 1 : dirty_before;
                         int dir = (e.key.keysym.sym == SDLK_LEFT) ? -1 : 1;
                         if (current_tab == TAB_SOUND) {
                             int rt = sound_row_type[settings_selected];
@@ -19661,11 +23392,12 @@ int main(int argc, char *argv[]) {
                                     settings_dirty = dirty_before; // no setting changed until A confirms
                                 } else {
                                     theme_idx = next_theme;
+                                    theme_user_choice();
                                 }
                             } else if (rt == ROW_DISP_CUSTOM_THEME) {
                                 int count=theme_count-THEME_COUNT;
                                 custom_theme_choice=(custom_theme_choice+dir+count+1)%(count+1);
-                                if(custom_theme_choice<count)theme_idx=THEME_COUNT+custom_theme_choice;
+                                if(custom_theme_choice<count){theme_idx=THEME_COUNT+custom_theme_choice;theme_user_choice();}
                             } else if (rt == ROW_DISP_HOME_VIEW) {
                                 home_view_idx = (home_view_idx + dir + HOME_VIEW_COUNT) % HOME_VIEW_COUNT;
                                 home_selected = 0; home_scroll = 0;
@@ -19677,7 +23409,7 @@ int main(int argc, char *argv[]) {
                                 surprise_me_enabled = !surprise_me_enabled;
                             } else if (rt == ROW_DISP_APP_ITEM) {
                                 home_apps_mask ^= (1 << disp_row_extra[settings_selected]);
-                            } else if (rt == ROW_DISP_GRP_VIEW) {
+                            } else if (rt == ROW_DISP_SYS_VIEW) {
                                 platform_view_style = (platform_view_style + dir + VIEW_STYLE_COUNT) % VIEW_STYLE_COUNT;
                                 carousel_prev_selected = platform_selected;
                                 g_prev_ord = g_sel_ord;
@@ -19699,7 +23431,7 @@ int main(int argc, char *argv[]) {
                                 grid_rows += dir;
                                 if (grid_rows < 1) grid_rows = 1;
                                 if (grid_rows > 6) grid_rows = 6;
-                            } else if (rt == ROW_DISP_ART_HEADER || rt == ROW_DISP_ART_ITEM) {
+                            } else if (rt == ROW_DISP_ART_VALUE || rt == ROW_DISP_ART_HEADER || rt == ROW_DISP_ART_ITEM) {
                                 display_art_idx = (display_art_idx + dir + ART_TYPE_COUNT) % ART_TYPE_COUNT;
                                 refresh_game_art();
                             } else if (rt == ROW_DISP_SHOW_EMPTY) {
@@ -19715,6 +23447,8 @@ int main(int argc, char *argv[]) {
                                 carousel_titles_on = !carousel_titles_on;
                             } else if (rt == ROW_DISP_SINGLE_CARD_TITLE_SIDE) {
                                 single_card_title_side = single_card_title_side ? 0 : 1;
+                            } else if (rt == ROW_DISP_SINGLE_CARD_INFO) {
+                                single_card_info_idx = single_card_info_idx ? 0 : 1;
                             } else if (rt == ROW_DISP_BG_MODE) {
                                 platform_bg_mode = (platform_bg_mode + dir + BG_MODE_COUNT) % BG_MODE_COUNT;
                                 platform_assets_loaded_for = -1;
@@ -19835,6 +23569,8 @@ int main(int argc, char *argv[]) {
                                 set_power_save(!power_save_mode, 0);   // 30fps cap + gov + Midnight theme, applied live
                             } else if (dev_row_type[settings_selected] == ROW_DEV_CPU_PERF) {
                                 cpu_perf_mode = !cpu_perf_mode; cpu_apply_pref(); save_settings();
+                            } else if (dev_row_type[settings_selected] == ROW_DEV_FPS_MODE) {
+                                fps_mode_idx = (fps_mode_idx + dir + FPS_MODE_COUNT) % FPS_MODE_COUNT;
                             } else if (dev_row_type[settings_selected] == ROW_DEV_PERF_OVERLAY) {
                                 show_perf_overlay = !show_perf_overlay;
                             } else if (dev_row_type[settings_selected] == ROW_DEV_PERF_OPACITY) {
@@ -19862,8 +23598,6 @@ int main(int argc, char *argv[]) {
                             } else if (dev_row_type[settings_selected] == ROW_DEV_BATTERY_ICON) {
                                 battery_icon_enabled = !battery_icon_enabled;
                                 save_settings();
-                            } else if (dev_row_type[settings_selected] == ROW_DEV_SYNCTHING) {
-                                syncthing_enabled = !syncthing_enabled; syncthing_apply(); save_settings();
                             } else if (dev_row_type[settings_selected] == ROW_DEV_NIGHT) {
                                 night_mode = (night_mode + dir + 3) % 3;
                                 save_settings();
@@ -19885,7 +23619,9 @@ int main(int argc, char *argv[]) {
                             }
                         } else if (current_tab == TAB_ACCOUNT) {
                             int rt = acct_row_type[settings_selected];
-                            if (rt == ROW_SCRAPE_HEADER) {
+                            if (rt == ROW_ONL_SYNC) {
+                                syncthing_enabled = !syncthing_enabled; syncthing_apply(); save_settings();
+                            } else if (rt == ROW_SCRAPE_HEADER) {
                                 scrape_dropdown_open = !scrape_dropdown_open;
                             } else if (rt == ROW_SCRAPE_SERVICE_HEADER) {
                                 scrape_service_open = !scrape_service_open;
@@ -19921,6 +23657,25 @@ int main(int argc, char *argv[]) {
                         }
                     }
                     if (e.key.keysym.sym == SDLK_RETURN && !a_as_right) {
+                        // Every row named in the group table opens as its own
+                        // page. Handling it here, ahead of the per-tab chain,
+                        // means a group added later needs no input code of its
+                        // own -- and a group with nothing under it right now
+                        // returns 0 and falls through to whatever that row did
+                        // before, so an empty page can never be pushed.
+                        {
+                            int grt = -1, grx = 0;
+                            if (current_tab == TAB_SOUND)        { grt = sound_row_type[settings_selected]; grx = sound_row_extra[settings_selected]; }
+                            else if (current_tab == TAB_DISPLAY) { grt = disp_row_type[settings_selected];  grx = disp_row_extra[settings_selected]; }
+                            else if (current_tab == TAB_GAME)    { grt = game_row_type[settings_selected];  grx = game_row_extra[settings_selected]; }
+                            else if (current_tab == TAB_DEVICE)  { grt = dev_row_type[settings_selected];   grx = dev_row_extra[settings_selected]; }
+                            else if (current_tab == TAB_ACCOUNT) { grt = acct_row_type[settings_selected];  grx = acct_row_extra[settings_selected]; }
+                            if (grt >= 0 && settings_group_enter(current_tab, grt, grx,
+                                                                 &settings_selected, &settings_scroll_offset)) {
+                                play_click();
+                                continue;
+                            }
+                        }
                         if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_OSUI)  { play_click(); snd_grp_osui_open  = !snd_grp_osui_open; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_BOOT)  { play_click(); snd_grp_boot_open  = !snd_grp_boot_open; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_GRP_RADIO) { play_click(); snd_grp_radio_open = !snd_grp_radio_open; }
@@ -19932,23 +23687,22 @@ int main(int argc, char *argv[]) {
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_MUSIC_GAME_AUDIO) { play_click(); music_game_audio = !music_game_audio; save_settings(); settings_dirty = 0; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_RADIO_GAME_AUDIO) { play_click(); radio_game_audio = !radio_game_audio; save_settings(); settings_dirty = 0; }
                         else if (current_tab == TAB_SOUND && sound_row_type[settings_selected] == ROW_SND_RESTORE) {
-                            restore_current_settings_tab(TAB_SOUND);
+                            restore_confirm_open(RC_TAB, TAB_SOUND);
                         } else if (current_tab == TAB_DISPLAY && disp_row_type[settings_selected] == ROW_DISP_RESTORE) {
-                            restore_current_settings_tab(TAB_DISPLAY);
+                            restore_confirm_open(RC_TAB, TAB_DISPLAY);
                         } else if (current_tab == TAB_DISPLAY &&
                                    (disp_row_type[settings_selected] == ROW_DISP_RST_TEXT ||
                                     disp_row_type[settings_selected] == ROW_DISP_RST_VIEW ||
                                     disp_row_type[settings_selected] == ROW_DISP_RST_HUD ||
                                     disp_row_type[settings_selected] == ROW_DISP_RST_BG ||
                                     disp_row_type[settings_selected] == ROW_DISP_RST_SCREEN)) {
-                            restore_display_group(disp_row_type[settings_selected]);
+                            restore_confirm_open(RC_DISP_GROUP, disp_row_type[settings_selected]);
                         } else if (current_tab == TAB_GAME && game_row_type[settings_selected] == ROW_G_RESTORE) {
-                            restore_current_settings_tab(TAB_GAME);
+                            restore_confirm_open(RC_TAB, TAB_GAME);
                         } else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_RESTORE) {
-                            restore_current_settings_tab(TAB_DEVICE);
+                            restore_confirm_open(RC_TAB, TAB_DEVICE);
                         } else if (current_tab == TAB_ACCOUNT && acct_row_type[settings_selected] == ROW_ACCT_RESTORE) {
-                            if (confirm_account_restore) { restore_current_settings_tab(TAB_ACCOUNT); confirm_account_restore = 0; }
-                            else confirm_account_restore = 1;
+                            restore_confirm_open(RC_TAB, TAB_ACCOUNT);
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_GRP_BATT) {
                             dev_grp_batt_open = !dev_grp_batt_open; play_click();
@@ -19977,7 +23731,7 @@ int main(int argc, char *argv[]) {
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_BATTERY_ICON) {
                             battery_icon_enabled = !battery_icon_enabled; save_settings(); settings_dirty = 0; play_click();
                         }
-                        else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_SYNCTHING) {
+                        else if (current_tab == TAB_ACCOUNT && acct_row_type[settings_selected] == ROW_ONL_SYNC) {
                             syncthing_enabled = !syncthing_enabled; syncthing_apply(); save_settings(); play_click();
                         }
                         else if (current_tab == TAB_DEVICE && dev_row_type[settings_selected] == ROW_DEV_NIGHT_HOTKEY) {
@@ -20056,7 +23810,7 @@ int main(int argc, char *argv[]) {
                                 disp_grp_view_open = !disp_grp_view_open;
                                 play_click();
                             } else if (rt == ROW_G_VIEW_RESTORE) {
-                                restore_display_group(ROW_DISP_RST_VIEW);
+                                restore_confirm_open(RC_DISP_GROUP, ROW_DISP_RST_VIEW);
                             } else if (rt == ROW_G_ART_HEADER) {
                                 game_art_dropdown_open = !game_art_dropdown_open;
                                 play_click();
@@ -20076,9 +23830,9 @@ int main(int argc, char *argv[]) {
                                 bg_picker_open_for_system(game_row_extra[settings_selected], STATE_SETTINGS);
                                 play_click(); state = STATE_BG_PICKER;
                             } else if (rt == ROW_G_BG_RESTORE) {
-                                restore_display_group(ROW_DISP_RST_BG); play_click();
+                                restore_confirm_open(RC_DISP_GROUP, ROW_DISP_RST_BG); play_click();
                             } else {
-                                if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
+                                if (settings_dirty) { settings_confirm_pending = 1; settings_confirm_sel = 0; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
                                 else { settings_close_all_groups(); state = settings_return_state; }
                             }
                         } else if (current_tab == TAB_DISPLAY) {
@@ -20134,7 +23888,7 @@ int main(int argc, char *argv[]) {
                                 bg_picker_open_for_system(disp_row_extra[settings_selected], STATE_SETTINGS);
                                 state = STATE_BG_PICKER;
                             } else {
-                                if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
+                                if (settings_dirty) { settings_confirm_pending = 1; settings_confirm_sel = 0; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
                                 else { settings_close_all_groups(); state = settings_return_state; }
                             }
                         } else if (current_tab == TAB_ACCOUNT) {
@@ -20276,7 +24030,7 @@ int main(int argc, char *argv[]) {
                                 state = STATE_KEYBOARD;
                             }
                         } else {
-                            if (settings_dirty) { settings_confirm_pending = 1; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
+                            if (settings_dirty) { settings_confirm_pending = 1; settings_confirm_sel = 0; settings_pending_state = settings_return_state; settings_pending_tab = current_tab; }
                             else { settings_close_all_groups(); state = settings_return_state; }
                         }
                     }
@@ -20288,9 +24042,21 @@ int main(int argc, char *argv[]) {
                     if (bgcfg_sel >= n) bgcfg_sel = n - 1;
                     if (bgcfg_sel < 0) bgcfg_sel = 0;
                     SDL_Keycode k = e.key.keysym.sym;
+                    if (restore_confirm_kind) {
+                        if (k == SDLK_RETURN) { restore_confirm_accept(); play_click(); }
+                        else if (k == SDLK_ESCAPE) { restore_confirm_kind = RC_NONE; play_click(); }
+                        continue;
+                    }
                     if (k == SDLK_ESCAPE) { save_settings(); state = STATE_SETTINGS; play_click(); }
                     if (k == SDLK_DOWN) bgcfg_sel = (bgcfg_sel + 1) % n;
                     if (k == SDLK_UP)   bgcfg_sel = (bgcfg_sel - 1 + n) % n;
+                    // Maker names head the list rather than folding it up, so
+                    // the cursor steps over them in whichever way it was going.
+                    if (k == SDLK_UP || k == SDLK_DOWN) {
+                        int step = (k == SDLK_UP) ? -1 : 1;
+                        for (int s2 = 0; s2 < n && rt_[bgcfg_sel] == ROW_G_BG_MAKER; s2++)
+                            bgcfg_sel = (bgcfg_sel + step + n) % n;
+                    }
                     int dir = (k == SDLK_RIGHT) ? 1 : (k == SDLK_LEFT) ? -1 : 0;
                     int rt = rt_[bgcfg_sel];
                     if (dir) {
@@ -20328,7 +24094,7 @@ int main(int argc, char *argv[]) {
                             bg_picker_open_for_system(rx_[bgcfg_sel], STATE_SETTINGS);
                             state = STATE_BG_PICKER;
                         } else if (rt == ROW_G_BG_RESTORE) {
-                            restore_display_group(ROW_DISP_RST_BG);
+                            restore_confirm_open(RC_DISP_GROUP, ROW_DISP_RST_BG);
                         }
                     }
                 }
@@ -20551,7 +24317,7 @@ int main(int argc, char *argv[]) {
                             g_ps_saved_theme = theme_idx;
                             save_settings();
                             if (weather_loc[0] || home_widget_idx == HOME_WIDGET_WEATHER || home_widget_idx == HOME_WIDGET_DATEWX
-                                || home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX) weather_kick(1);
+                                || home_widget2_idx == HOME_WIDGET_WEATHER || home_widget2_idx == HOME_WIDGET_DATEWX) weather_kick(0);   // waking is not a user refresh
                             home_selected = 0; home_scroll = 0;
                             state = STATE_HOME; state_start = SDL_GetTicks();
                             play_click();
@@ -20781,9 +24547,9 @@ int main(int argc, char *argv[]) {
         }
         hotkey_poll_held();      // hold a volume key -> keep stepping, accelerating
         if(sf_solo){sf_solo=0;sf_bypass=1;launch_game(&win,&ren,&game_video_released,sf_solo_path,sf_solo_title,sf_solo_system);}
-        mg_music_tick(state==STATE_MINIGAME?mg_cur:-1,state==STATE_MINIGAME?(mg_cur==MG_RUNNER?mgx_run.level+1:mg_cur==MG_TIDEPOOL?mgx_fish.chapter:1):0);
-        widget_local_tick(state==STATE_WIDGET_PLACES||(state==STATE_HOME&&((home_view_idx==HOME_VIEW_APPS&&(app_widget_kind==APP_WIDGET_CLOCK||app_widget_kind==APP_WIDGET_WEATHER))||(home_view_idx!=HOME_VIEW_APPS&&(widget_place_kind(home_widget_idx)||widget_place_kind(home_widget2_idx))))));
-        if (!promo_mode) {poll_scrape_status(ren, font_label, platform_selected);sf_tick();sf_launch(&state);}
+        mg_music_tick(state==STATE_MINIGAME?mg_cur:-1,state==STATE_MINIGAME?(mg_cur==MG_RUNNER?mgx_run.level+1:mg_cur==MG_TIDEPOOL?mgx_fish.stage:1):0);
+        widget_local_tick(state==STATE_WIDGET_PLACES||state==STATE_WEATHER||state==STATE_WEATHER_HOURLY||state==STATE_WEATHER_SETTINGS||(state==STATE_HOME&&((home_view_idx==HOME_VIEW_APPS&&(app_widget_kind==APP_WIDGET_CLOCK||app_widget_kind==APP_WIDGET_WEATHER))||(home_view_idx!=HOME_VIEW_APPS&&(widget_place_kind(home_widget_idx)||widget_place_kind(home_widget2_idx))))));
+        if (!promo_mode) {poll_scrape_status(ren, font_label, platform_selected);sf_tick();sf_launch(&state);sm_tick();}
         poll_ra_check();
         poll_ra_book();
         if(state!=STATE_MINIGAME)wifi_signal_refresh(); // Keep blocking iw subprocesses out of active gameplay.
@@ -20954,6 +24720,16 @@ int main(int argc, char *argv[]) {
         // text colour, whatever the user later customises it to.
         g_hud_plain = (state == STATE_SETUP);
         if (g_hud_plain) g_hud_text = th->text;
+        // The Weather app paints its own full-screen backdrop, which ignores the
+        // theme -- so the theme-derived status ink could come out dark navy on
+        // dark navy and the clock and battery simply vanished. Pick the status
+        // colour from what the weather screen is actually painting, the same way
+        // its sleep screen does.
+        if (state == STATE_WEATHER || state == STATE_WEATHER_HOURLY || state == STATE_WEATHER_SETTINGS) {
+            g_hud_text = weather_saver_backdrop_is_light(th)
+                       ? (SDL_Color){ 26, 30, 38, 255 }
+                       : (SDL_Color){ 240, 245, 252, 255 };
+        }
 
         if (greeting_enabled && state == STATE_HOME && greeting_started_at == 0 && greeting_new_boot()) {
             time_t _gt = time(NULL); struct tm *_lt = localtime(&_gt);
@@ -21003,6 +24779,8 @@ int main(int argc, char *argv[]) {
         }
 
         draw_theme_background(ren, th, theme_idx);
+        weather_wallpaper_render(ren,state);
+        tank_wallpaper_render(ren,state);
 
         // Flashlight: nothing but a pure-white field and one tiny hint. Drawn
         // here so no HUD, dim overlay or night tint can touch it.
@@ -21065,7 +24843,9 @@ int main(int argc, char *argv[]) {
                 if (t == ROW_H_QUICK_RETROARCH || t == ROW_H_QUICK_RADIO || t == ROW_H_QUICK_MUSIC ||
                     t == ROW_H_QUICK_MINIGAMES || t == ROW_H_QUICK_LINK ||
                     t == ROW_H_QUICK_FLASHLIGHT || t == ROW_H_QUICK_ACHIEVEMENTS ||
-                    t == ROW_H_QUICK_CALCULATOR) { first_app_row = i; break; }
+                    t == ROW_H_QUICK_CALCULATOR || t == ROW_H_QUICK_WEATHER ||
+                    t == ROW_H_QUICK_MESSAGES || t == ROW_H_QUICK_WILDKINS ||
+                    t == ROW_H_QUICK_APPS) { first_app_row = i; break; }
             }
 
             for (int i = 0; i < rcount; i++) {
@@ -21165,9 +24945,21 @@ int main(int argc, char *argv[]) {
                 } else if (rt == ROW_H_QUICK_MINIGAMES) {
                     snprintf(text, sizeof(text), "Mini Games");
                 } else if (rt == ROW_H_QUICK_ACHIEVEMENTS) {
-                    snprintf(text, sizeof(text), "Achievements Book");
+                    snprintf(text, sizeof(text), "Achievements");
                 } else if (rt == ROW_H_QUICK_CALCULATOR) {
                     snprintf(text, sizeof(text), "Calculator");
+                } else if (rt == ROW_H_QUICK_WEATHER) {
+                    snprintf(text, sizeof(text), "Weather");
+                } else if (rt == ROW_H_QUICK_MESSAGES) {
+                    int unread = sm_unread_total();
+                    if (unread) snprintf(text, sizeof(text), "Messages  (%d)", unread);
+                    else snprintf(text, sizeof(text), "Messages");
+                } else if (rt == ROW_H_QUICK_WILDKINS) {
+                    snprintf(text, sizeof(text), "%s", wildkins_installed() ? "Wildkins" : "Wildkins  (not installed)");
+                } else if (rt == ROW_H_QUICK_APPS) {
+                    // Says how many are behind it, so it never reads as an
+                    // empty drawer.
+                    snprintf(text, sizeof(text), "Apps  (%d)", APP_COUNT);
                 }
 
                 int selected_row = (!home_recent_focus_slot && i == home_selected && rt != ROW_H_WELCOME);
@@ -21222,7 +25014,7 @@ int main(int argc, char *argv[]) {
                     y += sh + 2;
                 }
                 y += 6;
-                if (i == home_selected) { sel_hdr_top = hdr_top; sel_bot = y; }
+                if (i == home_selected) { sel_hdr_top = hdr_top; sel_bot = y; home_selected_y = y - home_scroll; }
             }
             SDL_RenderSetClipRect(ren, NULL);
 
@@ -21230,9 +25022,15 @@ int main(int argc, char *argv[]) {
             // header) stays inside the band. Recomputed from scratch each frame
             // so it can't wander or get stuck.
             {
-                int content_h = y;
+                // `y` is an absolute screen coordinate -- the bottom edge of the
+                // last row -- not a height. Treating it as one made max_scroll
+                // overshoot by band_top, so home_scroll could never actually
+                // reach it: the bar stopped short of the bottom of its track and
+                // the last app rows sat below the fold.
+                int content_bot = y;
                 int band_h = band_bot - band_top;
-                int max_scroll = content_h > band_h ? content_h - band_h : 0;
+                int content_h = content_bot - band_top;
+                int max_scroll = content_bot > band_bot ? content_bot - band_bot : 0;
                 int want = home_scroll;
                 if (home_selected <= 0)                       want = 0;
                 else if (sel_hdr_top - want < band_top)       want = sel_hdr_top - band_top;
@@ -21242,7 +25040,9 @@ int main(int argc, char *argv[]) {
                 home_scroll = want;
                 if (max_scroll > 0) {
                     int track_h = band_h;
-                    int thumb_h = track_h * band_h / content_h; if (thumb_h < 24) thumb_h = 24;
+                    int thumb_h = content_h > 0 ? track_h * band_h / content_h : track_h;
+                    if (thumb_h < 24) thumb_h = 24;
+                    if (thumb_h > track_h) thumb_h = track_h;
                     int thumb_y = band_top + (track_h - thumb_h) * home_scroll / max_scroll;
                     SDL_SetRenderDrawColor(ren, th->accent2.r, th->accent2.g, th->accent2.b, 120);
                     SDL_RenderFillRect(ren, &(SDL_Rect){ 8, thumb_y, 3, thumb_h });
@@ -21305,6 +25105,7 @@ int main(int argc, char *argv[]) {
             }
           } // end Minimal home layout
 
+          if (SDL_GetTicks() < wildkins_notice_until) mgx_overlay_message(ren, "WILDKINS", wildkins_notice);
           // Flashlight confirm -- a modal warning; a 2nd A goes bright, B cancels.
           if (flashlight_pending) {
               SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
@@ -21511,24 +25312,8 @@ int main(int argc, char *argv[]) {
             }
 
             if (platform_view_style == 0) {
-                // Single Card view. One small nav line, bottom-right, no
-                // backing -- fades out after 10s, resets on returning here or
-                // on any left/right navigation.
-                Uint32 hint_age = SDL_GetTicks() - platform_enter_time;
-                if (hint_age < 10000) {
-                    float ha = hint_age > 8800 ? (10000 - hint_age) / 1200.0f : 1.0f;
-                    // Must be width-limited: this string is wider than the
-                    // panel at the default font, and right-aligning an
-                    // over-wide texture pushes x negative so it clipped off
-                    // both edges instead of ellipsising.
-                    SDL_Texture *hl = render_text_fit(ren, font_label,
-                        "D-pad Browse   A Games   Select System Settings   X View   Y Options",
-                        g_ui_dim, WIN_W - 36);
-                    int hw3, hh3; SDL_QueryTexture(hl, NULL, NULL, &hw3, &hh3);
-                    SDL_SetTextureAlphaMod(hl, (Uint8)(210 * ha));
-                    SDL_RenderCopy(ren, hl, NULL, &(SDL_Rect){ WIN_W - hw3 - 18, WIN_H - hh3 - 14, hw3, hh3 });
-                    SDL_SetTextureAlphaMod(hl, 255);
-                }
+                // Single Card draws no controls hint: over the artwork it was
+                // in the way far more often than it was needed.
             } else if (platform_view_style == 1) {
                 // Carousel view: a hand-of-playing-cards fan peeking up from
                 // the bottom edge of the screen -- mostly off-screen below,
@@ -22018,26 +25803,6 @@ int main(int argc, char *argv[]) {
                 }
 
                 SDL_Color bs_white = { 255, 255, 255, 255 };
-                // Controls hint fades out 10s after arriving here / last nav.
-                Uint32 bs_age = SDL_GetTicks() - platform_enter_time;
-                float bs_hf = bs_age >= 10000 ? 0.0f : (bs_age > 8800 ? (10000 - bs_age) / 1200.0f : 1.0f);
-                if (bs_hf > 0.0f) {
-                char bshint[120];
-                snprintf(bshint, sizeof bshint,
-                    "D-pad Browse   A Open   Select System   X Sort (%s)   L2/R2 View   B Home", bookshelf_sort_names[bookshelf_sort % 3]);
-                SDL_Texture *hint = render_text_fit(ren, font_label, bshint, bs_white, WIN_W - 24);
-                int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
-                SDL_Rect bshr = { WIN_W / 2 - hw / 2, shelf_y + 24, hw, hh };
-                if (bs_hf < 1.0f) {
-                    SDL_SetTextureAlphaMod(hint, (Uint8)(255 * bs_hf));
-                    SDL_RenderCopy(ren, hint, NULL, &bshr);
-                    SDL_SetTextureAlphaMod(hint, 255);
-                } else {
-                    draw_hud_backing(ren, bshr);
-                    SDL_RenderCopy(ren, hint, NULL, &bshr);
-                }
-                }
-
                 SDL_Texture *nm = render_text(ren, font_label, platform_names[platform_selected], bs_white);
                 int nmw, nmh; SDL_QueryTexture(nm, NULL, NULL, &nmw, &nmh);
                 int nmy = book_top - 92;   // smaller + higher so it clears the game-count numbers
@@ -22049,144 +25814,13 @@ int main(int argc, char *argv[]) {
 
             draw_dock_logo(ren, font_small);
 
-            // Consistent controls hint for the non-bookshelf views (bookshelf
-            // draws its own above; Single Card has the timed nav hint).
-            if (platform_view_style != VIEW_STYLE_BOOKSHELF && platform_view_style != 0) {
-                // Fades out 10s after arriving here / last nav.
-                Uint32 ph_age = SDL_GetTicks() - platform_enter_time;
-                float ph_hf = ph_age >= 10000 ? 0.0f : (ph_age > 8800 ? (10000 - ph_age) / 1200.0f : 1.0f);
-                if (ph_hf > 0.0f) {
-                char phint[120];
-                snprintf(phint, sizeof phint,
-                    "%s Browse   A Open   Select System   X Sort (%s)   L2/R2 View   B Home",
-                    "D-pad", bookshelf_sort_names[bookshelf_sort % 3]);
-                int pane_view = (platform_view_style == 2 || platform_view_style == 3);
-                SDL_Color hint_col = pane_view ? g_ui_text : (SDL_Color){255,255,255,255};
-                SDL_Texture *pht = render_text_fit(ren, font_label, phint, hint_col, WIN_W - 24);
-                int phw, phh; SDL_QueryTexture(pht, NULL, NULL, &phw, &phh);
-                SDL_Rect phr = { WIN_W/2 - phw/2, WIN_H - phh - 12, phw, phh };
-                if (pane_view) {
-                    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-                    SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b,
-                                           (Uint8)(220 * ph_hf));
-                    SDL_RenderFillRect(ren, &(SDL_Rect){ 0, phr.y - 5, WIN_W, phh + 10 });
-                }
-                if (ph_hf < 1.0f) {
-                    SDL_SetTextureAlphaMod(pht, (Uint8)(255 * ph_hf));
-                    SDL_RenderCopy(ren, pht, NULL, &phr);
-                    SDL_SetTextureAlphaMod(pht, 255);
-                } else {
-                    draw_hud_backing(ren, phr);
-                    SDL_RenderCopy(ren, pht, NULL, &phr);
-                }
-                }
-            }
-
             // The fading info panel (name/maker/year/game count/blurb) is
             // Single Card only now -- it was drawn over every view style
             // before, but Carousel/Grid/List are meant to show that
             // identity through the cards/icons themselves instead. A
             // lighter-weight way to surface this info on those views (a
             // small floating label, maybe) is worth revisiting later.
-            if (platform_view_style == 0) {
-                int panel_w = 300;
-                int panel_y = 70;
-                int panel_h = WIN_H - panel_y - 48; // reserve the controls line
-                int fade_w = panel_w + 80;
-                int panel_x = single_card_title_side ? WIN_W - panel_w : 0;
-                int fade_x = single_card_title_side ? WIN_W - fade_w : 0;
-                int strip_w = 4;
-                int max_alpha = platform_bg_tex ? 242 : 255;
-                for (int fx = 0; fx < fade_w; fx += strip_w) {
-                    int fade_part = fade_w - panel_w;
-                    float alpha_f = 1.0f;
-                    if (single_card_title_side)
-                        alpha_f = fx < fade_part ? (float)fx / (float)fade_part : 1.0f;
-                    else
-                        alpha_f = fx < panel_w ? 1.0f : 1.0f - (float)(fx - panel_w) / (float)fade_part;
-                    if (alpha_f < 0.0f) alpha_f = 0.0f;
-                    if (alpha_f > 1.0f) alpha_f = 1.0f;
-                    Uint8 alpha = (Uint8)(max_alpha * alpha_f);
-                    SDL_SetRenderDrawColor(ren, th->bg.r, th->bg.g, th->bg.b, alpha);
-                    SDL_Rect strip = { fade_x + fx, panel_y, strip_w, panel_h };
-                    SDL_RenderFillRect(ren, &strip);
-                }
-
-                int cy = panel_y + 16;
-                int cx = panel_x + 20;
-                int panel_text_w = panel_w - 40;
-                int panel_bottom = panel_y + panel_h - 10;
-                int align_right = single_card_title_side ? 1 : 0;
-                SDL_Rect panel_clip = { panel_x, panel_y, panel_w, panel_h };
-                SDL_RenderSetClipRect(ren, &panel_clip);
-
-                // Single Card always needs a clear system identity. The
-                // "System Titles" toggle still applies to the compact system
-                // browser layouts, but this panel should never collapse to
-                // only "ATARI" or "SONY".
-                {
-                    char name_lines[MAX_LINES][128];
-                    int name_n = wrap_text(font_small, platform_panel_name(platform_selected), panel_text_w, name_lines);
-                    if (name_n > 2) name_n = 2;
-                    for (int ni = 0; ni < name_n; ni++) {
-                        SDL_Texture *nt = render_text(ren, font_small, name_lines[ni], g_ui_text);
-                        int ntw, nth; SDL_QueryTexture(nt, NULL, NULL, &ntw, &nth);
-                        int tx = align_right ? cx + panel_text_w - ntw : cx;
-                        SDL_RenderCopy(ren, nt, NULL, &(SDL_Rect){ tx, cy, ntw, nth });
-                        cy += nth + 2;
-                    }
-                    cy += 2;
-                }
-
-                SDL_Texture *mt = render_text_fit(ren, font_label, platform_maker[platform_selected], g_ui_dim, panel_text_w);
-                int mtw, mth;
-                SDL_QueryTexture(mt, NULL, NULL, &mtw, &mth);
-                SDL_Rect mdst = { align_right ? cx + panel_text_w - mtw : cx, cy, mtw, mth };
-                SDL_RenderCopy(ren, mt, NULL, &mdst);
-                cy += mth + 6;
-
-                char yeartype[48];
-                snprintf(yeartype, sizeof(yeartype), "%s * %s", platform_year[platform_selected], platform_form[platform_selected]);
-                SDL_Texture *yt = render_text_fit(ren, font_label, yeartype, g_ui_dim, panel_text_w);
-                int ytw, yth;
-                SDL_QueryTexture(yt, NULL, NULL, &ytw, &yth);
-                SDL_Rect ydst = { align_right ? cx + panel_text_w - ytw : cx, cy, ytw, yth };
-                SDL_RenderCopy(ren, yt, NULL, &ydst);
-                cy += yth + 8;
-
-                char countstr[32];
-                int gc = platform_game_count_cache[platform_selected];
-                snprintf(countstr, sizeof(countstr), "%d GAME%s", gc, gc == 1 ? "" : "S");
-                SDL_Texture *gt = render_text(ren, font_label, countstr, th->accent2);
-                int gtw, gth;
-                SDL_QueryTexture(gt, NULL, NULL, &gtw, &gth);
-                SDL_Rect gdst = { align_right ? cx + panel_text_w - gtw : cx, cy, gtw, gth };
-                SDL_RenderCopy(ren, gt, NULL, &gdst);
-                cy += gth + 8;
-
-                char blurb_lines[MAX_LINES][128];
-                const float body_scale = 0.82f;
-                int bn = wrap_text(font_label, platform_blurb[platform_selected],
-                                   (int)((panel_w - 40) / body_scale), blurb_lines);
-                int blurb_cut = 0;
-                for (int bi = 0; bi < bn; bi++) {
-                    SDL_Texture *bt = render_text(ren, font_label, blurb_lines[bi], g_ui_dim);
-                    int btw, bth;
-                    SDL_QueryTexture(bt, NULL, NULL, &btw, &bth);
-                    int bsw = (int)(btw * body_scale), bsh = (int)(bth * body_scale);
-                    if (cy + bsh > panel_bottom) { blurb_cut = 1; break; }
-                    SDL_Rect bdst = { align_right ? cx + panel_text_w - bsw : cx, cy, bsw, bsh };
-                    SDL_RenderCopy(ren, bt, NULL, &bdst);
-                    cy += bsh + 3;
-                }
-                if (blurb_cut) {
-                    SDL_Texture *more = render_text(ren, font_label, "...", g_ui_dim);
-                    int mw, mh; SDL_QueryTexture(more, NULL, NULL, &mw, &mh);
-                    SDL_RenderCopy(ren, more, NULL,
-                        &(SDL_Rect){ align_right ? cx + panel_text_w - mw : cx, panel_bottom - mh, mw, mh });
-                }
-                SDL_RenderSetClipRect(ren, NULL);
-            }
+            if (platform_view_style == 0) single_card_info_panel(ren, th);
 
         } else if (state == STATE_QUICKCFG) {
             draw_dock_logo(ren, font_small);
@@ -22330,10 +25964,17 @@ int main(int argc, char *argv[]) {
 
         } else if (state == STATE_BG_TARGET) {
             draw_dock_logo(ren, font_small);
-            SDL_Texture *title = render_text(ren, font_small, "SAVE WALLPAPER TO...", th->accent2);
+            int for_drawing = bg_target_purpose == BG_TARGET_DRAWING;
+            SDL_Texture *title = render_text(ren, font_small,
+                                             for_drawing ? "USE DRAWING AS BACKGROUND FOR..." : "SAVE WALLPAPER TO...",
+                                             th->accent2);
             int tw, thh; SDL_QueryTexture(title, NULL, NULL, &tw, &thh);
             SDL_RenderCopy(ren, title, NULL, &(SDL_Rect){ WIN_W/2 - tw/2, 58, tw, thh });
-            char qline[150]; snprintf(qline, sizeof qline, "%.127s", bg_online_title[bg_download_pending_index]);
+            char qline[150];
+            if (for_drawing) snprintf(qline, sizeof qline, "It will show behind this system's games.");
+            else if (bg_download_pending_index >= 0 && bg_download_pending_index < bg_online_count)
+                snprintf(qline, sizeof qline, "%.127s", bg_online_title[bg_download_pending_index]);
+            else qline[0] = '\0';
             SDL_Texture *qt = render_text_fit(ren, font_fixed ? font_fixed : font_label, qline, g_ui_dim, WIN_W - 72);
             int qw, qh; SDL_QueryTexture(qt, NULL, NULL, &qw, &qh);
             SDL_RenderCopy(ren, qt, NULL, &(SDL_Rect){ WIN_W/2 - qw/2, 88, qw, qh });
@@ -22352,7 +25993,8 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, nm, NULL, &(SDL_Rect){ WIN_W/2 - nw/2, y, nw, nh });
                 y += rowh;
             }
-            SDL_Texture *hint = render_text(ren, font_label, "A  Download Here        B  Back", g_ui_dim);
+            SDL_Texture *hint = render_text(ren, font_label,
+                                            for_drawing ? "A  Use Here        B  Back" : "A  Download Here        B  Back", g_ui_dim);
             int hw, hh; SDL_QueryTexture(hint, NULL, NULL, &hw, &hh);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ WIN_W/2 - hw/2, WIN_H - hh - 14, hw, hh });
 
@@ -22394,7 +26036,7 @@ int main(int argc, char *argv[]) {
                 draw_screen_power_page(ren, th);
             } else {
             draw_dock_logo(ren, font_small);
-            const char *tab_names[] = { "SOUND", "DISPLAY", "GAME", "DEVICE", "ACCOUNTS" };
+            const char *tab_names[] = { "SOUND", "DISPLAY", "GAME", "DEVICE", "ONLINE" };
             int tab_y = 56; // clears the top HUD / status bar
             const int TAB_GAP = 36, TAB_PAD = 20;   // gap between tabs; slop each side
 
@@ -22429,6 +26071,20 @@ int main(int argc, char *argv[]) {
                 else g_text_scrolling = 1;   // keep frames flowing while the strip slides
             }
 
+            // A group page puts its own name where the tab strip goes. Leaving
+            // the strip up would offer to switch tabs from inside a page, which
+            // is not what the shoulder buttons do there and not where B goes;
+            // the tab stays named so you still know which one you are under.
+            const char *page_heading = settings_page_heading();
+            if (page_heading) {
+                char head[96]; int hi = 0;
+                for (const char *p = page_heading; *p && hi < (int)sizeof head - 1; p++)
+                    head[hi++] = (char)toupper((unsigned char)*p);
+                head[hi] = 0;
+                SDL_Texture *ht = render_text_fit(ren, font_small_bold, head, th->accent2, WIN_W - 2 * SETTINGS_PAGE_X);
+                int hw2, hh2; SDL_QueryTexture(ht, NULL, NULL, &hw2, &hh2);
+                SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ SETTINGS_PAGE_X, SETTINGS_PAGE_HEAD_Y, hw2, hh2 });
+            } else {
             SDL_Rect tclip = { 0, tab_y - 6, WIN_W, tth + 16 };
             SDL_RenderSetClipRect(ren, &tclip);
             int tx = (int)(g_tab_scroll + 0.5f);
@@ -22450,21 +26106,21 @@ int main(int argc, char *argv[]) {
                     SDL_RenderFillRect(ren, &(SDL_Rect){ WIN_W - 1 - e2, tclip.y, 1, tclip.h });
                 }
             }
+            }
 
             int row_type[MAX_DISPLAY_ROWS > MAX_ACCOUNT_ROWS ? MAX_DISPLAY_ROWS : MAX_ACCOUNT_ROWS];
             int row_extra[MAX_DISPLAY_ROWS > MAX_ACCOUNT_ROWS ? MAX_DISPLAY_ROWS : MAX_ACCOUNT_ROWS];
             int rcount = 0;
-            if (current_tab == TAB_SOUND) rcount = build_sound_rows(row_type, row_extra);
-            else if (current_tab == TAB_DISPLAY) rcount = build_display_rows(row_type, row_extra);
-            else if (current_tab == TAB_GAME) rcount = build_game_rows(row_type, row_extra);
-            else if (current_tab == TAB_DEVICE) rcount = build_device_rows(row_type, row_extra);
-            else if (current_tab == TAB_ACCOUNT) rcount = build_account_rows(row_type, row_extra);
+            rcount = settings_build_rows(current_tab, row_type, row_extra);
 
-            int y = SETTINGS_ROWS_TOP;
-            int left_x = 60;
+            const int on_page = sgp_depth > 0;
+            const int page_pitch = TTF_FontHeight(font_label) + 14;
+            int y = on_page ? settings_page_rows_top() : SETTINGS_ROWS_TOP;
+            int left_x = on_page ? SETTINGS_PAGE_X : 60;
             int vis_rows = settings_visible_rows();
             if (settings_selected >= rcount) settings_selected = rcount - 1;   // a collapse shrank the list
             if (settings_selected < 0) settings_selected = 0;
+            settings_skip_unselectable(current_tab, row_type, rcount, &settings_selected, 1);
             // Don't leave dead space at the bottom if the window grew / list shrank.
             if (settings_scroll_offset > rcount - vis_rows) settings_scroll_offset = rcount - vis_rows;
             if (settings_scroll_offset < 0) settings_scroll_offset = 0;
@@ -22478,10 +26134,10 @@ int main(int argc, char *argv[]) {
 
                 if (current_tab == TAB_SOUND) {
                     if (rt == ROW_SND_MASTER_VOLUME) snprintf(text, sizeof(text), "Master Volume: %d%%", master_volume_pct);
-                    else if (rt == ROW_SND_GRP_OSUI)  snprintf(text, sizeof(text), "%c OS & UI", snd_grp_osui_open ? 'v' : '>');
-                    else if (rt == ROW_SND_GRP_BOOT)  snprintf(text, sizeof(text), "%c Boot", snd_grp_boot_open ? 'v' : '>');
-                    else if (rt == ROW_SND_GRP_RADIO) snprintf(text, sizeof(text), "%c Radio", snd_grp_radio_open ? 'v' : '>');
-                    else if (rt == ROW_SND_GRP_MUSIC) snprintf(text, sizeof(text), "%c Music (SD Card)", snd_grp_music_open ? 'v' : '>');
+                    else if (rt == ROW_SND_GRP_OSUI)  snprintf(text, sizeof(text), "OS & UI Sound: %s  \xE2\x80\xBA", os_audio_enabled ? "On" : "Off");
+                    else if (rt == ROW_SND_GRP_BOOT)  snprintf(text, sizeof(text), "Boot Sound: %s  \xE2\x80\xBA", chime_enabled ? boot_sound_names[boot_sound_idx] : "Off");
+                    else if (rt == ROW_SND_GRP_RADIO) snprintf(text, sizeof(text), "Radio: %d%%  \xE2\x80\xBA", radio_volume_pct);
+                    else if (rt == ROW_SND_GRP_MUSIC) snprintf(text, sizeof(text), "Music (SD Card)  \xE2\x80\xBA");
                     else if (rt == ROW_SND_MUSIC_PERSIST) { snprintf(text, sizeof(text), "Keep Playing While Browsing: %s", music_persist ? "ON" : "OFF"); indent = 1; }
                     else if (rt == ROW_SND_MUSIC_OVERGAME) { snprintf(text, sizeof(text), "Music During Games: %s", music_over_games ? "ON" : "OFF"); indent = 1; }
                     else if (rt == ROW_SND_MUSIC_GAME_AUDIO) { snprintf(text, sizeof(text), "Game Audio With Music: %s", music_game_audio ? "ON" : "OFF"); indent = 1; }
@@ -22498,15 +26154,17 @@ int main(int argc, char *argv[]) {
                     else if (rt == ROW_SND_RESTORE) snprintf(text, sizeof(text), "Restore to Default (Sound)");
                 } else if (current_tab == TAB_DISPLAY) {
                     if (!format_systems_view_row(rt, text, sizeof text, &indent)) switch (rt) {
-                        case ROW_DISP_GRP_HOME: snprintf(text, sizeof(text), "%c Home", disp_grp_home_open ? 'v' : '>'); break;
+                        case ROW_DISP_GRP_HOME: snprintf(text, sizeof(text), "Home: %s  \xE2\x80\xBA", home_view_names[(home_view_idx >= 0 && home_view_idx < HOME_VIEW_COUNT) ? home_view_idx : 0]); break;
                         case ROW_DISP_HOME_VIEW: snprintf(text, sizeof(text), "Home Layout: %s", home_view_names[(home_view_idx >= 0 && home_view_idx < HOME_VIEW_COUNT) ? home_view_idx : 0]); indent = 1; break;
                         case ROW_DISP_ICON_PACK: snprintf(text, sizeof(text), "App Icon Pack: %s", home_icon_pack_names[(home_icon_pack_idx >= 0 && home_icon_pack_idx < HOME_ICON_PACK_COUNT) ? home_icon_pack_idx : 0]); indent = 1; break;
                         case ROW_DISP_SURPRISE: snprintf(text, sizeof(text), "Surprise Me (Home): %s", surprise_me_enabled ? "ON" : "OFF"); indent = 1; break;
                         case ROW_DISP_GRP_APPS: { int n = 0; for (int a = 0; a < APP_COUNT; a++) if (home_apps_mask & (1 << a)) n++;
-                            snprintf(text, sizeof(text), "%c Home Apps (%d/%d)", disp_grp_apps_open ? 'v' : '>', n, APP_COUNT); indent = 1; } break;
-                        case ROW_DISP_APP_ITEM: { int a = row_extra[i]; snprintf(text, sizeof(text), "%s: %s", home_app_names[a], (home_apps_mask & (1 << a)) ? "Shown" : "Hidden"); indent = 2; } break;
-                        case ROW_DISP_GRP_TEXT: snprintf(text, sizeof(text), "%c Theme & Text", disp_grp_text_open ? 'v' : '>'); indent = 0; break;
-                        case ROW_DISP_BG_PAGE: snprintf(text, sizeof(text), "> Backgrounds"); indent = 0; break;
+                            snprintf(text, sizeof(text), "Pinned to Home (%d/%d)  \xE2\x80\xBA", n, APP_COUNT); indent = 1; } break;
+                        // Unpinned no longer means hidden -- everything is on the Apps
+                        // page either way, so say what the toggle actually does.
+                        case ROW_DISP_APP_ITEM: { int a = row_extra[i]; snprintf(text, sizeof(text), "%s: %s", home_app_names[a], (home_apps_mask & (1 << a)) ? "On Home" : "Apps Page"); indent = 2; } break;
+                        case ROW_DISP_GRP_TEXT: snprintf(text, sizeof(text), "Theme & Text: %s  \xE2\x80\xBA", themes[theme_idx < THEME_COUNT ? theme_idx : 0].name); indent = 0; break;
+                        case ROW_DISP_BG_PAGE: snprintf(text, sizeof(text), "Backgrounds  \xE2\x80\xBA"); indent = 0; break;
                         case ROW_DISP_GRP_LIBVIEW: {
                             // Naming the Systems View again here read as a second
                             // copy of the row above it. The library's own layout
@@ -22516,31 +26174,21 @@ int main(int argc, char *argv[]) {
                                 : library_view_names[library_view_idx];
                             const char *auto_tag = (library_view_idx < 0) ? "  (Auto)" : "";
                             if (library_view_style() == 2)   // only Grid has rows under it
-                                snprintf(text, sizeof(text), "%c Library View: %s%s",
-                                         disp_grp_libview_open ? 'v' : '>', lvn, auto_tag);
+                                snprintf(text, sizeof(text), "Library View: %s%s  \xE2\x80\xBA", lvn, auto_tag);
                             else
                                 snprintf(text, sizeof(text), "Library View: %s%s", lvn, auto_tag);
                             indent = 0; } break;
-                        case ROW_DISP_LIB_VIEW:
-                            if (library_view_idx < 0)
-                                snprintf(text, sizeof(text), "Layout: Follow Systems View (%s)",
-                                         library_view_names[platform_view_style % VIEW_STYLE_COUNT]);
-                            else
-                                snprintf(text, sizeof(text), "Layout: %s", library_view_names[library_view_idx]);
-                            indent = 1; break;
-                        case ROW_DISP_LIB_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
-                        case ROW_DISP_LIB_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
-                        case ROW_DISP_GRP_HUD: snprintf(text, sizeof(text), "%c Status Bar", disp_grp_hud_open ? 'v' : '>'); indent = 0; break;
-                        case ROW_DISP_GRP_SCREEN: snprintf(text, sizeof(text), "> Screen & Power"); indent = 0; break;
-                        case ROW_DISP_BG_HEADER: snprintf(text, sizeof(text), "%c Background", bg_dropdown_open ? 'v' : '>'); indent = 0; break;
+                        case ROW_DISP_GRP_HUD: snprintf(text, sizeof(text), "Status Bar: %s  \xE2\x80\xBA", hud_chrome_names[(hud_chrome_style >= 0 && hud_chrome_style < HUD_CHROME_COUNT) ? hud_chrome_style : 0]); indent = 0; break;
+                        case ROW_DISP_GRP_SCREEN: snprintf(text, sizeof(text), "Screen & Power  \xE2\x80\xBA"); indent = 0; break;
+                        case ROW_DISP_BG_HEADER: snprintf(text, sizeof(text), "Background  \xE2\x80\xBA"); indent = 0; break;
                         case ROW_DISP_BG_MODE: snprintf(text, sizeof(text), "Source: %s", bg_mode_names[(platform_bg_mode >= 0 && platform_bg_mode < BG_MODE_COUNT) ? platform_bg_mode : 0]); indent = 1; break;
                         case ROW_DISP_BG_COLOR: snprintf(text, sizeof(text), "Color: %s", hud_chrome_colors[(platform_bg_color_idx >= 0 && platform_bg_color_idx < HUD_CHROME_COLOR_COUNT) ? platform_bg_color_idx : 0].name); indent = 1; break;
 
                         case ROW_DISP_THEME:
-                            snprintf(text,sizeof text,"Default Themes: %s (X Edit)",themes[theme_idx<THEME_COUNT?theme_idx:0].name);
+                            snprintf(text,sizeof text,"Default Themes: %s",themes[theme_idx<THEME_COUNT?theme_idx:0].name);
                             indent=1;break;
                         case ROW_DISP_CUSTOM_THEME:
-                            snprintf(text,sizeof text,"Custom Themes: %s (%d/8)",custom_theme_choice<theme_count-THEME_COUNT?themes[THEME_COUNT+custom_theme_choice].name:"Create new (X)",theme_count-THEME_COUNT);
+                            snprintf(text,sizeof text,"Custom Themes: %s (%d/8)",custom_theme_choice<theme_count-THEME_COUNT?themes[THEME_COUNT+custom_theme_choice].name:"Create New",theme_count-THEME_COUNT);
                             indent=1;break;
                         case ROW_DISP_FONT_STYLE: snprintf(text, sizeof(text), "Font Style: %s", font_choice_names[font_choice_idx]); indent = 1; break;
                         case ROW_DISP_FONT_SIZE: snprintf(text, sizeof(text), "Font Size: %s", font_size_names[font_size_idx]); indent = 1; break;
@@ -22553,7 +26201,7 @@ int main(int argc, char *argv[]) {
                             const char *an = art_type_names[(display_art_idx >= 0 && display_art_idx < ART_TYPE_COUNT) ? display_art_idx : 0];
                             // Some layouts draw their own art; say so, but briefly
                             // enough that the row still fits on a 640px panel.
-                            snprintf(text, sizeof(text), "%c %sDisplay Art: %s", display_dropdown_open ? 'v' : '>',
+                            snprintf(text, sizeof(text), "%sDisplay Art: %s  \xE2\x80\xBA",
                                      view_overrides_art()?"Favorites: ":"",an);
                             indent = 0; break; }
                         case ROW_DISP_ART_ITEM: {
@@ -22605,7 +26253,7 @@ int main(int argc, char *argv[]) {
                             indent = 1;
                             break;
                         case ROW_G_AUTOSAVE: snprintf(text, sizeof(text), "Auto-Save Games (60s): %s", auto_save_games ? "ON" : "OFF"); break;
-                        case ROW_G_VIEW_HEADER: snprintf(text, sizeof(text), "%c Systems View: %s", disp_grp_view_open ? 'v' : '>', view_style_names[platform_view_style % VIEW_STYLE_COUNT]); break;
+                        case ROW_G_VIEW_HEADER: snprintf(text, sizeof(text), "Systems View: %s  \xE2\x80\xBA", view_style_names[platform_view_style % VIEW_STYLE_COUNT]); break;
                         case ROW_G_FAVORITES_VIEW: snprintf(text, sizeof(text), "Favorites View: %s", favorite_view_names[(favorites_view_idx >= 0 && favorites_view_idx < FAVORITES_VIEW_COUNT) ? favorites_view_idx : 0]); indent = 1; break;
                         case ROW_G_SHOW_EMPTY: snprintf(text, sizeof(text), "Show Systems Without Games: %s", show_empty_systems ? "ON" : "OFF"); indent = 1; break;
                         case ROW_G_CAROUSEL_TITLES: snprintf(text, sizeof(text), "System Titles: %s", carousel_titles_on ? "ON" : "OFF"); indent = 1; break;
@@ -22615,27 +26263,29 @@ int main(int argc, char *argv[]) {
                         case ROW_G_LIST_FRAME_COLOR: snprintf(text, sizeof(text), "List Image Frame Color: %s", hud_chrome_colors[(list_frame_color_idx >= 0 && list_frame_color_idx < HUD_CHROME_COLOR_COUNT) ? list_frame_color_idx : 0].name); indent = 1; break;
                         case ROW_G_LIST_TEXT_COLOR: snprintf(text, sizeof(text), "List Text Color: %s", list_text_color_idx == 0 ? "Auto" : font_color_names[(list_text_color_idx > 0 && list_text_color_idx < FONT_COLOR_COUNT) ? list_text_color_idx : 0]); indent = 1; break;
                         case ROW_G_VIEW_RESTORE: snprintf(text, sizeof(text), "Restore Systems View Defaults"); indent = 1; break;
-                        case ROW_G_ART_HEADER: snprintf(text, sizeof(text), "%c Columns/Rows", game_art_dropdown_open ? 'v' : '>'); break;
+                        case ROW_G_ART_HEADER: snprintf(text, sizeof(text), "Columns/Rows  \xE2\x80\xBA"); break;
                         case ROW_G_GRID_COLS: snprintf(text, sizeof(text), "Grid Columns: %d", grid_cols); indent = 1; break;
                         case ROW_G_GRID_ROWS: snprintf(text, sizeof(text), "Grid Rows: %d", grid_rows); indent = 1; break;
+                        case ROW_G_GRP_PLAY: snprintf(text, sizeof(text), "Gameplay: Fast Forward %s  \xE2\x80\xBA", fast_forward_labels[fast_forward_idx]); break;
                         case ROW_G_SHOW_DESC: snprintf(text, sizeof(text), "Show Descriptions: %s", show_description ? "ON" : "OFF"); break;
-                        case ROW_G_ROMS: if (g_storage_count > 1) snprintf(text, sizeof(text), "> Storage & Games Folders: %d cards, %d folder%s", g_storage_count, g_roms_nroots > 0 ? g_roms_nroots : 1, (g_roms_nroots > 0 ? g_roms_nroots : 1) == 1 ? "" : "s"); else if (g_roms_nroots > 1) snprintf(text, sizeof(text), "> Storage & Games Folders: %d / %d", g_roms_nroots, ROMS_ROOT_MAX); else snprintf(text, sizeof(text), "> Storage & Games Folders: %.44s", sn_roms_root()); break;
-                        case ROW_G_BG_HEADER: snprintf(text, sizeof(text), "%c Backgrounds", bg_dropdown_open ? 'v' : '>'); break;
+                        case ROW_G_ROMS: if (g_storage_count > 1) snprintf(text, sizeof(text), "Storage & Games Folders: %d cards, %d folder%s", g_storage_count, g_roms_nroots > 0 ? g_roms_nroots : 1, (g_roms_nroots > 0 ? g_roms_nroots : 1) == 1 ? "" : "s"); else if (g_roms_nroots > 1) snprintf(text, sizeof(text), "Storage & Games Folders: %d / %d", g_roms_nroots, ROMS_ROOT_MAX); else snprintf(text, sizeof(text), "Storage & Games Folders: %.44s", sn_roms_root()); break;
+                        case ROW_G_BG_HEADER: snprintf(text, sizeof(text), "Backgrounds  \xE2\x80\xBA"); break;
                         case ROW_G_BG_MODE: snprintf(text, sizeof(text), "Source: %s", bg_mode_names[(platform_bg_mode>=0&&platform_bg_mode<BG_MODE_COUNT)?platform_bg_mode:0]); indent=1; break;
                         case ROW_G_BG_COLOR: snprintf(text, sizeof(text), "Color: %s", hud_chrome_colors[(platform_bg_color_idx>=0&&platform_bg_color_idx<HUD_CHROME_COLOR_COUNT)?platform_bg_color_idx:0].name); indent=1; break;
-                        case ROW_G_BG_MAKER: { int m=row_extra[i]; snprintf(text,sizeof(text),"%c %s",bg_maker_open[m]?'v':'>',bg_maker_names[m]); indent=1; } break;
+                        case ROW_G_BG_MAKER: { int m=row_extra[i]; snprintf(text,sizeof(text),"%s  \xE2\x80\xBA",bg_maker_names[m]); indent=1; } break;
                         case ROW_G_BG_ITEM: snprintf(text,sizeof(text),"%s: %s",platform_short[row_extra[i]],platform_bg_choice[row_extra[i]][0]?platform_bg_choice[row_extra[i]]:"Default"); indent=2; break;
                         case ROW_G_BG_RESTORE: snprintf(text,sizeof(text),"Restore Background Defaults"); indent=1; break;
                         case ROW_G_RESTORE: snprintf(text, sizeof(text), "Restore to Default (Game)"); break;
                     }
                 } else if (current_tab == TAB_DEVICE) {
                     if (rt == ROW_DEV_POWERSAVE) snprintf(text, sizeof(text), "Power Save Mode: %s%s", power_save_mode ? "ON" : "OFF", (power_save_mode && power_save_auto) ? " (auto)" : "");
+                    else if (rt == ROW_DEV_FPS_MODE) snprintf(text, sizeof(text), "Frame Rate: %s", fps_mode_names[(fps_mode_idx >= 0 && fps_mode_idx < FPS_MODE_COUNT) ? fps_mode_idx : 0]);
                     else if (rt == ROW_DEV_CPU_PERF) snprintf(text, sizeof(text), "CPU Performance Mode: %s%s", cpu_perf_mode ? "ON" : "OFF", power_save_mode ? "  (Power Save wins)" : (cpu_perf_mode ? "  (stays on in games)" : ""));
                     else if (rt == ROW_DEV_PERF_OVERLAY) snprintf(text, sizeof(text), "Performance Overlay: %s%s", show_perf_overlay ? "ON" : "OFF", show_perf_overlay ? "  (stays up in games)" : "");
                     else if (rt == ROW_DEV_PERF_OPACITY) { snprintf(text, sizeof(text), "Overlay Opacity: %d%%", perf_overlay_opacity); indent = 1; }
                     else if (rt == ROW_DEV_PERF_TEXT) { snprintf(text, sizeof(text), "Overlay Text Color: %s", perf_overlay_text_idx == 0 ? "Match UI" : font_color_names[(perf_overlay_text_idx > 0 && perf_overlay_text_idx < FONT_COLOR_COUNT) ? perf_overlay_text_idx : 1]); indent = 1; }
-                    else if (rt == ROW_DEV_GRP_BATT) snprintf(text, sizeof(text), "%c Battery", dev_grp_batt_open ? 'v' : '>');
-                    else if (rt == ROW_DEV_GRP_NIGHT) snprintf(text, sizeof(text), "%c Night Mode & Schedule", dev_grp_night_open ? 'v' : '>');
+                    else if (rt == ROW_DEV_GRP_BATT) snprintf(text, sizeof(text), "Battery & Power: %s  \xE2\x80\xBA", power_save_mode ? "Power Save" : "Normal");
+                    else if (rt == ROW_DEV_GRP_NIGHT) { const char *nn2[3] = { "Off", "Always On", "Scheduled" }; snprintf(text, sizeof(text), "Night Mode: %s  \xE2\x80\xBA", nn2[night_mode % 3]); }
                     else if (rt == ROW_DEV_AUTOPS) { int cur = 0; for (int k = 0; k < (int)(sizeof(auto_ps_labels)/sizeof(auto_ps_labels[0])); k++) if (auto_ps_choices[k] == auto_ps_pct) cur = k; snprintf(text, sizeof(text), "Auto Power Save at: %s", auto_ps_labels[cur]); indent = 1; }
                     else if (rt == ROW_DEV_BATTERY_ICON) { snprintf(text, sizeof(text), "Filled Battery Icon: %s", battery_icon_enabled ? "ON" : "OFF"); indent = 1; }
                     else if (rt == ROW_DEV_NIGHT) { const char *nn[3] = { "Off", "Always On", "Scheduled" }; snprintf(text, sizeof(text), "Night Mode: %s", nn[night_mode % 3]); indent = 1; }
@@ -22643,36 +26293,39 @@ int main(int argc, char *argv[]) {
                     else if (rt == ROW_DEV_NIGHT_END) { snprintf(text, sizeof(text), "Night ends at: %02d:00", night_end_hour); indent = 1; }
                     else if (rt == ROW_DEV_NIGHT_BRIGHT) { snprintf(text, sizeof(text), "Night Brightness: %d%%", night_brightness_pct); indent = 1; }
                     else if (rt == ROW_DEV_NIGHT_HOTKEY) { snprintf(text, sizeof(text), "Toggle Night with Select+X: %s", night_hotkey_on ? "ON" : "OFF"); indent = 1; }
-                    else if (rt == ROW_DEV_DEVICE) { snprintf(text, sizeof(text), "Device: %s", device_profiles[(device_idx >= 0 && device_idx < DEVICE_PROFILE_COUNT) ? device_idx : 0].name); indent = 0; }
+                    else if (rt == ROW_DEV_DEVICE) { snprintf(text, sizeof(text), "Device Profile: %s", device_profiles[(device_idx >= 0 && device_idx < DEVICE_PROFILE_COUNT) ? device_idx : 0].name); }
                     else if (rt == ROW_DEV_TEST_KEYBOARD) snprintf(text, sizeof(text), "Test On-Screen Keyboard");
-                    else if (rt == ROW_DEV_SYSCFG) snprintf(text, sizeof(text), "Per-System Settings");
+                    else if (rt == ROW_DEV_HEADER) snprintf(text, sizeof(text), "%s", device_profiles[(device_idx >= 0 && device_idx < DEVICE_PROFILE_COUNT) ? device_idx : 0].name);
+                    else if (rt == ROW_DEV_GRP_PERF) snprintf(text, sizeof(text), "Performance: %s  \xE2\x80\xBA", fps_mode_names[(fps_mode_idx >= 0 && fps_mode_idx < FPS_MODE_COUNT) ? fps_mode_idx : 0]);
+                    else if (rt == ROW_DEV_GRP_CONNECT) snprintf(text, sizeof(text), "Connections  \xE2\x80\xBA");
+                    else if (rt == ROW_DEV_GRP_CONTROLS) snprintf(text, sizeof(text), "Controls  \xE2\x80\xBA");
+                    else if (rt == ROW_DEV_GRP_SYSTEM) snprintf(text, sizeof(text), "System  \xE2\x80\xBA");
+                    else if (rt == ROW_DEV_SYSCFG) snprintf(text, sizeof(text), "Per-System Settings  \xE2\x80\xBA");
                     else if (rt == ROW_DEV_WIFI) snprintf(text, sizeof(text), "Wi-Fi");
                     else if (rt == ROW_DEV_BLUETOOTH) snprintf(text, sizeof(text), "Bluetooth");
-                    else if (rt == ROW_DEV_SYNCTHING) snprintf(text, sizeof(text), "Syncthing: %s", syncthing_enabled ? "ON" : "OFF");
-                    else if (rt == ROW_DEV_SYNCTHING_INFO) { snprintf(text, sizeof(text), "Web UI: this-device-ip:8384"); indent = 1; }
                     else if (rt == ROW_DEV_HOTKEYS) snprintf(text, sizeof(text), "Hotkeys");
                     else if (rt == ROW_DEV_EXIT_ES) snprintf(text, sizeof(text), "Switch Back to EmulationStation: %s", confirm_es_pending ? "Press A again -- reboots now" : "Press A");
                     else if (rt == ROW_DEV_RESET) snprintf(text, sizeof(text), "Factory Reset: %s", confirm_reset_pending ? "Press A again to confirm" : "Press A");
                     else if (rt == ROW_DEV_RESTORE) snprintf(text, sizeof(text), "Restore to Default (Device)");
                 } else if (current_tab == TAB_ACCOUNT) {
                     switch (rt) {
-                        case ROW_SCRAPE_HEADER: snprintf(text, sizeof(text), "%c Scraping", scrape_dropdown_open ? 'v' : '>'); break;
-                        case ROW_SCRAPE_SERVICE_HEADER: snprintf(text, sizeof(text), "%c Source & Sign-In", scrape_service_open ? 'v' : '>'); indent = 1; break;
-                        case ROW_SCRAPE_SOURCE: snprintf(text, sizeof(text), "< Source: %s >", scrape_source_names[scrape_source ? 1 : 0]); indent = 2; break;
-                        case ROW_SCRAPE_SS_USER: snprintf(text, sizeof(text), "ScreenScraper User: %s", ss_user[0] ? ss_user : "Not Set (Press A)"); indent = 2; break;
-                        case ROW_SCRAPE_SS_PASS: snprintf(text, sizeof(text), "ScreenScraper Password: %s", ss_pass[0] ? "Set (Press A to change)" : "Not Set (Press A)"); indent = 2; break;
-                        case ROW_KEY: snprintf(text, sizeof(text), "TheGamesDB Key: %s", api_key_exists() ? "Configured" : "Not Set (Press A)"); indent = 2; break;
-                        case ROW_SCRAPE_MAKER:snprintf(text,sizeof text,"%c %s",scrape_maker_open[row_extra[i]]?'v':'>',scrape_makers[row_extra[i]]);indent=2;break;
-                        case ROW_SCRAPE_SYSTEM_HEADER: { int n = 0; for (int p = 0; p < PLATFORM_COUNT; p++) n += scrape_system_enabled[p] ? 1 : 0; snprintf(text, sizeof(text), "%c Systems (%d/%d)", scrape_systems_open ? 'v' : '>', n, PLATFORM_COUNT); indent = 1; } break;
-                        case ROW_SCRAPE_SYSTEM_ITEM: snprintf(text, sizeof(text), "%s (%d): %s", platform_names[row_extra[i]], platform_game_count_cache[row_extra[i]]>0?platform_game_count_cache[row_extra[i]]:0, scrape_system_enabled[row_extra[i]] ? "ON" : "OFF"); indent = 2; break;
-                        case ROW_ART_HEADER: snprintf(text, sizeof(text), "%c Scrape Art Types", art_dropdown_open ? 'v' : '>'); indent = 1; break;
-                        case ROW_ART_ITEM: snprintf(text, sizeof(text), "%s: %s", art_type_names[row_extra[i]], scrape_art_enabled[row_extra[i]] ? "ON" : "OFF"); indent = row_extra[i] >= 4 ? 3 : 2; break;
-                        case ROW_ART_EXTRAS_HEADER: snprintf(text, sizeof(text), "%c Extras", scrape_extras_open ? 'v' : '>'); indent = 2; break;
-                        case ROW_SCRAPE_DESC: snprintf(text, sizeof(text), "Descriptions: %s", scrape_description ? "ON" : "OFF"); indent = 2; break;
-                        case ROW_ONLY_MISSING: snprintf(text, sizeof(text), "Only Scrape Missing: %s", only_scrape_missing ? "ON" : "OFF"); indent = 1; break;
-                        case ROW_FIX_TITLES: snprintf(text, sizeof(text), "Fix Game Titles: %s", fix_game_titles ? "ON" : "OFF"); indent = 1; break;
-                        case ROW_SCRAPE_NOW: snprintf(text, sizeof(text), "%s", scrape_in_progress ? "Stop Scraping Now (Press A)" : scrape_error ? "Scrape Now (last run failed)" : "Scrape Now"); indent = 1; break;
-                        case ROW_RA_HEADER: snprintf(text, sizeof(text), "%c RetroAchievements%s", ra_dropdown_open ? 'v' : '>', ra_configured() ? "  (active)" : ""); break;
+                        case ROW_SCRAPE_HEADER: snprintf(text, sizeof(text), "Scraper: %s  \xE2\x80\xBA", scrape_source_names[scrape_source ? 1 : 0]); break;
+                        case ROW_SCRAPE_SERVICE_HEADER: snprintf(text, sizeof(text), "Source & Sign-In: %s  \xE2\x80\xBA", scrape_source_names[scrape_source ? 1 : 0]); break;
+                        case ROW_SCRAPE_SOURCE: snprintf(text, sizeof(text), "Source: %s", scrape_source_names[scrape_source ? 1 : 0]); indent = 1; break;
+                        case ROW_SCRAPE_SS_USER: snprintf(text, sizeof(text), "ScreenScraper User: %s", ss_user[0] ? ss_user : "Not Set (Press A)"); indent = 1; break;
+                        case ROW_SCRAPE_SS_PASS: snprintf(text, sizeof(text), "ScreenScraper Password: %s", ss_pass[0] ? "Set (Press A to change)" : "Not Set (Press A)"); indent = 1; break;
+                        case ROW_KEY: snprintf(text, sizeof(text), "TheGamesDB Key: %s", api_key_exists() ? "Configured" : "Not Set (Press A)"); indent = 1; break;
+                        case ROW_SCRAPE_MAKER: { const char *mk = scrape_makers[row_extra[i]]; int k = 0; for (; mk[k] && k < (int)sizeof(text) - 1; k++) text[k] = (char)toupper((unsigned char)mk[k]); text[k] = 0; indent = 0; } break;
+                        case ROW_SCRAPE_SYSTEM_HEADER: { int n = 0; for (int p = 0; p < PLATFORM_COUNT; p++) n += scrape_system_enabled[p] ? 1 : 0; snprintf(text, sizeof(text), "Systems (%d/%d)  \xE2\x80\xBA", n, PLATFORM_COUNT); indent = 0; } break;
+                        case ROW_SCRAPE_SYSTEM_ITEM: snprintf(text, sizeof(text), "%s (%d): %s", platform_names[row_extra[i]], platform_game_count_cache[row_extra[i]]>0?platform_game_count_cache[row_extra[i]]:0, scrape_system_enabled[row_extra[i]] ? "ON" : "OFF"); indent = 1; break;
+                        case ROW_ART_HEADER: snprintf(text, sizeof(text), "Scrape Art Types  \xE2\x80\xBA"); indent = 0; break;
+                        case ROW_ART_ITEM: snprintf(text, sizeof(text), "%s: %s", art_type_names[row_extra[i]], scrape_art_enabled[row_extra[i]] ? "ON" : "OFF"); indent = row_extra[i] >= 4 ? 2 : 1; break;
+                        case ROW_ART_EXTRAS_HEADER: snprintf(text, sizeof(text), "EXTRAS"); indent = 0; break;
+                        case ROW_SCRAPE_DESC: snprintf(text, sizeof(text), "Descriptions: %s", scrape_description ? "ON" : "OFF"); indent = 1; break;
+                        case ROW_ONLY_MISSING: snprintf(text, sizeof(text), "Only Scrape Missing: %s", only_scrape_missing ? "ON" : "OFF"); indent = 0; break;
+                        case ROW_FIX_TITLES: snprintf(text, sizeof(text), "Fix Game Titles: %s", fix_game_titles ? "ON" : "OFF"); indent = 0; break;
+                        case ROW_SCRAPE_NOW: snprintf(text, sizeof(text), "%s", scrape_in_progress ? "Stop Scraping Now (Press A)" : scrape_error ? "Scrape Now (last run failed)" : "Scrape Now"); indent = 0; break;
+                        case ROW_RA_HEADER: snprintf(text, sizeof(text), "RetroAchievements%s  \xE2\x80\xBA", ra_configured() ? "  (active)" : ""); break;
                         case ROW_RA_ENABLED: snprintf(text, sizeof(text), "Enabled: %s", !ra_enabled ? "OFF" : ra_linked ? "ON + Linked" : "ON"); indent = 1; break;
                         case ROW_RA_USER: snprintf(text, sizeof(text), "Username: %s", ra_username[0] ? ra_username : "Not Set (Press A)"); indent = 1; break;
                         case ROW_RA_TOKEN: snprintf(text, sizeof(text), "Password: %s", ra_token[0] ? "Set (Press A to change)" : "Not Set (Press A)"); indent = 1; break;
@@ -22683,35 +26336,53 @@ int main(int argc, char *argv[]) {
                         case ROW_RA_CHECK: snprintf(text, sizeof(text), "%s", ra_signin_state == 1 ? "Checking Sign-In..." : "Check Sign-In Now"); indent = 1; break;
                         case ROW_RA_BOOK: snprintf(text, sizeof(text), "Achievements Book%s", ra_achievement_count > 0 ? " (Press A)" : ""); indent = 1; break;
                         case ROW_RA_STATUS: snprintf(text, sizeof(text), "%s", ra_signin_status); indent = 2; break;
-                        case ROW_WALLHAVEN_HEADER: snprintf(text, sizeof(text), "%c WallHaven", wallhaven_dropdown_open ? 'v' : '>'); break;
+                        case ROW_WALLHAVEN_HEADER: snprintf(text, sizeof(text), "WallHaven  \xE2\x80\xBA"); break;
                         case ROW_WALLHAVEN_NOTE: snprintf(text, sizeof(text), "%s",
                             wallhaven_key_configured() ? "Personal API: Linked (SFW search)" : "Public SFW search: Ready (no key needed)"); indent = 1; break;
                         case ROW_WALLHAVEN_KEY: snprintf(text, sizeof(text), "Personal API Key: %s",
                             wallhaven_key_configured() ? "Set (Press A to change)" : "Optional (Press A to enter)"); indent = 1; break;
                         case ROW_WALLHAVEN_SEARCH: snprintf(text, sizeof(text), "Search WallHaven (Press A)"); indent = 1; break;
-                        case ROW_ACCT_RESTORE: snprintf(text, sizeof(text), "Restore to Default (Accounts): %s", confirm_account_restore ? "Press A again to confirm" : "Press A"); break;
+                        case ROW_ONL_GRP_SYNC: snprintf(text, sizeof(text), "Syncthing: %s  \xE2\x80\xBA", syncthing_enabled ? "ON" : "OFF"); break;
+                        case ROW_ONL_SYNC: snprintf(text, sizeof(text), "Syncthing: %s", syncthing_enabled ? "ON" : "OFF"); indent = 1; break;
+                        case ROW_ONL_SYNC_INFO: snprintf(text, sizeof(text), "Web UI: this-device-ip:8384"); indent = 1; break;
+                        case ROW_ACCT_RESTORE: snprintf(text, sizeof(text), "Restore to Default (Online)"); break;
                     }
                 }
 
-                SDL_Color c = (i == settings_selected) ? g_ui_text : g_ui_dim;
+                // A group's rows were indented to show they hung off the header
+                // above them. On that group's own page there is no header above
+                // them and nothing to hang off, so the indent comes back out.
+                indent -= sgp_depth;
+                if (indent < 0) indent = 0;
+                // Restore keeps clear air above it wherever it lands.
+                if (settings_row_is_restore(current_tab, rt)) y += 8;
+                int sel_row = (i == settings_selected);
+                // Headings and dividers are not somewhere the cursor goes, so
+                // they are drawn in the accent colour: labels, not options.
+                SDL_Color c = !settings_row_selectable(current_tab, rt) ? th->accent2
+                            : sel_row ? g_ui_text : g_ui_dim;
                 int x = left_x + indent * 28;
                 int max_w = WIN_W - x - 40;
-                SDL_Texture *lt = render_text_fit(ren, font_label, text, c, max_w);
-                int lw, lh;
-                SDL_QueryTexture(lt, NULL, NULL, &lw, &lh);
-                if (i == settings_selected) {
+                int arrows = sel_row && settings_row_cycles(current_tab, rt);
+                int lh = TTF_FontHeight(font_label);
+                if (sel_row) {
+                    int hl_w;
+                    if (on_page) hl_w = WIN_W - 2 * x + 16;
+                    else {
+                        int tw_ = 0; TTF_SizeUTF8(font_label, text, &tw_, NULL);
+                        if (tw_ > max_w) tw_ = max_w;
+                        hl_w = tw_ + 16 + (arrows ? SETTINGS_ARROW_ROOM : 0);
+                    }
                     SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
-                    SDL_Rect hl = { x - 8, y - 4, lw + 16, lh + 8 };
-                    SDL_RenderFillRect(ren, &hl);
+                    SDL_RenderFillRect(ren, &(SDL_Rect){ x - 8, y - 4, hl_w, on_page ? page_pitch - 4 : lh + 8 });
                 }
-                SDL_Rect ldst = { x, y, lw, lh };
-                SDL_RenderCopy(ren, lt, NULL, &ldst);
-                y += lh + 8;
+                settings_draw_label(ren, text, x, y, c, max_w, arrows);
+                y += on_page ? page_pitch : lh + 8;
             }
 
             // Real scrollbar when the list is longer than one screen's worth
             if (rcount > vis_rows) {
-                int track_x = WIN_W - 18, track_y = SETTINGS_ROWS_TOP, track_h = WIN_H - track_y - 14;
+                int track_x = WIN_W - 18, track_y = on_page ? settings_page_rows_top() : SETTINGS_ROWS_TOP, track_h = WIN_H - track_y - 14;
                 SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
                 SDL_RenderFillRect(ren, &(SDL_Rect){ track_x, track_y, 8, track_h });
                 int thumb_h = (track_h * vis_rows) / rcount;
@@ -22737,6 +26408,25 @@ int main(int argc, char *argv[]) {
                 }
             }
 
+            // Bottom left: what A does on this particular row, where that is not
+            // obvious, in the build tag's own quiet style. Otherwise a page
+            // carries Screen & Power's footer.
+            {
+                const char *ctx = rcount > 0 ? settings_row_hint(current_tab, row_type[settings_selected]) : NULL;
+                if (ctx) {
+                    SDL_Texture *xt = render_text(ren, font_label, ctx, g_ui_dim);
+                    int xw, xh; SDL_QueryTexture(xt, NULL, NULL, &xw, &xh);
+                    SDL_SetTextureAlphaMod(xt, 130);
+                    SDL_RenderCopy(ren, xt, NULL, &(SDL_Rect){ on_page ? SETTINGS_PAGE_X : 12, WIN_H - xh - 8, xw, xh });
+                    SDL_SetTextureAlphaMod(xt, 255);
+                } else if (on_page) {
+                    SDL_Texture *ft = render_text_fit(ren, font_label, "D-Pad  Choose/Change    A  Select    B  Back",
+                                                      th->accent2, WIN_W / 2);
+                    int fw, fh; SDL_QueryTexture(ft, NULL, NULL, &fw, &fh);
+                    SDL_RenderCopy(ren, ft, NULL, &(SDL_Rect){ SETTINGS_PAGE_X, WIN_H - fh - 12, fw, fh });
+                }
+            }
+
             // Build tag, bottom-right, faint -- but only while the list leaves
             // room for it. A full screenful of rows reaches the bottom, and the
             // tag would sit on top of the last one.
@@ -22749,16 +26439,9 @@ int main(int argc, char *argv[]) {
             }
 
             }
-            if (settings_confirm_pending) {
-                SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
-                SDL_RenderFillRect(ren, &(SDL_Rect){ 32, WIN_H / 2 - 58, WIN_W - 64, 116 });
-                SDL_Texture *ct = render_text_fit(ren, font_small, "Save changes before leaving this page?", g_ui_text, WIN_W - 96);
-                SDL_Texture *ch = render_text_fit(ren, font_label, "A / X: Save   Y: Discard   B: Cancel", th->accent2, WIN_W - 96);
-                int cw, chh; SDL_QueryTexture(ct, NULL, NULL, &cw, &chh);
-                SDL_RenderCopy(ren, ct, NULL, &(SDL_Rect){ (WIN_W - cw) / 2, WIN_H / 2 - 38, cw, chh });
-                SDL_QueryTexture(ch, NULL, NULL, &cw, &chh);
-                SDL_RenderCopy(ren, ch, NULL, &(SDL_Rect){ (WIN_W - cw) / 2, WIN_H / 2 + 8, cw, chh });
-            }
+            if (settings_confirm_pending)
+                draw_save_discard_modal(ren, th, "Save Changes?", settings_confirm_sel);
+            if (restore_confirm_kind) draw_restore_confirm(ren, th);
             if (settings_night_theme_confirm) {
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 205);
                 SDL_RenderFillRect(ren, &(SDL_Rect){ 30, WIN_H / 2 - 78, WIN_W - 60, 156 });
@@ -22797,6 +26480,26 @@ int main(int argc, char *argv[]) {
             draw_calendar_app(ren, th);
         } else if (state == STATE_CALCULATOR) {
             draw_calculator_app(ren, th);
+        } else if (state == STATE_MESSAGES) {
+            /* Held directions, read the way the mini-games read them. */
+            const Uint8 *ks = SDL_GetKeyboardState(NULL);
+            int hu = hat_nav == SDLK_UP    || stick_nav == SDLK_UP    || (ks && ks[SDL_SCANCODE_UP]);
+            int hd = hat_nav == SDLK_DOWN  || stick_nav == SDLK_DOWN  || (ks && ks[SDL_SCANCODE_DOWN]);
+            int hl = hat_nav == SDLK_LEFT  || stick_nav == SDLK_LEFT  || (ks && ks[SDL_SCANCODE_LEFT]);
+            int hr = hat_nav == SDLK_RIGHT || stick_nav == SDLK_RIGHT || (ks && ks[SDL_SCANCODE_RIGHT]);
+            sm_step(hr - hl, hd - hu,
+                    pad_button_held(PADK_A, 3, SDL_SCANCODE_RETURN),
+                    pad_button_held(PADK_B, 4, SDL_SCANCODE_ESCAPE));
+            sm_render(ren);
+        } else if (state == STATE_APPS) {
+            apps_page_render(ren);
+            if (SDL_GetTicks() < wildkins_notice_until) mgx_overlay_message(ren, "WILDKINS", wildkins_notice);
+        } else if (state == STATE_WEATHER) {
+            weather_app_render(ren);
+        } else if (state == STATE_WEATHER_HOURLY) {
+            weather_hourly_render(ren);
+        } else if (state == STATE_WEATHER_SETTINGS) {
+            weather_settings_render(ren);
         } else if (state == STATE_ACHIEVEMENTS) {
             // A compact open-book library: recent unlocks on the left, the
             // selected achievement's full record on the right. The TSV cache
@@ -22912,7 +26615,7 @@ int main(int argc, char *argv[]) {
                 SDL_RenderCopy(ren, help, NULL, &(SDL_Rect){ rp.x + 16, rp.y + 88, ew2, eh2 });
             }
 
-            const char *book_hint = ra_book_loading ? "Refreshing..." : "D-Pad Browse   L1/R1 Page   X Refresh   B Back";
+            const char *book_hint = ra_book_loading ? "Refreshing..." : "D-Pad Browse   L1/R1 Page   X Refresh   Y Settings   B Back";
             SDL_Texture *hint = render_text_fit(ren, font_label, book_hint, g_ui_dim, WIN_W - 32);
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ 16, WIN_H - hih - 8, hiw, hih });
@@ -22943,19 +26646,19 @@ int main(int argc, char *argv[]) {
                 char row[220]; int indent = 0;
                 switch (rt_[i]) {
                     case ROW_G_BG_MODE:
-                        snprintf(row, sizeof row, "< Source: %s >",
+                        snprintf(row, sizeof row, "Source: %s",
                                  bg_mode_names[(platform_bg_mode >= 0 && platform_bg_mode < BG_MODE_COUNT) ? platform_bg_mode : 0]);
                         break;
                     case ROW_G_BG_COLOR:
-                        snprintf(row, sizeof row, "< Color: %s >",
+                        snprintf(row, sizeof row, "Color: %s",
                                  hud_chrome_colors[(platform_bg_color_idx >= 0 && platform_bg_color_idx < HUD_CHROME_COLOR_COUNT) ? platform_bg_color_idx : 0].name);
                         break;
                     case ROW_G_BG_SEARCH:
-                        snprintf(row, sizeof row, "> Search Backgrounds Online%s%s",
+                        snprintf(row, sizeof row, "Search Backgrounds Online%s%s  \xE2\x80\xBA",
                                  bg_online_query[0] ? "  -  " : "", bg_online_query);
                         break;
                     case ROW_G_BG_MAKER:
-                        snprintf(row, sizeof row, "%c %s", bg_maker_open[rx_[i]] ? 'v' : '>', bg_maker_names[rx_[i]]);
+                        snprintf(row, sizeof row, "%s", bg_maker_names[rx_[i]]);
                         break;
                     case ROW_G_BG_ITEM:
                         indent = 1;
@@ -22971,10 +26674,10 @@ int main(int argc, char *argv[]) {
                     SDL_SetRenderDrawColor(ren, th->select_bg.r, th->select_bg.g, th->select_bg.b, 255);
                     SDL_RenderFillRect(ren, &(SDL_Rect){ hx - 8, y - 4, WIN_W - 2*hx + 16, pitch - 4 });
                 }
-                SDL_Texture *t = render_text_fit(ren, font_label, row, sel ? g_ui_text : g_ui_dim,
-                                                 WIN_W - 2*hx - 8 - indent * 22);
-                int tw2, th2; SDL_QueryTexture(t, NULL, NULL, &tw2, &th2);
-                SDL_RenderCopy(ren, t, NULL, &(SDL_Rect){ hx + indent * 22, y, tw2, th2 });
+                settings_draw_label(ren, row, hx + indent * 22, y,
+                                    rt_[i] == ROW_G_BG_MAKER ? th->accent2 : sel ? g_ui_text : g_ui_dim,
+                                    WIN_W - 2*hx - 8 - indent * 22,
+                                    sel && (rt_[i] == ROW_G_BG_MODE || rt_[i] == ROW_G_BG_COLOR));
                 y += pitch;
             }
             { char hint[120];
@@ -22983,6 +26686,7 @@ int main(int argc, char *argv[]) {
               SDL_Texture *ht = render_text_fit(ren, font_label, hint, g_ui_dim, WIN_W - 2*hx);
               int hw2, hh2; SDL_QueryTexture(ht, NULL, NULL, &hw2, &hh2);
               SDL_RenderCopy(ren, ht, NULL, &(SDL_Rect){ hx, WIN_H - hh2 - 16, hw2, hh2 }); }
+            if (restore_confirm_kind) draw_restore_confirm(ren, th);
 
         } else if (state == STATE_ROMFOLDERS) {
             int hx = 36, y = 62;
@@ -23405,6 +27109,7 @@ int main(int argc, char *argv[]) {
                                  : kb_purpose == KB_PURPOSE_BG_RENAME ? "RENAME BACKGROUND FILE"
                                  : kb_purpose == KB_PURPOSE_CALENDAR_REMINDER ? "CALENDAR REMINDER"
                                  : kb_purpose == KB_PURPOSE_THEME_NAME ? "NAME CUSTOM THEME"
+                                 : kb_purpose == KB_PURPOSE_MESSAGE ? sm_compose_title()
                                  : "API KEY";
             // Bigger keys, and the whole block centred in the space below the
             // status bar so it fills the screen instead of floating up top.
@@ -23585,7 +27290,7 @@ int main(int argc, char *argv[]) {
                 snprintf(rows[3], sizeof(rows[3]), "Background: %s",
                          platform_bg_choice[p][0] ? platform_bg_choice[p] : "Default");
                 snprintf(rows[4], sizeof(rows[4]), "Restore This System");
-                snprintf(rows[5], sizeof(rows[5]), "> Controls & BIOS Help");
+                snprintf(rows[5], sizeof(rows[5]), "Controls & BIOS Help  \xE2\x80\xBA");
                 for (int i = 0; i < SYSCFG_EDIT_ROWS; i++) {
                     int sel = (i == syscfg_sel);
                     SDL_Texture *t = render_text_fit(ren, font_label, rows[i], sel ? g_ui_text : g_ui_dim, WIN_W - hx - 40);
@@ -23659,18 +27364,8 @@ int main(int argc, char *argv[]) {
             int hiw, hih; SDL_QueryTexture(hint, NULL, NULL, &hiw, &hih);
             SDL_RenderCopy(ren, hint, NULL, &(SDL_Rect){ hx, WIN_H - hih - 20, hiw, hih });
 
-            if (hk_confirm_pending) {
-                SDL_SetRenderDrawColor(ren, 0, 0, 0, 205);
-                SDL_RenderFillRect(ren, &(SDL_Rect){ 32, WIN_H / 2 - 58, WIN_W - 64, 116 });
-                SDL_Texture *ct = render_text_fit(ren, font_small,
-                    "Save Hotkey changes before leaving?", g_ui_text, WIN_W - 96);
-                SDL_Texture *ch = render_text_fit(ren, font_label,
-                    "A / X: Save   Y: Discard   B: Cancel", th->accent2, WIN_W - 96);
-                int cw, chh; SDL_QueryTexture(ct, NULL, NULL, &cw, &chh);
-                SDL_RenderCopy(ren, ct, NULL, &(SDL_Rect){ (WIN_W - cw) / 2, WIN_H / 2 - 38, cw, chh });
-                SDL_QueryTexture(ch, NULL, NULL, &cw, &chh);
-                SDL_RenderCopy(ren, ch, NULL, &(SDL_Rect){ (WIN_W - cw) / 2, WIN_H / 2 + 8, cw, chh });
-            }
+            if (hk_confirm_pending)
+                draw_save_discard_modal(ren, th, "Save Hotkey Changes?", hk_confirm_sel);
 
         } else if (state == STATE_WIFI) {
             static Uint32 wifi_last_refresh = 0;
@@ -24131,6 +27826,9 @@ int main(int argc, char *argv[]) {
                 // drawn for that system with the title on the label.
                 SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
                 int gsel = (selected >= 0 && selected < game_count) ? selected : 0;
+                // Art no longer decodes on this thread, so there is nothing to
+                // defer: requests are queued and the decode threads answer them
+                // while scrolling continues.
 
                 // ---- backdrop for the highlighted game ----
                 // Video snap frame first, then screenshot, then title screen,
@@ -24157,16 +27855,11 @@ int main(int argc, char *argv[]) {
                     }
                 }
 
-                // Visible cards are cached: decoding art every frame would stall
-                // scrolling. Keyed on the ROM path plus art_gen, because row
-                // indices are reused across rescans.
-                #define GCART_CAP 12
-                static struct { char key[832]; SDL_Texture *tex; SDL_Texture *sil; int gen; } gcart[GCART_CAP];
-                static unsigned gcart_epoch = 0;
-                static int gcart_n = 0;
-                if (gcart_epoch != renderer_epoch) {   // renderer went away with RetroArch
-                    memset(gcart, 0, sizeof gcart); gcart_n = 0; gcart_epoch = renderer_epoch;
-                }
+                // The cartridge cache lives at file scope now (see gcart_*), so
+                // the decode threads can file results into it. Keyed on the ROM
+                // path plus art_gen, because row indices are reused across
+                // rescans.
+                gcart_reset_if_stale();   // renderer went away with RetroArch
 
                 // Size the cards from the shape they will actually hold. Real
                 // cartridge scans vary wildly -- a GBA support-2D scan is
@@ -24265,22 +27958,15 @@ int main(int argc, char *argv[]) {
                                 ct2 = gcart[k].tex; sil = gcart[k].sil; found = 1; break;
                             }
                         if (!found) {
-                            SDL_Surface *sf = load_cached_art_surface(games[gi2].platform_dir,
-                                                                      games[gi2].raw_filename, ART_TYPE_CARTRIDGE);
-                            if (sf) {
-                                // Silhouette of the art's own alpha -- drawn a
-                                // little larger behind it, that is an outline
-                                // that follows the cartridge's real shape.
-                                sil = make_silhouette_shadow(ren, sf);
-                                ct2 = tex_from_surface(ren, sf);
-                            }
-                            int slot = gcart_n < GCART_CAP ? gcart_n++ : (gi2 % GCART_CAP);
-                            if (slot < GCART_CAP) {
-                                if (gcart[slot].tex) SDL_DestroyTexture(gcart[slot].tex);
-                                if (gcart[slot].sil) SDL_DestroyTexture(gcart[slot].sil);
-                                snprintf(gcart[slot].key, sizeof gcart[slot].key, "%s", key);
-                                gcart[slot].tex = ct2; gcart[slot].sil = sil; gcart[slot].gen = art_gen;
-                            }
+                            // Ask, do not decode. Every visible cartridge gets
+                            // requested on the frame it first appears and the
+                            // decode threads work through them in parallel; the
+                            // card draws its fallback for a frame or two until
+                            // its art lands. The old code decoded inline, and
+                            // for a big library only for the centre card once
+                            // you had been still for 320ms -- which is why they
+                            // filled in one at a time as you rested on each.
+                            gcart_request(gi2);
                         }
 
                         SDL_Rect body = cr;
@@ -25025,14 +28711,11 @@ int main(int argc, char *argv[]) {
                         SDL_RenderCopy(ren,_nt,NULL,&(SDL_Rect){ _Rpage.x + (_Rpage.w-_nw)/2, by + bh/2, _nw, _nh }); \
                     } else { \
                         int _cur = book_r_scroll % _an, _slot = _as[_cur]; \
-                        if (book_shot_for != _gi || book_shot_slot != _slot) { \
-                            if (book_shot_tex) { SDL_DestroyTexture(book_shot_tex); book_shot_tex = NULL; } \
-                            if (book_shot_shadow) { SDL_DestroyTexture(book_shot_shadow); book_shot_shadow = NULL; } \
-                            { char _sp[700]; if (cached_art_file(_sp, sizeof _sp, games[_gi].platform_dir, games[_gi].raw_filename, _slot)) { \
-                                SDL_Surface *_s = load_scaled_surface(_sp, 640); \
-                                if (_s) { book_shot_shadow = make_silhouette_shadow(ren, _s); book_shot_tex = tex_from_surface(ren, _s); } } } \
-                            book_shot_for = _gi; book_shot_slot = _slot; \
-                        } \
+                        /* Request, never decode: this macro runs inside the
+                           frame, and a 640px decode plus a blur here is what
+                           made page flips clunky. book_shot_pump() hands it to
+                           the art threads and fills these in when it lands. */ \
+                        book_shot_want(_gi, _slot); \
                         if (book_shot_tex) draw_book_art(ren, book_shot_tex, book_shot_shadow, _rb, _slot); \
                     } \
                     SDL_RenderSetClipRect(ren, &(SDL_Rect){ bx, by, bw, bh }); \
@@ -25290,7 +28973,7 @@ int main(int argc, char *argv[]) {
             SDL_RenderFillRect(ren, &(SDL_Rect){ 0, HUD_BAR_H - 2, WIN_W, 2 });
             if (state == STATE_HOME || state == STATE_SURPRISE || state == STATE_PLATFORM ||
                 state == STATE_BG_PICKER || state == STATE_BG_ONLINE || state == STATE_BG_PREVIEW || state == STATE_BG_TARGET || state == STATE_MENU || state == STATE_BOOK ||
-                state == STATE_ACHIEVEMENTS || state == STATE_CALENDAR || state == STATE_CALCULATOR ||
+                state == STATE_ACHIEVEMENTS || state == STATE_CALENDAR || state == STATE_CALCULATOR || state == STATE_APPS || state == STATE_MESSAGES || state == STATE_WEATHER || state == STATE_WEATHER_HOURLY || state == STATE_WEATHER_SETTINGS ||
                 state == STATE_SETTINGS) {
                 draw_dock_logo(ren, font_small);
             }
@@ -25304,6 +28987,7 @@ int main(int argc, char *argv[]) {
 
         if(compact_fish_hud)draw_fish_status(ren,fps_shown);
         if (state != STATE_BOOT && !compact_fish_hud) {
+            sm_hud_badge(ren, WIN_W / 2 - 70, 14);
             // Clock is skipped when the big Home clock widget is up, but battery /
             // FPS / Wi-Fi in this same block stay put.
             if (!hide_statusbar_clock) {
@@ -25484,7 +29168,7 @@ int main(int argc, char *argv[]) {
                 perf_bat = get_battery_percent();
             }
             const char *tnames[] = { "COOL", "WARM", "HOT", "CRIT" };
-            char perf_lines[7][64];
+            char perf_lines[8][64];
             int pn = 0;
             snprintf(perf_lines[pn++], 64, "FPS  %.0f", fps_shown);
             snprintf(perf_lines[pn++], 64, perf_cpu >= 0 ? "CPU  %.0f%%" : "CPU  --", perf_cpu);
@@ -25495,6 +29179,8 @@ int main(int argc, char *argv[]) {
             else
                 snprintf(perf_lines[pn++], 64, "RAM  --");
             snprintf(perf_lines[pn++], 64, perf_bat >= 0 ? "BAT  %d%%" : "BAT  --", perf_bat);
+            if (g_launch_snap_ms >= 0)
+                snprintf(perf_lines[pn++], 64, "LNCH %dms", g_launch_snap_ms);
             if (is_battery_charging()) {
                 float cv, cw; int slow, at_max; read_charge_telemetry(&cv, &cw, &slow, &at_max);
                 const char *tag = at_max ? " (Max)" : slow ? " (Slow Charge)" : "";
@@ -25580,6 +29266,7 @@ int main(int argc, char *argv[]) {
         if(state==STATE_MINIGAME && mgx_exit_confirm)
             mgx_overlay_message(ren,"LEAVE THIS MATCH?","A Leave match    B Keep playing");
         battery_prompt_render(ren, state);
+        weather_alert_render(ren,state);
 
         // Night mode: warm amber wash + a little extra dimming, over everything
         // (same helper the splash / loading screens use).
@@ -25877,7 +29564,7 @@ int main(int argc, char *argv[]) {
                 settings_night_theme_confirm = 0; settings_autops_confirm = 0;
                 home_view_idx = 0; platform_selected = 0; selected = 0;
                 home_widget_idx = HOME_WIDGET_NONE; home_widget2_idx = HOME_WIDGET_NONE;
-                app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0;
+                app_widget_kind = APP_WIDGET_NONE; app_widget_slot = 0; app_widget_calc_active = 0;
                 calendar_reminder_popup = 0; calendar_reminder_delete_confirm = 0;
                 calendar_reminder_time_picker = 0; calendar_reminder_pending_text[0] = '\0';
                 calendar_reminder_count = 0;
@@ -26160,7 +29847,7 @@ int main(int argc, char *argv[]) {
             int deep_idle = !animating && !wifi_scanning &&
                             (tnow - last_input_time > 6000) &&
                             state != STATE_BOOT;
-            Uint32 target = frame_target_ms(animating, deep_idle);
+            Uint32 target = frame_target_ms(animating, deep_idle, state == STATE_MINIGAME);
             Uint32 spent = SDL_GetTicks() - frame_start;
             if (spent < target) SDL_Delay(target - spent);
         }
@@ -26201,6 +29888,8 @@ int main(int argc, char *argv[]) {
     if (book_shot_tex) SDL_DestroyTexture(book_shot_tex);
     if (listview_bg) SDL_DestroyTexture(listview_bg);
     if (list_prev_one) SDL_DestroyTexture(list_prev_one);
+    for (int wi = 0; wi < WEATHER_ART_COUNT; wi++)
+        if (weather_art_texture[wi]) SDL_DestroyTexture(weather_art_texture[wi]);
     free(click_buf);
     free(chime_buf);
     free(theme_buf);

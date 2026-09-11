@@ -42,7 +42,9 @@ static void widget_test_shoulder_focus(void) {
         widget_test_pad_press(&state, HOME_WIDGET_CLOCK, 0, slot == 1 ? r1 : r2, NULL, 0);
         assert(home_recent_focus_slot == slot); // Date remains interactive.
         widget_test_pad_press(&state, HOME_WIDGET_DATE, 0, slot == 1 ? r1 : r2, NULL, 0);
-        assert(home_recent_focus_slot == 0 && home_selected == 7); // Now Playing does not accept focus.
+        // Now Playing takes focus only once there is something to resume; the
+        // history is empty at this point in the test.
+        assert(home_recent_focus_slot == 0 && home_selected == 7);
     }
     home_widget_idx = HOME_WIDGET_CLOCK; home_widget2_idx = HOME_WIDGET_STATS; home_recent_focus_slot = 0;
     widget_test_pad_press(&state, HOME_WIDGET_CLOCK, 0, r1, NULL, 0);
@@ -145,8 +147,10 @@ static void test_widget_navigation(SDL_Renderer *ren) {
         assert(home_selected == widget_row && widget_place_sel[group] == 1 && state == STATE_HOME);
         widget_test_pad_press(&state, app_widget_kind, 1, pad_map_joybutton(pad_idx(PADK_L2,13)), rows, count);
         assert(widget_place_sel[group] == 0);
+        /* A on the App Focused card: Weather opens the app, Clock opens the
+           shared Saved Locations list. */
         widget_test_pad_press(&state, app_widget_kind, 1, SDLK_RETURN, rows, count);
-        assert(state == STATE_WIDGET_PLACES && widget_place_group == group);
+        assert(state == (group ? STATE_WEATHER : STATE_WIDGET_PLACES));
         state = STATE_HOME;
         assert(!home_place_widget_key(app_widget_kind, 1, SDLK_s, &state));
         widget_test_pad_press(&state, app_widget_kind, 1, SDLK_s, rows, count);
@@ -156,14 +160,24 @@ static void test_widget_navigation(SDL_Renderer *ren) {
     for (int i = 0; i < 4; i++) {
         int kind = info_kinds[i], group = widget_place_family(kind);
         widget_place_sel[group] = 0;
-        widget_test_pad_press(&state, kind, 0, SDLK_DOWN, rows, count); assert(widget_place_sel[group] == 1);
-        widget_test_pad_press(&state, kind, 0, SDLK_UP, rows, count); assert(widget_place_sel[group] == 0);
+        /* Up/Down are NOT the widget's any more on the Informational home: two
+           focusable cards and the row list all want those keys, and choosing a
+           location now happens in the app the card opens. */
+        widget_test_pad_press(&state, kind, 0, SDLK_DOWN, rows, count);
+        assert(widget_place_sel[group] == 0);
+        widget_test_pad_press(&state, kind, 0, SDLK_UP, rows, count);
+        assert(widget_place_sel[group] == 0);
+        assert(!home_place_widget_key(kind, 0, SDLK_UP, &state));
+        assert(!home_place_widget_key(kind, 0, SDLK_DOWN, &state));
         assert(!home_place_widget_key(kind, 0, SDLK_LEFT, &state));
         assert(!home_place_widget_key(kind, 0, SDLK_PAGEUP, &state));
         assert(!home_place_widget_key(kind, 0, SDLK_s, &state));
         assert(!home_place_widget_key(kind, 0, SDLK_f, &state));
+        /* A takes a weather card into the Weather app, and a clock card to the
+           shared Saved Locations list -- a clock has no weather to show. */
         widget_test_pad_press(&state, kind, 0, SDLK_RETURN, rows, count);
-        assert(state == STATE_WIDGET_PLACES && widget_place_group == group); state = STATE_HOME;
+        assert(state == (group ? STATE_WEATHER : STATE_WIDGET_PLACES));
+        state = STATE_HOME;
     }
     widget_test_shoulder_focus();
     /* Selecting an informational card must change a substantial, bounded

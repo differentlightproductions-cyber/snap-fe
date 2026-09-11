@@ -2,7 +2,7 @@ param(
     [ValidateSet('audit','draft','upload','publish','verify')]
     [string]$Mode='audit',
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.3.0',
+    [string]$Version = '1.3.1',
     [string]$Commit
 )
 $ErrorActionPreference = 'Stop'
@@ -12,7 +12,8 @@ $api = "https://api.github.com/repos/$slug"
 $tag = "V$Version"
 $zipName = "SnapFE-Alpha-$Version.zip"
 $sumName = "SHA256SUMS-$Version.txt"
-$notesName = "RELEASE-NOTES-$Version.md"
+$notesName = "RELEASE-NOTES-$Version.txt"
+if (-not (Test-Path -LiteralPath (Join-Path $repo $notesName) -PathType Leaf)) { $notesName = "RELEASE-NOTES-$Version.md" }
 $env:GCM_INTERACTIVE = 'never'
 $start = New-Object System.Diagnostics.ProcessStartInfo
 $gitRoot=Split-Path (Split-Path (Get-Command git).Source -Parent) -Parent

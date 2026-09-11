@@ -22,6 +22,10 @@ favorites, activity history, ROMs, saves, save states, BIOS files, or scraped
 game artwork. Extracting it over an existing installation replaces program and
 bundled asset files while leaving those personal files in place.
 
+The same ZIP installs or updates Wildkins (`SHARE/roms/ports/Wildkins.sh` and
+`SHARE/roms/ports/wildkins/`). Its saves in `SHARE/saves/wildkins` are not in
+the package and are kept. `WHATS-NEW.txt` lists what changed in this release.
+
 Before updating, back up `SHARE/system/snapos/settings.cfg`, its `config/`
 folder and any icons/backgrounds you replaced in the bundled `assets/` tree.
 Merge means keeping the folder and replacing matching files, not deleting or

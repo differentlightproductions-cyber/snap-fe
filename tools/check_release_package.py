@@ -37,6 +37,18 @@ with zipfile.ZipFile(archive) as package:
                     path.name.lower().startswith(('settings.', 'battery-prompt.'))), name
         assert not name.startswith('system/snapos/config/'), name
         assert not name.startswith('roms/') or name.startswith('roms/ports/'), name
+    # Wildkins: the launcher SNAP FE accepts, pointing at a complete, untampered version.
+    assert 'WHATS-NEW.txt' in names
+    launcher = package.read('roms/ports/Wildkins.sh').decode()
+    assert '# Wildkins standalone launcher' in launcher
+    runner = re.search(r"exec python3 '?/userdata/(roms/ports/wildkins/versions/[0-9a-f]{20})/run-game\.py", launcher)
+    assert runner, launcher
+    wildkins = runner.group(1)
+    wildkins_manifest = json.loads(package.read(wildkins + '/manifest.json'))
+    assert 'wildkins' in wildkins_manifest and 'run-game.py' in wildkins_manifest
+    for rel, expected in wildkins_manifest.items():
+        assert hashlib.sha256(package.read(wildkins + '/' + rel)).hexdigest() == expected, rel
+    assert not any(name.startswith('roms/ports/wildkins/') and 'core_tests' in name for name in names)
     list_icons = [name for name in names if name.startswith('system/snapos/assets/icons/list/')
                   and Path(name).suffix.lower() in {'.png', '.jpg', '.jpeg', '.svg'}]
 package_backgrounds = [
@@ -59,4 +71,5 @@ print(json.dumps({'zip': str(archive), 'sha256': digest, 'bytes': archive.stat()
                   'entries': len(names), 'list_icons': len(list_icons),
                   'backgrounds': len(package_backgrounds),
                   'background_jpgs': len(package_background_jpgs),
+                  'wildkins': wildkins, 'wildkins_files': len(wildkins_manifest),
                   'exact_device_binary': True, 'personal_files_excluded': True}, indent=2))

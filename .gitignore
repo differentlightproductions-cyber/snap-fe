@@ -50,6 +50,8 @@ promo/
 
 # personal device list for knulli/deploy.sh -- never publish addresses
 knulli/devices.local
+# local assistant handoff notes (device addresses and credentials)
+CLAUDE_HANDOFF.txt
 
 # desktop dev binary (BUILD.md builds ./snapos_ui; some setups name it .desktop)
 snapos_ui.desktop

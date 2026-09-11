@@ -48,9 +48,35 @@ kill_es() {
 # Blank every framebuffer + console right now, so nothing ES drew (or the boot
 # console text) is visible in the gap before Snap FE takes the screen.
 hide_screen() {
-  # 720x480x32bpp is ~1.4 MiB; two MiB covers the whole panel without pushing
-  # 16 MiB through each framebuffer character device at every boot.
-  for fb in /dev/fb0 /dev/fb1; do [ -c "$fb" ] && dd if=/dev/zero of="$fb" bs=1M count=2 2>/dev/null; done
+  # Clear the WHOLE framebuffer, not a guessed 2 MiB.
+  #
+  # The old fixed `count=2` assumed one 720x480x32 buffer (~1.4 MiB). But fbdev
+  # allocates a virtual height that is a multiple of the visible one for page
+  # flipping -- typically double or triple -- so the device is 2.8-4.2 MiB. Two
+  # MiB wiped the first buffer and only part of the second, and if the panel was
+  # scanning out of that second buffer you saw the top of the screen cleared and
+  # the bottom still showing Knulli's last frame: the half-cut-off glitch.
+  #
+  # Prefer the real size from sysfs; otherwise write until the device says full,
+  # which is exact by definition. Either way it is one pass over a few MiB.
+  for fb in /dev/fb0 /dev/fb1; do
+    [ -c "$fb" ] || continue
+    name=${fb#/dev/}
+    size=""
+    vs=$(cat "/sys/class/graphics/$name/virtual_size" 2>/dev/null)
+    bpp=$(cat "/sys/class/graphics/$name/bits_per_pixel" 2>/dev/null)
+    if [ -n "$vs" ] && [ -n "$bpp" ]; then
+      vx=${vs%,*}; vy=${vs#*,}
+      case "$vx$vy$bpp" in *[!0-9]*) ;; *) size=$(( (vx * vy * bpp / 8 + 65535) / 65536 )) ;; esac
+    fi
+    if [ -n "$size" ] && [ "$size" -gt 0 ] 2>/dev/null; then
+      dd if=/dev/zero of="$fb" bs=64k count="$size" 2>/dev/null
+    else
+      # No sysfs answer: fill to ENOSPC. dd reports the short write; that is the
+      # end of the device, which is precisely where we wanted to stop.
+      dd if=/dev/zero of="$fb" bs=64k 2>/dev/null
+    fi
+  done
   for c in /dev/tty0 /dev/tty1; do [ -c "$c" ] && { printf '\033[2J\033[H\033[?25l' > "$c" 2>/dev/null; }; done
   setterm --blank force >/dev/null 2>&1 || true
 }

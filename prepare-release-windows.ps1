@@ -11,7 +11,10 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $zipName = "SnapFE-Alpha-$Version.zip"
 $sumName = "SHA256SUMS-$Version.txt"
-$notesName = "RELEASE-NOTES-$Version.md"
+$notesName = "RELEASE-NOTES-$Version.txt"
+if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $notesName) -PathType Leaf)) {
+    $notesName = "RELEASE-NOTES-$Version.md"   # releases before 1.3.1 used Markdown
+}
 $zipPath = Join-Path $repoRoot "dist\$zipName"
 $sumPath = Join-Path $repoRoot "dist\$sumName"
 $notesPath = Join-Path $repoRoot $notesName
@@ -140,7 +143,7 @@ START HERE:
 
 1. Read PUBLISH-INSTRUCTIONS.txt to publish this release yourself.
 2. Upload only the ZIP and SHA256SUMS files.
-3. RELEASE-NOTES-$Version.md is text to paste into GitHub, not an attachment.
+3. $notesName is text to paste into GitHub, not an attachment.
 4. CLAUDE-HANDOFF-DO-NOT-UPLOAD.md is private context for your next coding
    assistant and must not be attached to a public release.
 "@

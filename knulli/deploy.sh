@@ -2,7 +2,8 @@
 # Deploy Snap FE to one or more Knulli handhelds over SSH.
 # Run from anywhere; it cd's to the snapos-ui/ dir itself.
 #
-#   ./knulli/deploy.sh root@192.168.1.42                 one device
+#   ./knulli/deploy.sh root@192.168.1.42                 code/services only
+#   ./knulli/deploy.sh --assets root@192.168.1.42        include bundled assets
 #   ./knulli/deploy.sh root@192.168.1.42 root@...43      several, in order
 #   ./knulli/deploy.sh                                   every device listed in
 #                                                        knulli/devices.local
@@ -17,6 +18,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+INCLUDE_ASSETS=0
+if [[ "${1:-}" == "--assets" ]]; then
+  INCLUDE_ASSETS=1
+  shift
+fi
 TARGETS=("$@")
 if [[ ${#TARGETS[@]} -eq 0 && -f knulli/devices.local ]]; then
   while IFS= read -r line; do
@@ -25,7 +31,7 @@ if [[ ${#TARGETS[@]} -eq 0 && -f knulli/devices.local ]]; then
   done < knulli/devices.local
 fi
 [[ ${#TARGETS[@]} -gt 0 ]] || {
-  echo "usage: $0 user@device-ip [user@device-ip ...]" >&2
+  echo "usage: $0 [--assets] user@device-ip [user@device-ip ...]" >&2
   echo "   or: list them in knulli/devices.local and run with no arguments" >&2
   echo "   (e.g. root@192.168.1.42 -- password: linux)" >&2
   exit 1
@@ -38,10 +44,14 @@ BIN="snapos_ui.aarch64"
 find assets -name '*:Zone.Identifier' -delete 2>/dev/null || true
 
 echo ">> deploying to ${#TARGETS[@]} device(s): ${TARGETS[*]}"
+if (( INCLUDE_ASSETS )); then echo "   payload: code, services, and bundled assets"
+else echo "   payload: code and services (release packages still include all assets)"
+fi
 EXTRA=""
 [ -f scrape_boxart.py ] && EXTRA="$EXTRA scrape_boxart.py"
 [ -f background_browser.py ] && EXTRA="$EXTRA background_browser.py"
 [ -f ra_achievements.py ] && EXTRA="$EXTRA ra_achievements.py"
+[ -f weather_service.py ] && EXTRA="$EXTRA weather_service.py"
 [ -f brightness-hotkey.sh ] || { echo "missing brightness-hotkey.sh" >&2; exit 1; }
 EXTRA="$EXTRA brightness-hotkey.sh"
 [ -f volume-gate.sh ] || { echo "missing volume-gate.sh" >&2; exit 1; }
@@ -74,7 +84,9 @@ echo "   version: $SNAPVER"
 # changed on disk mid-deploy.
 PAYLOAD="$(mktemp -t snapfe-deploy.XXXXXX.tgz)"
 trap 'rm -f "$PAYLOAD" ./_VERSION' EXIT
-tar czf "$PAYLOAD" --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED _VERSION assets \
+ASSET_PAYLOAD=()
+(( INCLUDE_ASSETS )) && ASSET_PAYLOAD=(assets)
+tar czf "$PAYLOAD" --exclude='*:Zone.Identifier' "$BIN" $EXTRA $KEYSEED _VERSION "${ASSET_PAYLOAD[@]}" \
   vendor/link-cores/gpsp_libretro.so vendor/link-cores/gambatte_libretro.so \
   -C knulli custom.sh
 
@@ -84,10 +96,17 @@ echo
 echo ">> $DEV"
 ssh "$DEV" '
   set -e
-  # stop the frontend so nothing holds the old files open. Do NOT pkill on
+  ROOT=/userdata/system/snapos
+  STAGED="$ROOT/.snapfe-deploy.tgz"
+  mkdir -p "$ROOT/config" /userdata/roms
+  # Receive the complete archive while SNAP FE is still running. Large art
+  # bundles can take several minutes; stopping the frontend first lets an idle
+  # handheld sleep, drop Wi-Fi, and leave a half-extracted update behind.
+  cat > "$STAGED"
+  trap "rm -f \"$STAGED\"" EXIT
+  # Now stop the frontend so nothing holds the old files open. Do NOT pkill on
   # "custom.sh" -- this very script mentions it and would kill our own shell.
   killall -9 snapos_ui retroarch mgba 2>/dev/null || true
-  mkdir -p /userdata/system/snapos/config /userdata/roms
   # Configgen always loads both the built-in controller database and this user
   # file. Older SNAP deploys copied the complete built-in database here, making
   # configgen parse every controller twice on every game launch. Migrate only a
@@ -100,12 +119,14 @@ ssh "$DEV" '
     mv -f "$USER_INPUT" "$USER_INPUT.snap-stock-duplicate"
     echo "   removed duplicate stock controller database from launch path"
   fi
-  cd /userdata/system/snapos
+  cd "$ROOT"
   # Extract over the top (tar replaces each bundled file). Never clear the
   # whole assets tree: bookshelf spines, list icons and backgrounds are user-
   # extensible, and an update must not erase artwork placed there by the owner.
   # --no-same-owner/-perms because /userdata is FAT-ish.
-  tar xzf - --no-same-owner --no-same-permissions
+  tar xzf "$STAGED" --no-same-owner --no-same-permissions
+  rm -f "$STAGED"
+  trap - EXIT
   mkdir -p cores core-backup
   cp -f vendor/link-cores/gpsp_libretro.so cores/gpsp_libretro.so
   cp -f vendor/link-cores/gambatte_libretro.so cores/gambatte_libretro.so
@@ -133,8 +154,8 @@ ssh "$DEV" '
   mv -f custom.sh /userdata/system/custom.sh
   chmod 0755 snapos_ui *.py *.sh cores/*.so /usr/lib/libretro/gpsp_libretro.so \
     /usr/lib/libretro/gambatte_libretro.so /userdata/system/custom.sh 2>/dev/null || true
-  # A large asset transfer can outlast the one-second custom.sh restart delay,
-  # allowing the old binary to relaunch while files are still arriving. Stop
+  # Archive extraction can outlast the one-second custom.sh restart delay,
+  # allowing the old binary to relaunch while files are being replaced. Stop
   # that stale process once more now that snapos_ui has been atomically replaced;
   # the persistent custom.sh loop will immediately start the new build.
   killall -9 snapos_ui 2>/dev/null || true

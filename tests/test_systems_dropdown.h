@@ -62,14 +62,18 @@ static void test_systems_dropdown(SDL_Renderer *ren) {
             assert(n <= MAX_DISPLAY_ROWS);
             for (int i = 0; i < n; ++i) {
                 if (rows[i] == ROW_DISP_GRP_VIEW) { ++headers; first = i; }
-                if (rows[i] == ROW_DISP_GRP_LIBVIEW) end = i;
+                if (rows[i] == ROW_DISP_BG_PAGE) end = i;   // the next Display row after Presentation
             }
             assert(headers == 1 && first >= 0 && end > first);
             assert(!disp_row_is_value(rows[first])); // A opens; Left/Right retain layout selection.
             if (!open) assert(end == first + 1);
             else {
-                assert(rows[first + 1] == ROW_DISP_SHOW_EMPTY);
-                assert(rows[first + 2] == ROW_DISP_FAVORITES_VIEW);
+                // The three layout choices lead the page, in this order.
+                assert(rows[first + 1] == ROW_DISP_SYS_VIEW);
+                assert(rows[first + 2] == ROW_DISP_LIB_VIEW);
+                assert(rows[first + 3] == ROW_DISP_ART_VALUE);
+                assert(rows[first + 4] == ROW_DISP_SHOW_EMPTY);
+                assert(rows[first + 5] == ROW_DISP_FAVORITES_VIEW);
                 assert(rows[end - 1] == ROW_DISP_RST_VIEW);
             }
             char previous[100] = "";
@@ -78,8 +82,8 @@ static void test_systems_dropdown(SDL_Renderer *ren) {
                 char label[100] = "> Systems View: List"; int indent = -1;
                 assert(format_systems_view_row(rows[i], label, sizeof label, &indent));
                 assert(label[0] && strcmp(label, previous));
-                if (i == first) assert(strstr(label, "Systems View:") && indent == 0);
-                else assert(!strstr(label, "Systems View") && indent == 1);
+                if (i == first) assert(strstr(label, "Presentation:") && indent == 0);
+                else assert(!strstr(label, "Presentation") && indent == 1);
                 snprintf(previous, sizeof previous, "%s", label);
             }
             // Presentation has one owner, Display; Game cannot add a second group.

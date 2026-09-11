@@ -14,6 +14,101 @@ static void capture(SDL_Renderer *ren, const char *name) {
     draw_theme_background(ren,&themes[theme_idx],theme_idx);
 }
 
+static void weather_fixture_write(const char *query,const char *place,const char *temp,
+                                  const char *feels,const char *high,const char *low,const char *rain) {
+    char path[900];widget_weather_path_for(path,sizeof path,query,weather_unit);
+    FILE *f=fopen(path,"w");assert(f);
+    fprintf(f,"SNAPWEATHER 1\nsummary=%s Partly Cloudy\ncurrent=%s\ncondition=Partly Cloudy\n"
+              "feels=%s\nhigh=%s\nlow=%s\nprecip=%s\nwind=8 mph\nhumidity=31%%\nplace=%s\n"
+              "updated=2026-09-09 14:00\nalert_level=0\nalert=\n"
+              "hourly=Now %s Partly Cloudy %s;3 PM 91F Sunny 4%%;4 PM 90F Sunny 3%%;"
+              "5 PM 88F Mostly Clear 2%%;6 PM 85F Clear 1%%;7 PM 82F Clear 1%%\n"
+              "daily=Wed 93F/72F Partly Cloudy %s\nsunrise=06:08\nsunset=18:42\n",
+              temp,temp,feels,high,low,rain,place,temp,rain,rain);
+    assert(!fclose(f));
+}
+
+static void test_weather_ui(SDL_Window *window,SDL_Renderer *ren) {
+    weather_stop();weather_test_fetch_enabled=0;weather_unit=0;
+    widget_places_loaded=1;memset(widget_places,0,sizeof widget_places);
+    widget_place_count[1]=2;widget_place_sel[1]=0;
+    snprintf(widget_places[1][0].name,64,"Phoenix");
+    snprintf(widget_places[1][0].query,160,"Phoenix, Arizona");widget_places[1][0].unit=0;
+    snprintf(widget_places[1][1].name,64,"Portland");
+    snprintf(widget_places[1][1].query,160,"Portland, Oregon");widget_places[1][1].unit=0;
+    weather_fixture_write("Phoenix, Arizona","Phoenix, Arizona","92F","90F","96F","72F","6%");
+    weather_fixture_write("Portland, Oregon","Portland, Oregon","68F","67F","73F","57F","42%");
+    widget_weather_restore();weather_read();
+    assert(!strcmp(g_weather_feels,"90F")&&!strcmp(g_weather_high,"96F")&&
+           !strcmp(g_weather_low,"72F")&&!strcmp(g_weather_precip,"6%")&&g_weather_hourly_count==6);
+    widget_place_select(1,1);weather_read();
+    assert(strstr(g_weather_place,"Portland")&&!strcmp(g_weather_feels,"67F")&&
+           !strcmp(g_weather_high,"73F")&&!strcmp(g_weather_low,"57F")&&
+           !strcmp(g_weather_precip,"42%")&&g_weather_hourly_count==6);
+    weather_app_sel=0;
+    weather_style_idx=WEATHER_STYLE_MODERN;weather_app_render(ren);capture(ren,"weather-snap-modern");
+    weather_style_idx=WEATHER_STYLE_MINIMAL;weather_app_render(ren);capture(ren,"weather-minimal");
+    weather_style_idx=WEATHER_STYLE_CHANNEL;weather_app_render(ren);capture(ren,"weather-channel");
+    weather_settings_sel=3;weather_settings_render(ren);capture(ren,"weather-settings");
+    TTF_Font *saved_big=font_big,*saved_small=font_small,*saved_small_bold=font_small_bold;
+    TTF_Font *saved_label=font_label,*saved_label_bold=font_label_bold,*saved_fixed=font_fixed;
+    font_big=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",43);
+    font_small=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",26);
+    font_small_bold=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",26);TTF_SetFontStyle(font_small_bold,TTF_STYLE_BOLD);
+    font_label=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",22);
+    font_label_bold=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",22);TTF_SetFontStyle(font_label_bold,TTF_STYLE_BOLD);
+    font_fixed=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",14);
+    assert(font_big&&font_small&&font_small_bold&&font_label&&font_label_bold&&font_fixed);
+    text_cache_clear();weather_style_idx=WEATHER_STYLE_MODERN;weather_app_render(ren);capture(ren,"weather-device-font");
+    weather_style_idx=WEATHER_STYLE_MINIMAL;weather_app_render(ren);capture(ren,"weather-minimal-device-font");
+    weather_style_idx=WEATHER_STYLE_CHANNEL;weather_app_render(ren);capture(ren,"weather-channel-device-font");
+    weather_settings_sel=4;weather_settings_render(ren);capture(ren,"weather-settings-device-font");
+    AppState state=STATE_WEATHER_SETTINGS;int original_wallpaper=weather_wallpaper_enabled;
+    weather_settings_begin();weather_settings_sel=3;weather_settings_key(SDLK_RIGHT,&state);
+    assert(weather_settings_dirty&&weather_wallpaper_enabled!=original_wallpaper);
+    weather_settings_key(SDLK_ESCAPE,&state);assert(state==STATE_WEATHER_SETTINGS&&weather_settings_confirm_pending);
+    weather_settings_render(ren);capture(ren,"weather-settings-confirm-device-font");
+    weather_settings_key(SDLK_RIGHT,&state);weather_settings_key(SDLK_RETURN,&state);
+    assert(state==STATE_WEATHER&&!weather_settings_confirm_pending&&weather_wallpaper_enabled==original_wallpaper);
+    SDL_SetWindowSize(window,720,480);WIN_W=720;SDL_RenderSetViewport(ren,NULL);
+    int output_w=0,output_h=0;SDL_GetRendererOutputSize(ren,&output_w,&output_h);assert(output_w==720&&output_h==480);
+    weather_app_sel=WEATHER_FOCUS_CURRENT;weather_style_idx=WEATHER_STYLE_MODERN;weather_app_render(ren);capture(ren,"weather-wide-device-font");
+    weather_style_idx=WEATHER_STYLE_MINIMAL;weather_app_render(ren);capture(ren,"weather-minimal-wide-device-font");
+    weather_style_idx=WEATHER_STYLE_CHANNEL;weather_app_render(ren);capture(ren,"weather-channel-wide-device-font");
+    weather_settings_sel=4;weather_settings_render(ren);capture(ren,"weather-settings-wide-device-font");
+    SDL_SetWindowSize(window,640,480);WIN_W=640;SDL_RenderSetViewport(ren,NULL);
+    SDL_GetRendererOutputSize(ren,&output_w,&output_h);assert(output_w==640&&output_h==480);
+    text_cache_clear();TTF_CloseFont(font_big);TTF_CloseFont(font_small);TTF_CloseFont(font_small_bold);
+    TTF_CloseFont(font_label);TTF_CloseFont(font_label_bold);TTF_CloseFont(font_fixed);
+    font_big=TTF_OpenFont("assets/fonts/Ubuntu-B.ttf",44);
+    font_small=TTF_OpenFont("assets/fonts/Ubuntu-B.ttf",26);
+    font_small_bold=TTF_OpenFont("assets/fonts/Ubuntu-B.ttf",26);
+    font_label=TTF_OpenFont("assets/fonts/Ubuntu-B.ttf",22);
+    font_label_bold=TTF_OpenFont("assets/fonts/Ubuntu-B.ttf",22);
+    font_fixed=TTF_OpenFont("assets/fonts/Ubuntu-B.ttf",14);
+    assert(font_big&&font_small&&font_small_bold&&font_label&&font_label_bold&&font_fixed);
+    text_cache_clear();weather_style_idx=WEATHER_STYLE_MODERN;weather_app_render(ren);capture(ren,"weather-rg35-font");
+    weather_style_idx=WEATHER_STYLE_MINIMAL;weather_app_render(ren);capture(ren,"weather-minimal-rg35-font");
+    weather_style_idx=WEATHER_STYLE_CHANNEL;weather_app_render(ren);capture(ren,"weather-channel-rg35-font");
+    text_cache_clear();TTF_CloseFont(font_big);TTF_CloseFont(font_small);TTF_CloseFont(font_small_bold);
+    TTF_CloseFont(font_label);TTF_CloseFont(font_label_bold);TTF_CloseFont(font_fixed);
+    font_big=saved_big;font_small=saved_small;font_small_bold=saved_small_bold;
+    font_label=saved_label;font_label_bold=saved_label_bold;font_fixed=saved_fixed;
+    weather_app_enter(STATE_HOME);state=STATE_WEATHER;
+    int before=widget_place_sel[1];weather_app_key(SDLK_LEFT,&state);assert(widget_place_sel[1]!=before);
+    int selected_place=widget_place_sel[1];
+    weather_app_key(SDLK_DOWN,&state);assert(weather_app_sel==WEATHER_FOCUS_HOURLY);
+    weather_app_key(SDLK_RIGHT,&state);assert(weather_hourly_sel==1&&widget_place_sel[1]==selected_place);
+    weather_app_key(SDLK_DOWN,&state);assert(weather_app_sel==WEATHER_FOCUS_SETTINGS);
+    weather_app_key(SDLK_LEFT,&state);assert(widget_place_sel[1]==selected_place);
+    weather_app_key(SDLK_RETURN,&state);assert(state==STATE_WEATHER_SETTINGS);
+    weather_settings_sel=3;weather_settings_key(SDLK_RIGHT,&state);assert(weather_settings_dirty);
+    weather_settings_key(SDLK_ESCAPE,&state);assert(state==STATE_WEATHER_SETTINGS&&weather_settings_confirm_pending);
+    weather_settings_key(SDLK_RETURN,&state);assert(state==STATE_WEATHER&&!weather_settings_confirm_pending);
+    assert(weather_wallpaper_enabled!=original_wallpaper);
+    weather_wallpaper_enabled=original_wallpaper;save_settings();
+}
+
 static void test_puzzle_art_filter(void) {
     SDL_Surface *s=SDL_CreateRGBSurfaceWithFormat(0,96,64,32,SDL_PIXELFORMAT_RGBA32);
     assert(s);
@@ -46,7 +141,12 @@ static void test_crossing_world(SDL_Renderer *ren) {
     mgx_road_reset();
     for(int row=0;row<1200;row++) {
         int zone=mgx_road_zone(row),kind=mgx_road_kind(row);zones|=1u<<zone;
-        if(row%6==0)assert(kind==MGX_LAND);
+        /* Sections are no longer a fixed six rows -- they vary so the player
+           cannot count to the next safe strip -- but every one of them still
+           opens with a guaranteed safe planning row. */
+        int local=-1,len=0;mgx_road_section_at(row,&local,&len);
+        assert(local>=0&&local<len&&len>=7&&len<=15);
+        if(local==0)assert(kind==MGX_LAND);
         if(kind==MGX_FOREST||kind==MGX_BUILD||kind==MGX_BRIDGE) {
             int passable=0;
             for(int x=30;x<=WIN_W-30;x+=2)if(!mgx_road_fixed_blocked(row,(float)x)){passable=1;break;}
@@ -70,8 +170,17 @@ static void test_crossing_world(SDL_Renderer *ren) {
     assert(zones==((1u<<(MGX_ZONE_BRIDGE+1))-1u));
     for(int row=0;row<12;row++)
         assert(mgx_road_zone(row)==MGX_ZONE_ROADS||mgx_road_zone(row)==MGX_ZONE_WOODS);
-    mgx_road.farthest=0;float early=mgx_road_speed(13);
-    mgx_road.farthest=220;assert(mgx_road_speed(13)>early);
+    /* Traffic escalates with how deep the ROW is, not with how far the
+       runner has got. The old contract here was the bug: it let one row's
+       cars change speed mid-run, which re-placed every hazard on the board
+       the instant the player stepped forward. */
+    {
+        float shallow=mgx_road_speed(13),deep=mgx_road_speed(213);
+        assert(deep>shallow);
+        mgx_road.farthest=0;   float still=mgx_road_speed(13);
+        mgx_road.farthest=220; assert(mgx_road_speed(13)==still);
+        mgx_road.farthest=0;
+    }
     crossing_capture_zone(ren,MGX_ZONE_RIVER,"crossing-river");
     crossing_capture_zone(ren,MGX_ZONE_STATION,"crossing-railroad");
     crossing_capture_zone(ren,MGX_ZONE_CONSTRUCTION,"crossing-construction");
@@ -85,18 +194,33 @@ static int fish_find_drop(int kind) {
     return -1;
 }
 
+/* Start a run deterministically: no saved hatches, so the pre-level helper
+   picker (which needs two discovered helpers to be worth showing) is skipped
+   and the level begins straight away. */
+static void fish_begin(void) {
+    mgx_fish_reset();
+    mgx_fish.helpers = 0;
+    mgx_fish_key(SDLK_RETURN);
+    assert(!mgx_fish.picking);
+    mgx_fish.intro = 0;
+}
+
 static void test_fish_campaign(void) {
     /* Feeding is physical: food appears at the cursor, is consumed by a
        nearby fish, heals it, and grows it. */
-    mgx_fish_reset();mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;int cash=mgx_fish.coins;
+    fish_begin();int cash=mgx_fish.coins;
     mgx_fish.x=mgx_fish.fish[0].x;mgx_fish.y=mgx_fish.fish[0].y;
-    mgx_fish.fish[0].hunger=1;mgx_fish.fish[0].hp=1;
+    /* `hunger` now counts UP: seconds since the last meal. Six is "very
+       hungry", not "nearly full". */
+    mgx_fish.fish[0].hunger=6;mgx_fish.fish[0].hp=1;
     int old_growth=mgx_fish.fish[0].growth;mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;
-    int food=fish_find_drop(MGX_RES_FOOD);assert(food>=0&&mgx_fish.coins==cash-10);
+    int food=fish_find_drop(MGX_RES_FOOD);
+    assert(food>=0&&mgx_fish.coins==cash-mgx_fish_food_cost());
     mgx_fish.drops[food].x=mgx_fish.fish[0].x;mgx_fish.drops[food].y=mgx_fish.fish[0].y;
     mgx_fish.last=SDL_GetTicks()-20;mgx_fish_step(0,0);
     assert(!mgx_fish.drops[food].active&&mgx_fish.fish[0].growth==old_growth+1&&
-           mgx_fish.fish[0].hunger>1&&mgx_fish.fish[0].hp==2);
+           mgx_fish.fish[0].hunger<1&&mgx_fish.fish[0].hp==2);
+    assert(mgx_fish_hunger_stage(&mgx_fish.fish[0])==0);
 
     /* A resource gets exactly its two-second rescue window only after it
        reaches the floor. */
@@ -108,13 +232,13 @@ static void test_fish_campaign(void) {
     mgx_fish_step(0,0);assert(!mgx_fish.drops[drop].active);
 
     /* The first invasion occurs after ninety active seconds, even on level one. */
-    mgx_fish_reset();mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish.clock=89;
+    fish_begin();mgx_fish.clock=89;
     mgx_fish.last=SDL_GetTicks()-20;mgx_fish_step(0,0);assert(!mgx_fish_monsters_alive());
     mgx_fish.clock=90;mgx_fish.last=SDL_GetTicks()-20;mgx_fish_step(0,0);
     assert(mgx_fish_monsters_alive()==1);
 
     /* Contact damages before it kills, making health meaningful. */
-    mgx_fish_reset();mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish_spawn_monster();
+    fish_begin();mgx_fish_spawn_monster();
     int hp=mgx_fish.fish[0].hp,before=mgx_fish_alive();
     mgx_fish.monster[0].target=0;mgx_fish.monster[0].retarget=10;
     mgx_fish.monster[0].x=mgx_fish.fish[0].x;mgx_fish.monster[0].y=mgx_fish.fish[0].y;
@@ -130,7 +254,7 @@ static void test_fish_campaign(void) {
     /* Shots always repel away from the cursor's impact direction. */
     static const float direction[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
     for(int d=0;d<4;d++) {
-        mgx_fish_reset();mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish_spawn_monster();
+        fish_begin();mgx_fish_spawn_monster();
         MgxFishMonster *m=&mgx_fish.monster[0];m->x=320;m->y=250;m->hp=m->max_hp=100;
         mgx_fish.x=m->x-direction[d][0]*30;mgx_fish.y=m->y-direction[d][1]*30;
         mgx_fish.last_shot=0;mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;
@@ -157,7 +281,7 @@ static void test_fish_campaign(void) {
     assert(mgx_fish_resource_kind(MGX_PET_CRAB)<0&&
            mgx_fish_resource_value(MGX_PET_SHARK)>mgx_fish_resource_value(MGX_PET_ANGEL));
 
-    mgx_fish_reset();mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish.chapter=7;mgx_fish.helpers=6;
+    fish_begin();mgx_fish.stage=7;mgx_fish.helpers=6;
     mgx_fish.coins=1000;mgx_fish.shop_type=MGX_PET_SHARK;int fish_count=mgx_fish_alive();
     mgx_fish_key(SDLK_s);assert(mgx_fish_alive()==fish_count+1);
     int sharks=0;for(int i=0;i<MGX_FISH_MAX;i++)
@@ -168,16 +292,16 @@ static void test_fish_campaign(void) {
 static void test_sleep_screens(SDL_Renderer *ren) {
     static const int modes[] = {
         SCREEN_SAVER_BOUNCE, SCREEN_SAVER_STARFIELD,
-        SCREEN_SAVER_AQUARIUM, SCREEN_SAVER_SYSTEM_DREAM
+        SCREEN_SAVER_AQUARIUM, SCREEN_SAVER_SYSTEM_DREAM, SCREEN_SAVER_WEATHER
     };
     static const char *shots[] = {
-        "sleep-dvd-bounce", "sleep-starfield", "sleep-aquarium", "sleep-system-dream"
+        "sleep-dvd-bounce", "sleep-starfield", "sleep-aquarium", "sleep-system-dream", "sleep-weather"
     };
-    assert(SCREEN_SAVER_COUNT==6);
+    assert(SCREEN_SAVER_COUNT==7);
     assert(!strcmp(screen_saver_names[SCREEN_SAVER_OFF],"Off"));
     assert(!strcmp(screen_saver_names[SCREEN_SAVER_RANDOM],"Random"));
     srand(0x129);
-    for(int i=0;i<4;i++) {
+    for(int i=0;i<5;i++) {
         screen_saver_idx=modes[i];screen_saver_begin();
         assert(screen_saver_active&&screen_saver_runtime==modes[i]);
         Uint32 now=SDL_GetTicks();
@@ -203,12 +327,13 @@ static void test_sleep_screens(SDL_Renderer *ren) {
     for(int i=0;i<96;i++) {
         screen_saver_begin();
         assert(screen_saver_runtime>=SCREEN_SAVER_BOUNCE&&
-               screen_saver_runtime<=SCREEN_SAVER_SYSTEM_DREAM);
+               screen_saver_runtime<=SCREEN_SAVER_WEATHER);
         seen|=1u<<screen_saver_runtime;
         screen_saver_wake();
     }
     assert(seen==((1u<<SCREEN_SAVER_BOUNCE)|(1u<<SCREEN_SAVER_STARFIELD)|
-                  (1u<<SCREEN_SAVER_AQUARIUM)|(1u<<SCREEN_SAVER_SYSTEM_DREAM)));
+                  (1u<<SCREEN_SAVER_AQUARIUM)|(1u<<SCREEN_SAVER_SYSTEM_DREAM)|
+                  (1u<<SCREEN_SAVER_WEATHER)));
     screen_saver_idx=SCREEN_SAVER_BOUNCE;
 }
 /* Runs the actual gameplay/transport code on two devices without opening a
@@ -259,7 +384,31 @@ static int test_nearby(int role) {
 #include "test_systems_dropdown.h"
 #include "test_sound_options.h"
 #include "test_surprise_art_odds.h"
+#include "test_weather_polish_131.h"
+#include "test_art_scroll_131.h"
+#include "test_widget_focus_131.h"
+#include "test_apps_page_131.h"
+#include "test_runner_gravity_131.h"
+#include "test_art_async_131.h"
+#include "test_weather_polish_2_131.h"
+#include "test_fish_helpers_131.h"
+#include "test_forecast_modes_131.h"
+#include "test_fish_campaign_131.h"
+#include "test_fish_reef_131.h"
+#include "test_crossing_fairness_131.h"
+#include "test_fish_pause_131.h"
+#include "test_messages_131.h"
+#include "test_single_card_131.h"
+#include "test_settings_pages_131.h"
+#include "test_fish_playable_131.h"
+#include "test_wildkins_131.h"
 int main(int argc,char **argv) {
+    // Only the Crazy Fish simulated players -- for measuring a rules change
+    // against the previous rules, without the rest of the suite in the way.
+    if(argc==2&&!strcmp(argv[1],"--fishplay")){
+        char temporary[]="/tmp/snapfe-fishplay-XXXXXX";assert(mkdtemp(temporary));assert(!setenv("SNAPFE_DATA_ROOT",temporary,1));
+        assert(SDL_Init(SDL_INIT_TIMER)==0);test_fish_playable_131();SDL_Quit();return 0;
+    }
 #ifdef SNAPOS_TARGET_KNULLI
     if(argc==2&&!strcmp(argv[1],"--widget-smoke")){
         char temporary[]="/tmp/snapfe-widget-check-XXXXXX";assert(mkdtemp(temporary));assert(!setenv("SNAPFE_DATA_ROOT",temporary,1));
@@ -269,7 +418,7 @@ int main(int argc,char **argv) {
         assert(widget_place_time(0,0).tm_hour==9);widget_places_loaded=0;widget_places_init();assert(!strcmp(widget_place_name(0),"Tokyo"));
         widget_place_group=1;widget_place_search("Phonix");assert(widget_place_result_count>0);widget_places_key(SDLK_RETURN,&state);assert(strstr(weather_loc,"Phoenix"));
         int rows[MAX_DISPLAY_ROWS],extra[MAX_DISPLAY_ROWS];disp_grp_view_open=1;int n=build_display_rows(rows,extra),headers=0;
-        for(int i=0;i<n;i++)if(rows[i]==ROW_DISP_GRP_VIEW){headers++;assert(i+1<n&&rows[i+1]==ROW_DISP_SHOW_EMPTY);}assert(headers==1);
+        for(int i=0;i<n;i++)if(rows[i]==ROW_DISP_GRP_VIEW){headers++;assert(i+1<n&&rows[i+1]==ROW_DISP_SYS_VIEW);}assert(headers==1);
         printf("PASS: %d installed city choices, typo selection, saved Tokyo clock, Phoenix weather, single Systems View group\n",wloc_count);
         for(int i=0;i<SCREEN_SAVER_DURATION_COUNT;i++){
             screen_saver_duration_idx=i;save_settings();screen_saver_duration_idx=-1;load_settings();
@@ -278,7 +427,7 @@ int main(int argc,char **argv) {
             assert(screen_saver_should_sleep(1000u+screen_saver_duration_ms()));screen_saver_wake();
             assert(!screen_saver_should_sleep(1000000u));
         }
-        puts("PASS: all six sleep-screen preferences persist and use the correct sleep deadline");
+        puts("PASS: all seven sleep-screen preferences persist and use the correct sleep deadline");
         test_battery_led();
         test_battery_prompt();
         IMG_Init(IMG_INIT_PNG|IMG_INIT_JPG);test_surprise_art_odds();IMG_Quit();
@@ -374,7 +523,13 @@ int main(int argc,char **argv) {
     if(argc==2&&!strcmp(argv[1],"--sleep-screens")) {
         test_sleep_screens(ren);text_cache_clear();
         SDL_DestroyRenderer(ren);SDL_DestroyWindow(w);
-        puts("PASS: every fixed sleep screen renders; Random resolves only to all four live modes; wake state resets");
+        puts("PASS: every fixed sleep screen renders; Random resolves only to all five live modes; wake state resets");
+        return 0;
+    }
+    if(argc==2&&!strcmp(argv[1],"--weather-ui")) {
+        test_weather_ui(w,ren);text_cache_clear();
+        SDL_DestroyRenderer(ren);SDL_DestroyWindow(w);
+        puts("PASS: Weather data cache, controls, save confirmation, and 640x480 / 720x480 style renders");
         return 0;
     }
     Theme originals[THEME_COUNT];memcpy(originals,themes,sizeof originals);
@@ -509,6 +664,16 @@ int main(int argc,char **argv) {
     mgx_menu_enter();mgx_render_menu(ren);capture(ren,"minigames");
     mgx_runner_reset();mgx_runner_render(ren);capture(ren,"runner");
     mgx_road_reset();mgx_road_render(ren);capture(ren,"crossing");
+    /* The runner picker, and the two games whose stat line used to be drawn
+       through something else. */
+    mgx_road_reset();mgx_road_choosing=1;mgx_road_char_pick=3;
+    mgx_road_render(ren);capture(ren,"crossing-picker");mgx_road_choosing=0;
+    mgx_flap_reset();fb.started=1;fb.score=17;mgx_flap_gold_count=6;
+    mgx_flap_render(ren);capture(ren,"flap-gold");
+    brk_reset();bo.level=3;bo.score=1250;bo.lives=2;bo.started=1;bo.bvx=1;bo.bvy=-1;
+    brk_render(ren);capture(ren,"breakout-hud");
+    /* Nothing a game draws for itself may reach up into the title row. */
+    assert(fb.top>MG_STAT_BOTTOM&&bo.top>MG_STAT_BOTTOM);
     test_crossing_world(ren);
     mgx_swap_pick(ren);mgx_swap_render(ren);capture(ren,"puzzle-difficulty");
     { SDL_Surface *art=SDL_CreateRGBSurfaceWithFormat(0,360,240,32,SDL_PIXELFORMAT_ARGB8888);assert(art);
@@ -521,13 +686,14 @@ int main(int argc,char **argv) {
     mgx_react_reset();mgx_react_render(ren);capture(ren,"reaction");
     mgx_tank_reset();mgx_tank_key(SDLK_RETURN);mgx_tank.map_choice=3;mgx_tank_render(ren);capture(ren,"tank-map-select");
     for(int map=0;map<MGX_TANK_MAP_COUNT;map++){mgx_tank.map=map;mgx_tank_round();assert(mgx_tank_clear(mgx_tank.x[0],mgx_tank.y[0]));assert(mgx_tank_clear(mgx_tank.x[1],mgx_tank.y[1]));}
-    mgx_fish_reset();mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish_spawn_monster();mgx_fish.x=mgx_fish.monster[0].x;mgx_fish.y=mgx_fish.monster[0].y;mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish_render(ren);capture(ren,"aquarium-combat");
+    fish_begin();mgx_fish_spawn_monster();mgx_fish.x=mgx_fish.monster[0].x;mgx_fish.y=mgx_fish.monster[0].y;mgx_fish_key(SDLK_RETURN);mgx_fish.intro=0;mgx_fish_render(ren);capture(ren,"aquarium-combat");
     theme_editor_open(custom);theme_editor_draw(ren,font_small,font_label,WIN_W,WIN_H);capture(ren,"theme-editor-custom");
     test_sleep_screens(ren);
     draw_theme_background(ren,&themes[theme_idx],theme_idx);draw_screen_power_page(ren,&themes[theme_idx]);capture(ren,"screen-power");
     draw_boot_sequence(ren,7000,"Preparing artwork",.75f);capture(ren,"boot");
     g_boot_quote_seed=12;draw_boot_sequence(ren,8500,"Ready",1);capture(ren,"boot-long-quote");
     syshelp_open(0);syshelp_draw(ren,&themes[theme_idx],0);capture(ren,"computer-controls");
+    art_async_start();   /* the real background decoder, as the frontend runs it */
     test_continued_129(ren);
     test_friends_129(ren);
     test_assets_129();
@@ -543,9 +709,32 @@ int main(int argc,char **argv) {
     test_location_catalog();
     test_widget_places(ren);
     test_weather_refresh();
+    test_weather_ui(w,ren);
+    test_weather_polish_131(ren);
+    test_art_scroll_131();
+    test_widget_focus_131();
+    test_widget_place_merge_131();
+    test_widget_focus_hint_131(ren);
+    test_apps_page_131(ren);
+    test_runner_gravity_131();
+    test_art_async_131();
+    test_weather_polish_2_131(ren);
+    test_fish_helpers_131(ren);
+    test_forecast_modes_131(ren);
+    test_fish_campaign_131(ren);
+    test_fish_reef_131(ren);
+    test_crossing_fairness_131();
+    test_fish_pause_131(ren);
+    test_messages_131(ren);
+    test_single_card_131(ren);
+    test_settings_pages_131(ren);
+    test_wildkins_131();
     test_systems_dropdown(ren);
     test_sound_options(ren);
     test_surprise_art_odds();
+    // Last: it plays whole levels, and a cleared level saves campaign progress.
+    test_fish_playable_131();
+    art_async_stop();
     mgx_swap_close();mgx_net_close();text_cache_clear();
     SDL_DestroyRenderer(ren);SDL_DestroyWindow(w);
     puts("PASS: custom theme delete/compaction; boot greeting/quote; blank-safe square puzzles + retained difficulty; fair 12-zone endless crossing; pack-aware SVG no-art; aquarium resource/feeding/health/targeting/knockback/shark; B-button reaction; five tank maps; all sleep screens; UI render smoke tests");

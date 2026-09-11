@@ -1,0 +1,47 @@
+Snap FE Alpha 1.3.1
+
+For Knulli on Allwinner H700 handhelds (tested on RG34XX-SP and RG35XX-SP).
+A frontend add-on; it does not replace or reflash Knulli.
+
+NEW
+- Wildkins: a new full-screen creature-befriending adventure, included as its
+  own app. Open it from the Apps page (pin it to Home if you like) or PORTS.
+- Weather app: current conditions, hourly / daily / weekly forecast (L1/R1),
+  saved locations, and Weather Settings (styles, wallpaper and sleep-screen
+  weather, alerts, auto location).
+- Apps page: every app in one place. You choose which ones are pinned to Home.
+- SNAP Chat: message nearby Snap FE devices in rooms or directly, drawings too.
+- Mini-games: Pocket Crossing; a Crazy Fish reef campaign with chapters, bonus
+  rounds, shells, a rare reef and its own pause menu; Pulse Runner gravity
+  stages.
+
+IMPROVED
+- Game artwork loads in the background and preloads around the cursor, so
+  large libraries scroll more smoothly.
+- Each settings group opens as its own page, with one shared Save / Don't Save
+  prompt.
+- Home place widgets hold up to five saved places and correct typed city names.
+- Smoother Pong and Connect Four link play between two devices.
+- The Single Card panel is sized to its text and centered.
+
+FIXED
+- Weather finds places saved as plain text, such as "Prescott Arizona".
+- Switching weather locations no longer starts a download; X refreshes. Good
+  data is kept when a refresh fails.
+- Boot no longer leaves the bottom of Knulli's last frame on screen.
+- Pocket Crossing hazards no longer jump onto a player who moved.
+- With a Snap Friend connected, games that can't be linked (anything but
+  GB / GBC / GBA) launch without scanning the ROM folders first.
+
+INSTALL OR UPDATE
+1. Download SnapFE-Alpha-1.3.1.zip from this release's Assets (not the Source
+   code archive). SHA256SUMS-1.3.1.txt verifies it.
+2. New Knulli card: boot it once first so it creates SHARE, then power off.
+3. Put the card in your PC and extract the ZIP directly onto SHARE. Choose
+   Merge / Replace. Do not delete SHARE/system/snapos first.
+4. Boot, open PORTS, and run "Snap FE (Set As Default)" once.
+
+The package has no ROMs, BIOS, saves, settings, favorites, account keys or
+scraped art, so an update keeps yours. Wildkins saves in SHARE/saves/wildkins
+are kept. Bundled artwork with the same filename is replaced, so back up any
+you customized. Full steps: INSTALL.txt and UPDATING.md in the ZIP.

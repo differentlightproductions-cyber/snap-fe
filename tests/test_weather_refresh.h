@@ -64,6 +64,9 @@ static void test_weather_refresh(void) {
     assert(strstr(reply,"88")&&strstr(reply,"Clear")&&rise==376&&set==1141);
     assert(weather_parse_reply("-8\xc2\xb0" "C Snow|07:30|17:10",reply,&rise,&set));
     assert(strstr(reply,"-8")&&rise==450&&set==1030);
+    assert(weather_parse_reply("SNAPWEATHER 1\nsummary=81F Clear\ncondition=Clear\nfeels=79F\nhigh=86F\nlow=66F\nprecip=5%\nwind=8 mph\nhumidity=29%\nplace=Phoenix, Arizona\nupdated=Tue 10:30\nalert_level=1\nalert=Wind gusts possible\nhourly=Now 81F Clear;1p 84F Sunny\nDaily=ignored\nsunrise=06:10\nsunset=18:42\n",reply,&rise,&set));
+    assert(strstr(reply,"81F")&&strstr(g_weather_condition,"Clear")&&strstr(g_weather_place,"Phoenix")&&
+           g_weather_alert_level==1&&g_weather_hourly_count==2&&rise==370&&set==1122);
     const char *bad[]={"","<html>500 server error</html>","Unknown location","HTTP/1.1 500 Internal Server Error","+88\xc2\xb0" "F "};
     for(size_t i=0;i<sizeof bad/sizeof bad[0];i++)assert(!weather_parse_reply(bad[i],reply,&rise,&set));
     weather_stop();int saved_unit=weather_unit;
@@ -103,6 +106,18 @@ static void test_weather_refresh(void) {
     }while(SDL_GetTicks()-queue_started<4000);
     assert(!weather_thread&&!weather_force_pending&&!weather_refreshing()&&weather_test_requests(temporary)==before_queue+2);
     widget_place_select(1,2);weather_read();assert(strstr(g_weather_str,"95"));
+    // Repeated X/A refreshes for the current city must not disappear while
+    // that same city's first request is still running.
+    int same_before=weather_test_requests(temporary);weather_kick(1);
+    in_flight=weather_thread;assert(in_flight&&weather_refreshing());weather_kick(1);
+    assert(weather_thread==in_flight&&weather_force_pending&&!strcmp(weather_force_query,weather_loc));
+    Uint32 same_started=SDL_GetTicks();
+    do {
+        weather_poll();weather_read();weather_kick(0);
+        if(!weather_thread&&!weather_force_pending&&weather_test_requests(temporary)>=same_before+2)break;
+        SDL_Delay(5);
+    }while(SDL_GetTicks()-same_started<4000);
+    assert(!weather_thread&&!weather_force_pending&&weather_test_requests(temporary)==same_before+2);
     // An in-flight Fahrenheit request may finish after the Celsius selection.
     weather_kick(1);weather_unit=1;widget_weather_restore();weather_kick(1);
     weather_test_wait_reading("35","95");

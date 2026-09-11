@@ -27,6 +27,12 @@ RELEASE="${1:-$SOURCE_VERSION}"
   echo "Release version must match main.c ($SOURCE_VERSION)." >&2; exit 1;
 }
 VER="Alpha-${RELEASE}"
+# The short what's-new list ships in the ZIP and is pasted into GitHub.
+NOTES="RELEASE-NOTES-${RELEASE}.txt"
+[[ -f "$NOTES" ]] || { echo "missing $NOTES (new features and fixes for this release)" >&2; exit 1; }
+# Wildkins ships inside SNAP FE as its own app, from its sibling checkout.
+WILDKINS_DIR="${WILDKINS_DIR:-$(cd ../.. && pwd)/wildkins}"
+[[ -f "$WILDKINS_DIR/tools/stage-release.py" ]] || { echo "missing Wildkins at $WILDKINS_DIR (set WILDKINS_DIR)" >&2; exit 1; }
 STAGE="$(mktemp -d)"
 DEST="$STAGE/system/snapos"
 PORTS="$STAGE/roms/ports"
@@ -50,6 +56,7 @@ cp "$BIN" "$DEST/snapos_ui"
 cp scrape_boxart.py "$DEST/"
 cp background_browser.py "$DEST/"
 cp ra_achievements.py "$DEST/"
+cp weather_service.py "$DEST/"
 cp brightness-hotkey.sh "$DEST/"
 cp volume-gate.sh "$DEST/"
 cp knulli/custom.sh "$DEST/snapos-custom.sh"          # staged; 'Set As Default' installs it
@@ -105,7 +112,15 @@ cp knulli/port-set-default.sh "$PORTS/Snap FE (Set As Default).sh"
 cp knulli/port-restore-es.sh "$PORTS/Snap FE (Restore EmulationStation).sh"
 chmod 0755 "$PORTS/"*.sh "$DEST/snapos_ui" "$DEST"/*.sh "$DEST"/*.py "$DEST/cores/"*.so
 
+# --- Wildkins ----------------------------------------------------------------
+# Its release build, in exactly the layout its device installer activates:
+# roms/ports/Wildkins.sh -> roms/ports/wildkins/versions/<manifest>/run-game.py.
+# The stager refuses a development build or one older than its sources. Player
+# saves live in /userdata/saves/wildkins and are never part of the package.
+python3 "$WILDKINS_DIR/tools/stage-release.py" "$STAGE" || { rm -rf "$STAGE"; exit 1; }
+
 # --- instructions ----------------------------------------------------------
+cp "$NOTES" "$STAGE/WHATS-NEW.txt"
 cp knulli/INSTALL.txt "$STAGE/INSTALL.txt"
 cp UPDATING.md "$STAGE/UPDATING.md"
 cp USER-FOLDERS.md COMPUTER-CONTROLS.md BOOT-QUOTE-SOURCES.md "$STAGE/"
@@ -158,8 +173,11 @@ with zipfile.ZipFile(sys.argv[1]) as z:
         'roms/ports/Snap FE.sh',
         'roms/ports/Snap FE (Set As Default).sh',
         'roms/ports/Snap FE (Restore EmulationStation).sh',
+        'roms/ports/Wildkins.sh',
+        'roms/ports/wildkins/.wildkins-managed',
         'INSTALL.txt',
         'UPDATING.md',
+        'WHATS-NEW.txt',
     }
     missing = sorted(required - names)
     wrapped = [n for n in names if n.startswith('SnapFE-Alpha-')]

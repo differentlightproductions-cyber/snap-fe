@@ -59,6 +59,9 @@ static void sf_request(int peer,int type,int game){
 static int sf_offer_regular(const char *path,const char *title,const char *system){
     if(sf_bypass){sf_bypass=0;return 0;}
     if(!sf_online(sf_find(sf.connected)))return 0;
+    /* Only GBA/GBC/GB can be played together. Anything else launches straight
+       away instead of walking every ROM folder on the card first. */
+    {int lp=platform_of_path(path);if(lp<0||lp>2)return 0;}
     link_scan_games();
     for(int i=0;i<link_game_count;i++)if(!strcmp(link_games[i].path,path)){
         sf_offer=1000+i;snprintf(sf_solo_path,sizeof sf_solo_path,"%s",path);snprintf(sf_solo_title,sizeof sf_solo_title,"%s",title);snprintf(sf_solo_system,sizeof sf_solo_system,"%s",system);return 1;
