@@ -2,7 +2,7 @@ param(
     [ValidateSet('audit','draft','upload','publish','verify','replace')]
     [string]$Mode='audit',
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '1.3.2',
+    [string]$Version = '1.3.2.1',
     [string]$Commit
 )
 $ErrorActionPreference = 'Stop'

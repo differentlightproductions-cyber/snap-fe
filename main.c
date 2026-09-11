@@ -27,7 +27,7 @@
 #include <sys/mman.h>
 #endif
 
-#define SNAPFE_VERSION "Alpha Build 1.3.2"
+#define SNAPFE_VERSION "Alpha Build 1.3.2.1"
 
 // ---------------------------------------------------------------------------
 // Install-target paths. Desktop dev keeps everything under ~/snapos-ui.

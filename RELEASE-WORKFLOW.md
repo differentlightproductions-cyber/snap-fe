@@ -14,7 +14,7 @@ cd "/mnt/c/Users/NickO/Desktop/Downloads/SNAP OS Backup/snapos-backup/wildkins"
 bash tools/build-h700.sh
 cd "/mnt/c/Users/NickO/Desktop/Downloads/SNAP OS Backup/snapos-backup/bugfix-work/repo-publish"
 bash ./build-knulli.sh --sysroot /home/nick/knulli-sysroot --cc /usr/bin/aarch64-linux-gnu-gcc
-bash ./knulli/package.sh 1.3.2
+bash ./knulli/package.sh 1.3.2.1
 ```
 
 `package.sh` validates the archive, writes its checksum and `dist/latest.json`,
@@ -55,5 +55,5 @@ release assets. The Markdown release notes are pasted into GitHub's description.
 To recreate or reopen a folder without repackaging, run in PowerShell:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\prepare-release-windows.ps1 -Version 1.3.2 -OpenFolder
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\prepare-release-windows.ps1 -Version 1.3.2.1 -OpenFolder
 ```
